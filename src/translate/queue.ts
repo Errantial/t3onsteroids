@@ -1,6 +1,7 @@
 export class BoundedAsyncQueue<T> {
   private readonly items: T[] = [];
   private readonly waiters: Array<(value: T) => void> = [];
+  private highWaterValue = 0;
 
   constructor(readonly capacity: number) {
     if (!Number.isInteger(capacity) || capacity < 1) throw new Error("capacity must be a positive integer");
@@ -8,6 +9,10 @@ export class BoundedAsyncQueue<T> {
 
   get size(): number {
     return this.items.length;
+  }
+
+  get highWater(): number {
+    return this.highWaterValue;
   }
 
   push(value: T): boolean {
@@ -18,6 +23,7 @@ export class BoundedAsyncQueue<T> {
     }
     if (this.items.length >= this.capacity) return false;
     this.items.push(value);
+    this.highWaterValue = Math.max(this.highWaterValue, this.items.length);
     return true;
   }
 

@@ -13,7 +13,9 @@ const extensionHealth = {
     "provider-project-resolve-v1": 1,
     "provider-assistant-content-v1": 1,
     "provider-session-policy-v1": 1,
+    "provider-turn-drain-v1": 1,
   },
+  providerExtension: { apiVersion: 1, buildId: "a".repeat(40) },
 };
 
 function json(value: unknown, status = 200): Response {
@@ -23,6 +25,7 @@ function json(value: unknown, status = 200): Response {
 describe("Phase 7 release readiness", () => {
   it("keeps the supported release lane explicitly pinned and single-turn", () => {
     expect(releaseReadiness()).toEqual({
+      bridgeVersion: "1.0.0",
       supportedConcurrency: 1,
       platform: "win32-x64",
       t3Pinned: true,

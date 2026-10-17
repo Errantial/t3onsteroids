@@ -41,11 +41,33 @@ describe("Phase 3 ACP shell and lazy binding", () => {
     expect(controller.send).not.toHaveBeenCalled();
   });
 
+  it("always negotiates the shipped stable ACP v1 response even when the client requests numeric version 2", () => {
+    const runtime = new AcpBridgeRuntime({
+      controller: makeController(),
+      store: new MemoryStateStore<SessionState>(),
+    });
+
+    expect(runtime.initialize(2)).toMatchObject({
+      protocolVersion: 1,
+      agentCapabilities: { promptCapabilities: {}, sessionCapabilities: { resume: {} } },
+    });
+  });
+
   it("rejects additionalDirectories before any controller mutation", async () => {
     const controller = makeController();
     const runtime = new AcpBridgeRuntime({ controller, store: new MemoryStateStore<SessionState>(), makeUuid: () => sessionId });
     expect(() => runtime.newSession({ cwd: "C:\\repo", mcpServers: [], additionalDirectories: ["C:\\other"] })).toThrowError(BridgeError);
     await expect(runtime.resumeSession({ sessionId, cwd: "C:\\repo", additionalDirectories: ["C:\\other"] })).rejects.toMatchObject({ code: "additional_directories_unsupported" });
+    expect(controller.send).not.toHaveBeenCalled();
+  });
+
+  it("rejects nonempty MCP forwarding because v1 does not advertise or implement it", async () => {
+    const controller = makeController();
+    const runtime = new AcpBridgeRuntime({ controller, store: new MemoryStateStore<SessionState>(), makeUuid: () => sessionId });
+    expect(() => runtime.newSession({
+      cwd: "C:\\repo",
+      mcpServers: [{ name: "unsupported", command: "example", args: [], env: [] }],
+    })).toThrowError(BridgeError);
     expect(controller.send).not.toHaveBeenCalled();
   });
 

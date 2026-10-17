@@ -1,6 +1,6 @@
 {
   "name": "t3onsteroids",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "T3 Code compatibility bridge for Chat On Steroids",
   "type": "module",
@@ -24,11 +24,12 @@
     "@agentclientprotocol/sdk": "1.9.0"
   },
   "devDependencies": {
-    "@eslint/js": "9.37.0",
+    "@eslint/js": "9.39.5",
     "@types/node": "24.7.2",
-    "eslint": "9.37.0",
+    "eslint": "9.39.5",
     "typescript": "5.9.3",
-    "typescript-eslint": "8.46.1",
-    "vitest": "3.2.4"
+    "typescript-eslint": "8.71.2",
+    "vite-node": "6.0.0",
+    "vitest": "5.0.5"
   }
 }

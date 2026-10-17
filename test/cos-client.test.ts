@@ -33,6 +33,25 @@ describe("CoS protocol-1 controller client", () => {
     expect(discovered).toEqual({ baseUrl: "http://127.0.0.1:4567", token: "super-secret-token", pid: 42, startedAt: undefined });
     await writeFile(join(control, "endpoint.json"), JSON.stringify({ url: "https://example.com" }));
     await expect(discoverCosController(dir)).rejects.not.toThrow(/super-secret-token/);
+
+    await writeFile(join(control, "endpoint.json"), "{not-json");
+    await expect(discoverCosController(dir)).rejects.toMatchObject({ code: "schema_mismatch" });
+    await writeFile(join(control, "endpoint.json"), JSON.stringify({ url: "::not-a-url::" }));
+    await expect(discoverCosController(dir)).rejects.toMatchObject({ code: "schema_mismatch" });
+    await writeFile(join(control, "endpoint.json"), JSON.stringify({ url: "http://u:p@127.0.0.1:4567/base?x#y" }));
+    await expect(discoverCosController(dir)).rejects.toMatchObject({ code: "schema_mismatch" });
+  });
+
+  it("wraps malformed JSON responses deterministically without leaking response bodies", async () => {
+    const fetch = vi.fn(async () => new Response("raw-secret-body", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "token-secret" }), { fetch });
+    const failure = await client.health().catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "schema_mismatch" });
+    expect(String((failure as Error).message)).not.toContain("raw-secret-body");
+    expect(String((failure as Error).message)).not.toContain("token-secret");
   });
 
   it("refreshes endpoint/token after auth rotation on safe reads", async () => {
@@ -61,12 +80,24 @@ describe("CoS protocol-1 controller client", () => {
         postCount += 1;
         throw new TypeError("socket closed after dispatch");
       }
-      if (text.includes("/v1/inputs?id=")) return jsonResponse([{ id, sessionId: id, delivery: "sent" }]);
+      if (text.endsWith("/v1/inputs?limit=500")) return jsonResponse({ inputs: [{ id, sessionId: id, delivery: "sent" }], total: 1 });
       throw new Error(`unexpected ${text}`);
     });
     const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch });
     await expect(client.send({ id, text: "hello" })).resolves.toEqual({ id, sessionId: id, delivery: "sent" });
     expect(postCount).toBe(1);
+  });
+
+  it("strictly validates successful mutation response schemas", async () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const text = String(url);
+      if (text.endsWith("/v1/health")) return jsonResponse(health);
+      if (text.endsWith("/v1/inputs") && init?.method === "POST") return jsonResponse({ input: { id, sessionId: id, delivery: "sent" } });
+      throw new Error(`unexpected ${text}`);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch });
+    await expect(client.send({ id, text: "hello" })).rejects.toMatchObject({ code: "schema_mismatch" });
   });
 
   it("returns delivery_unconfirmed when ambiguous send has no authoritative row", async () => {
@@ -75,7 +106,7 @@ describe("CoS protocol-1 controller client", () => {
       const text = String(url);
       if (text.endsWith("/v1/health")) return jsonResponse(health);
       if (text.endsWith("/v1/inputs") && init?.method === "POST") throw new TypeError("timeout");
-      if (text.includes("/v1/inputs?id=")) return jsonResponse([]);
+      if (text.endsWith("/v1/inputs?limit=500")) return jsonResponse({ inputs: [], total: 0 });
       throw new Error(`unexpected ${text}`);
     });
     const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch });
@@ -85,12 +116,12 @@ describe("CoS protocol-1 controller client", () => {
   it("waits for the exact matching turn_end after Stop", async () => {
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const text = String(url);
-      if (text.includes("/stop") && init?.method === "POST") return new Response(null, { status: 202 });
+      if (text.includes("/stop") && init?.method === "POST") return jsonResponse({}, 202);
       if (text.includes("/events")) {
-        return jsonResponse([
-          { seq: 1, type: "turn_end", turnId: "stale-turn" },
-          { seq: 2, type: "turn_end", turnId: "target-turn" },
-        ]);
+        return jsonResponse({ events: [
+          { seq: 1, position: 1, time: 1, kind: "turn_end", source: "extension", turnId: "stale-turn" },
+          { seq: 2, position: 2, time: 2, kind: "turn_end", source: "extension", turnId: "target-turn" },
+        ], total: 2, nextFrom: 3 });
       }
       throw new Error(`unexpected ${text}`);
     });
@@ -115,9 +146,9 @@ describe("CoS protocol-1 controller client", () => {
       seen.push(String(url));
       call += 1;
       if (call === 1) {
-        return new Response('id: 5\ndata: {"seq":5,"type":"assistant_message"}\n\n', { status: 200, headers: { "Content-Type": "text/event-stream" } });
+        return new Response('id: 5\nevent: assistant_message\ndata: {"seq":5,"position":5,"time":5,"kind":"assistant_message","source":"extension"}\n\n', { status: 200, headers: { "Content-Type": "text/event-stream" } });
       }
-      return new Response('id: 6\ndata: {"seq":6,"type":"turn_end","turnId":"t"}\n\n', { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      return new Response('id: 6\nevent: turn_end\ndata: {"seq":6,"position":6,"time":6,"kind":"turn_end","source":"extension","turnId":"t"}\n\n', { status: 200, headers: { "Content-Type": "text/event-stream" } });
     });
     const controller = new AbortController();
     const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch }, { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 });
@@ -128,5 +159,69 @@ describe("CoS protocol-1 controller client", () => {
     }
     expect(rows.map((row) => row.seq)).toEqual([5, 6]);
     expect(seen[1]).toContain("from=6");
+  });
+
+  it("parses CRLF SSE frames and records bounded reconnect backoff", async () => {
+    let call = 0;
+    const fetch = vi.fn(async () => {
+      call += 1;
+      if (call === 1) throw new TypeError("temporary refusal");
+      return new Response('id: 7\r\nevent: turn_end\r\ndata: {"seq":7,"position":7,"time":7,"kind":"turn_end","source":"extension","turnId":"t"}\r\n\r\n', {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    });
+    const controller = new AbortController();
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 },
+    );
+    const rows = [];
+    for await (const event of client.streamEvents("session", { signal: controller.signal })) {
+      rows.push(event);
+      controller.abort();
+    }
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ seq: 7, kind: "turn_end", turnId: "t" });
+    expect(client.metrics()).toMatchObject({ sseConnectAttempts: 2, sseReconnects: 0, sseBackoffs: 1 });
+  });
+
+  it("fails closed on malformed SSE JSON", async () => {
+    const fetch = vi.fn(async () => new Response("data: {not-json}\n\n", { status: 200 }));
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch });
+    const read = async () => {
+      for await (const _event of client.streamEvents("s")) void _event;
+    };
+    await expect(read()).rejects.toMatchObject({ code: "schema_mismatch" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rolls over a long-lived SSE stream and resumes from the exact cursor", async () => {
+    const seen: string[] = [];
+    let call = 0;
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push(String(url));
+      call += 1;
+      if (call === 1) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('id: 8\ndata: {"seq":8,"position":8,"time":8,"kind":"assistant_message","source":"extension"}\n\n'));
+            init?.signal?.addEventListener("abort", () => controller.error(new DOMException("aborted", "AbortError")), { once: true });
+          },
+        });
+        return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
+      return new Response('id: 9\ndata: {"seq":9,"position":9,"time":9,"kind":"turn_end","source":"extension","turnId":"t"}\n\n', { status: 200 });
+    });
+    const abort = new AbortController();
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch }, { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1 });
+    const rows = [];
+    for await (const event of client.streamEvents("s", { signal: abort.signal, rolloverMs: 5 })) {
+      rows.push(event.seq);
+      if (event.seq === 9) abort.abort();
+    }
+    expect(rows).toEqual([8, 9]);
+    expect(seen[1]).toContain("from=9");
   });
 });

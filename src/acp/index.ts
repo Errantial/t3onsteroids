@@ -7,7 +7,23 @@ import type { ContentBlock, InitializeResponse, NewSessionRequest, NewSessionRes
 import type { CosControllerReadiness, CosInputRecord, CosSessionSummary } from "../cos/index.js";
 import { v1ProviderSessionPolicy } from "../policy/index.js";
 import { newUnboundSession, type InteractionMode, type SessionState, withInteractionMode } from "../session/index.js";
-import type { AdmissionLease, StateStore } from "../state/index.js";
+import {
+  driveProviderTurn,
+  type DriveProviderTurnResult,
+  type ProviderTurnController,
+  type ProviderTurnOutputEffect,
+} from "../translate/driver.js";
+import type { ProviderTurnTranslationState } from "../translate/events.js";
+import type {
+  AdmissionLease,
+  DurableAdmissionLease,
+  DurableSessionStore,
+  DurableSessionTransition,
+  LeaseReleaseProof,
+  StateStore,
+} from "../state/index.js";
+import type { BridgeMetrics } from "../metrics.js";
+import { BRIDGE_VERSION } from "../version.js";
 
 export const PINNED_T3_SHA = "ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8";
 export const MAX_COS_INPUT_CHARS = 64_000;
@@ -15,6 +31,7 @@ export const MAX_COS_INPUT_CHARS = 64_000;
 export type BridgeErrorCode =
   | "session_not_found"
   | "additional_directories_unsupported"
+  | "mcp_servers_unsupported"
   | "t3_prompt_contract_mismatch"
   | "unsupported_command"
   | "unsupported_prompt_content"
@@ -55,6 +72,7 @@ export interface BridgeController {
   input?(inputId: string): Promise<CosInputRecord | undefined>;
   session?(sessionId: string): Promise<CosSessionSummary>;
   cancelPendingInput?(inputId: string): Promise<void>;
+  requestStopExactTurn?(sessionId: string, turnId: string): Promise<void>;
   stopExactTurn?(sessionId: string, turnId: string): Promise<unknown>;
   send(input: {
     id: string;
@@ -72,19 +90,42 @@ export interface PromptNormalizationResult {
 
 export interface BridgeRuntimeOptions {
   readonly controller: BridgeController;
-  readonly store: StateStore<SessionState>;
+  /** Reference/test persistence. Production should provide durableStore instead. */
+  readonly store?: StateStore<SessionState>;
+  /** Production narrow-transition persistence. Never combined with store. */
+  readonly durableStore?: DurableSessionStore;
   readonly lease?: AdmissionLease;
+  /** Production profile-wide admission lease. Never reclaimed from PID/age alone. */
+  readonly durableLease?: DurableAdmissionLease;
   readonly controllerIdentity?: string;
   readonly ownerId?: string;
   readonly makeUuid?: () => string;
   readonly canonicalize?: (path: string) => Promise<string>;
+  readonly metrics?: BridgeMetrics;
 }
+
+export interface DurableProviderTurnDriveOptions {
+  readonly sessionId: string;
+  readonly emit: (effect: ProviderTurnOutputEffect) => Promise<void>;
+  readonly chunkSize?: number;
+  readonly signal?: AbortSignal;
+}
+
+export type PendingProviderTurnCompletion =
+  | { readonly kind: "turn_ready" }
+  | { readonly kind: "cancelled_not_sent" };
 
 const PLAN_GUIDANCE = "Plan mode: investigate read-only and return a plan. Do not make changes.";
 
 function rejectAdditionalDirectories(additionalDirectories: readonly string[] | undefined): void {
   if (additionalDirectories && additionalDirectories.length > 0) {
     throw new BridgeError("additional_directories_unsupported", "additionalDirectories are not supported in v1");
+  }
+}
+
+function rejectMcpServers(mcpServers: readonly unknown[] | undefined): void {
+  if (mcpServers && mcpServers.length > 0) {
+    throw new BridgeError("mcp_servers_unsupported", "MCP forwarding is not supported in v1");
   }
 }
 
@@ -157,14 +198,107 @@ export async function normalizePrompt(
 
 export class AcpBridgeRuntime {
   private readonly sessions = new Map<string, SessionState>();
+  private readonly resumedCwds = new Map<string, string>();
   private readonly makeUuid: () => string;
   private readonly canonicalize: (path: string) => Promise<string>;
   private readonly ownerId: string;
 
   constructor(private readonly options: BridgeRuntimeOptions) {
+    if (!!options.store === !!options.durableStore) {
+      throw new Error("Exactly one of store or durableStore must be configured");
+    }
+    if (options.lease && options.durableLease) throw new Error("Configure only one admission lease implementation");
+    if (!!options.durableStore !== !!options.durableLease) {
+      throw new Error("Production durable runtime requires both durableStore and durableLease");
+    }
+    if (options.durableStore && (options.lease || options.controllerIdentity)) {
+      throw new Error("Production durable runtime cannot use reference admission-lease configuration");
+    }
     this.makeUuid = options.makeUuid ?? (() => randomUUID().toLowerCase());
     this.canonicalize = options.canonicalize ?? realpath;
     this.ownerId = options.ownerId ?? randomUUID().toLowerCase();
+  }
+
+  private async readPersisted(sessionId: string): Promise<SessionState | null> {
+    if (this.options.durableStore) {
+      const tagged = await this.options.durableStore.readSession(sessionId);
+      if (tagged.status === "found") return tagged.value;
+      if (tagged.status === "missing") return null;
+      // Tagged corruption/future schema is already quarantined by the durable store. Keep the
+      // original bytes untouched and expose only a logical broken session to the ACP layer.
+      return {
+        sessionId,
+        bindingState: "broken",
+        interactionMode: "default",
+        cancelIntent: "none",
+        recoveryReason: tagged.status === "corrupt" ? "state_corrupt" : "state_schema_unsupported",
+      };
+    }
+    return (await this.options.store!.read(sessionId)) ?? null;
+  }
+
+  private async persistWholeForReference(state: SessionState): Promise<void> {
+    if (this.options.durableStore) throw new Error("Production durable runtime cannot write whole session snapshots");
+    await this.options.store!.write(state.sessionId, state);
+  }
+
+  private async markBroken(session: SessionState, reason: SessionState["recoveryReason"]): Promise<SessionState> {
+    const broken: SessionState = { ...session, bindingState: "broken", ...(reason ? { recoveryReason: reason } : {}) };
+    if (this.options.durableStore) {
+      const result = await this.options.durableStore.updateSession(session.sessionId, { kind: "mark_broken", reason: reason ?? "ambiguous_recovery" });
+      if (result.status === "updated" || result.status === "already_terminal") {
+        const latest = await this.readPersisted(session.sessionId);
+        if (latest) this.sessions.set(session.sessionId, latest);
+        return latest ?? broken;
+      }
+      // Active corruption quarantine cannot be overwritten. Keep an in-memory broken view.
+      this.sessions.set(session.sessionId, broken);
+      return broken;
+    }
+    await this.persistWholeForReference(broken);
+    this.sessions.set(session.sessionId, broken);
+    return broken;
+  }
+
+  private async refreshDurable(sessionId: string): Promise<SessionState> {
+    const latest = await this.readPersisted(sessionId);
+    if (!latest) throw new BridgeError("session_not_found", "ACP session is unknown");
+    this.sessions.set(sessionId, latest);
+    return latest;
+  }
+
+  private async ensureDurableCreated(session: SessionState): Promise<SessionState> {
+    if (!this.options.durableStore) return session;
+    const tagged = await this.options.durableStore.readSession(session.sessionId);
+    if (tagged.status === "found") return tagged.value;
+    if (tagged.status !== "missing") {
+      const broken: SessionState = {
+        ...session,
+        bindingState: "broken",
+        recoveryReason: tagged.status === "corrupt" ? "state_corrupt" : "state_schema_unsupported",
+      };
+      this.sessions.set(session.sessionId, broken);
+      return broken;
+    }
+    const result = await this.options.durableStore.updateSession(session.sessionId, { kind: "create", state: session });
+    if (result.status === "updated" || result.status === "exists") {
+      this.sessions.set(session.sessionId, result.value);
+      return result.value;
+    }
+    throw new BridgeError("session_broken", "Durable ACP session could not be created safely");
+  }
+
+  private async applyDurableTransition(
+    sessionId: string,
+    transition: DurableSessionTransition,
+  ): Promise<SessionState> {
+    if (!this.options.durableStore) throw new Error("Durable transition requested without durable store");
+    const result = await this.options.durableStore.updateSession(sessionId, transition);
+    if (result.status === "updated" || result.status === "unchanged") {
+      this.sessions.set(sessionId, result.value);
+      return result.value;
+    }
+    throw new BridgeError("session_broken", `Durable session transition ${transition.kind} was rejected (${result.status})`);
   }
 
   private async requirePromptReadiness(session: SessionState): Promise<void> {
@@ -181,53 +315,550 @@ export class AcpBridgeRuntime {
       try {
         await this.options.controller.requireBackgroundWorkDisabled(session.sessionId);
       } catch {
-        const broken = { ...session, bindingState: "broken" as const };
-        await this.options.store.write(session.sessionId, broken);
-        this.sessions.set(session.sessionId, broken);
+        await this.markBroken(session, "policy_lost");
         throw new BridgeError("provider_policy_unavailable", "Provider-session policy attestation was lost");
       }
     }
   }
 
-  private async acquireLease(sessionId: string, inputId: string): Promise<void> {
+  private async acquireLease(sessionId: string, inputId: string, generation: number, leaseId?: string): Promise<void> {
+    if (this.options.durableLease) {
+      if (!leaseId) throw new BridgeError("session_broken", "Durable admission requires a journaled exact lease id");
+      const result = await this.options.durableLease.acquire({ sessionId, inputId, generation, ownerId: this.ownerId, leaseId });
+      if (result.status !== "acquired") {
+        throw new BridgeError("input_busy", "Another T3→CoS turn is already active for this CoS controller identity");
+      }
+      if (result.lease.leaseId !== leaseId) throw new BridgeError("session_broken", "Acquired durable lease id did not match the journaled generation");
+      return;
+    }
     if (!this.options.lease || !this.options.controllerIdentity) return;
     const acquired = await this.options.lease.acquire({
       controllerIdentity: this.options.controllerIdentity,
       sessionId,
       inputId,
-      generation: 0,
+      generation,
       ownerId: this.ownerId,
     });
     if (!acquired) throw new BridgeError("input_busy", "Another T3→CoS turn is already active for this CoS controller identity");
   }
 
-  private async releaseLease(): Promise<void> {
+  private async releaseLeaseAfterProof(sessionId: string, proof: LeaseReleaseProof): Promise<void> {
+    if (this.options.durableLease) {
+      const journal = await this.readPersisted(sessionId);
+      const expectedLeaseId = journal?.admissionLeaseId;
+      if (!expectedLeaseId) throw new BridgeError("session_broken", "Durable session has no exact admission lease id for proof-gated release");
+      const result = await this.options.durableLease.releaseAfterProof(expectedLeaseId, proof);
+      if (result !== "released" && result !== "missing") {
+        throw new BridgeError("session_broken", `Durable admission lease could not be released safely (${result})`);
+      }
+      return;
+    }
     if (!this.options.lease || !this.options.controllerIdentity) return;
     await this.options.lease.release(this.options.controllerIdentity, this.ownerId);
   }
 
-  initialize(protocolVersion: number): InitializeResponse {
+  private async durableLeaseMatches(session: SessionState, inputId: string, generation: number): Promise<boolean> {
+    if (!this.options.durableLease) throw new Error("Durable lease check requested without durable lease");
+    if (!session.admissionLeaseId) return false;
+    const current = await this.options.durableLease.read();
+    if (current.status === "corrupt") {
+      throw new BridgeError("session_broken", "Durable admission lease is corrupt and cannot be reconciled safely");
+    }
+    return current.status === "found" &&
+      current.lease.leaseId === session.admissionLeaseId &&
+      current.lease.sessionId === session.sessionId &&
+      current.lease.inputId === inputId &&
+      current.lease.generation === generation;
+  }
+
+  private async requireInputIdentity(session: SessionState, input: CosInputRecord, expectedInputId: string): Promise<void> {
+    const accepted = input.delivery === "sent" || input.delivery === "pending";
+    const wrongId = input.id !== expectedInputId;
+    const wrongSession = input.sessionId !== undefined && input.sessionId !== session.sessionId;
+    const missingAcceptedSession = accepted && input.sessionId !== session.sessionId;
+    if (!wrongId && !wrongSession && !missingAcceptedSession) return;
+    await this.markBroken(session, "ambiguous_recovery");
+    throw new BridgeError("session_broken", "CoS input identity does not match the exact durable provider input/session");
+  }
+
+  private async reconcilePersistedCancellation(session: SessionState): Promise<SessionState> {
+    if (!this.options.durableStore || !this.options.durableLease || session.cancelIntent !== "requested") return session;
+    const translation = session.providerTranslation;
+    const inputId = session.activeInputId;
+    if (!translation || !inputId || translation.inputId !== inputId || translation.generation !== session.generation) {
+      throw new BridgeError("session_broken", "Persisted cancellation lacks an exact provider input generation");
+    }
+
+    const matchingLease = await this.durableLeaseMatches(session, inputId, translation.generation);
+    if (translation.turnId) {
+      if (session.activeCosTurnId !== translation.turnId ||
+          (session.cancelTargetTurnId !== undefined && session.cancelTargetTurnId !== translation.turnId)) {
+        throw new BridgeError("session_broken", "Persisted cancellation turn identity is inconsistent");
+      }
+      if (!matchingLease) {
+        await this.markBroken(session, "ambiguous_recovery");
+        throw new BridgeError("session_broken", "Delivered cancelled turn no longer owns its exact durable lease");
+      }
+      if (!this.options.controller.stopExactTurn) throw new BridgeError("session_broken", "Exact-turn Stop is unavailable");
+      await this.options.controller.stopExactTurn(session.sessionId, translation.turnId);
+      return this.refreshDurable(session.sessionId);
+    }
+
+    // A prepared pending input without its matching lease never had authority to POST. This also
+    // recovers a crash after proof-gated lease deletion but before settle_not_sent persistence.
+    if (!matchingLease) {
+      return this.applyDurableTransition(session.sessionId, {
+        kind: "settle_not_sent",
+        inputId,
+        generation: translation.generation,
+      });
+    }
+
+    if (session.inputDispatchState === "prepared" && session.dispatchInputId === inputId) {
+      await this.releaseLeaseAfterProof(session.sessionId, {
+        kind: "not_sent",
+        sessionId: session.sessionId,
+        inputId,
+        generation: translation.generation,
+      });
+      return this.applyDurableTransition(session.sessionId, {
+        kind: "settle_not_sent",
+        inputId,
+        generation: translation.generation,
+      });
+    }
+
+    if (!this.options.controller.input || !this.options.controller.cancelPendingInput) {
+      throw new BridgeError("session_broken", "Pending-input cancellation reconciliation is unavailable");
+    }
+    const before = await this.options.controller.input(inputId);
+    if (before) await this.requireInputIdentity(session, before, inputId);
+    if (before?.delivery === "not_sent") {
+      await this.releaseLeaseAfterProof(session.sessionId, {
+        kind: "not_sent",
+        sessionId: session.sessionId,
+        inputId,
+        generation: translation.generation,
+      });
+      return this.applyDurableTransition(session.sessionId, {
+        kind: "settle_not_sent",
+        inputId,
+        generation: translation.generation,
+      });
+    }
+
+    await this.options.controller.cancelPendingInput(inputId);
+    const after = await this.options.controller.input(inputId);
+    if (after) await this.requireInputIdentity(session, after, inputId);
+    if (after?.delivery === "not_sent") {
+      await this.releaseLeaseAfterProof(session.sessionId, {
+        kind: "not_sent",
+        sessionId: session.sessionId,
+        inputId,
+        generation: translation.generation,
+      });
+      return this.applyDurableTransition(session.sessionId, {
+        kind: "settle_not_sent",
+        inputId,
+        generation: translation.generation,
+      });
+    }
+    return this.refreshDurable(session.sessionId);
+  }
+
+  /**
+   * Persist one translator checkpoint through exact, guarded durable transitions. This is the
+   * production persistence hook for driveProviderTurn; it never writes the translator snapshot
+   * wholesale, so a concurrent cancellation transition cannot be erased by an older checkpoint.
+   */
+  async checkpointProviderTranslation(snapshot: ProviderTurnTranslationState): Promise<SessionState> {
+    if (!this.options.durableStore || !this.options.durableLease) {
+      throw new Error("Provider translation checkpoints require durable production state");
+    }
+    let session = await this.refreshDurable(snapshot.sessionId);
+    let current = session.providerTranslation;
+    if (!current) {
+      if ((session.generation ?? 0) >= snapshot.generation && (session.cosEventCursor ?? 0) >= snapshot.cursor) return session;
+      throw new BridgeError("session_broken", "Durable provider translation is missing for the checkpoint generation");
+    }
+    if (current.inputId !== snapshot.inputId || current.generation !== snapshot.generation) {
+      throw new BridgeError("session_broken", "Durable provider translation checkpoint identity does not match the active generation");
+    }
+
+    const refreshCurrent = (): ProviderTurnTranslationState => {
+      const next = session.providerTranslation;
+      if (!next) throw new BridgeError("session_broken", "Durable provider translation disappeared before terminal finalization");
+      return next;
+    };
+    const apply = async (transition: DurableSessionTransition): Promise<void> => {
+      session = await this.applyDurableTransition(snapshot.sessionId, transition);
+      current = refreshCurrent();
+    };
+
+    if (snapshot.turnId && current.turnId !== snapshot.turnId) {
+      await apply({ kind: "bind_turn", inputId: snapshot.inputId, generation: snapshot.generation, turnId: snapshot.turnId });
+    }
+
+    const finalSeqs = Object.keys(snapshot.assistantFinals)
+      .map((value) => Number(value))
+      .filter((value) => Number.isSafeInteger(value) && value > 0)
+      .sort((a, b) => a - b);
+    for (const seq of finalSeqs) {
+      if (current.assistantFinals[String(seq)]) continue;
+      const final = snapshot.assistantFinals[String(seq)];
+      if (!final) continue;
+      await apply({
+        kind: "record_assistant_final",
+        inputId: snapshot.inputId,
+        generation: snapshot.generation,
+        turnId: final.turnId,
+        seq,
+      });
+    }
+
+    if (snapshot.turnEndSeq !== undefined && current.turnEndSeq !== snapshot.turnEndSeq) {
+      if (!snapshot.turnId || !snapshot.turnOutcome) {
+        throw new BridgeError("session_broken", "Translator checkpoint has turn_end without exact turn identity/outcome");
+      }
+      await apply({
+        kind: "record_turn_end",
+        inputId: snapshot.inputId,
+        generation: snapshot.generation,
+        turnId: snapshot.turnId,
+        seq: snapshot.turnEndSeq,
+        outcome: snapshot.turnOutcome,
+      });
+      this.options.metrics?.increment("matchingTurnEndObserved");
+    }
+
+    if (snapshot.drainSeq !== undefined && current.drainSeq !== snapshot.drainSeq) {
+      if (!snapshot.turnId || snapshot.finalAssistantSeq === undefined) {
+        throw new BridgeError("session_broken", "Translator checkpoint has drain without exact turn/final identity");
+      }
+      await apply({
+        kind: "record_drain",
+        inputId: snapshot.inputId,
+        generation: snapshot.generation,
+        turnId: snapshot.turnId,
+        seq: snapshot.drainSeq,
+        finalAssistantSeq: snapshot.finalAssistantSeq,
+      });
+      this.options.metrics?.increment("matchingTurnDrainedObserved");
+      this.options.metrics?.observeDrainHighWater(snapshot.drainSeq);
+    }
+
+    const currentOffset = current.finalAssistantOffset ?? 0;
+    const targetOffset = snapshot.finalAssistantOffset ?? 0;
+    const snapshotFinalComplete = snapshot.finalAssistantSeq !== undefined && snapshot.finalAssistantSeq !== null &&
+      snapshot.finalAssistantEmittedSeq === snapshot.finalAssistantSeq;
+    const persistedFinalComplete = snapshot.finalAssistantSeq !== undefined && snapshot.finalAssistantSeq !== null &&
+      current.finalAssistantEmittedSeq === snapshot.finalAssistantSeq;
+    const needsRangeCheckpoint = targetOffset > currentOffset ||
+      (snapshotFinalComplete && !persistedFinalComplete) ||
+      (snapshot.finalAssistantTotalLength !== undefined && current.finalAssistantTotalLength === undefined);
+    if (needsRangeCheckpoint) {
+      if (!snapshot.turnId || snapshot.finalAssistantSeq === undefined || snapshot.finalAssistantSeq === null ||
+          snapshot.finalAssistantTotalLength === undefined) {
+        throw new BridgeError("session_broken", "Translator checkpoint has assistant range without exact final identity/length");
+      }
+      await apply({
+        kind: "advance_assistant_range",
+        inputId: snapshot.inputId,
+        generation: snapshot.generation,
+        turnId: snapshot.turnId,
+        finalAssistantSeq: snapshot.finalAssistantSeq,
+        expectedOffset: currentOffset,
+        nextOffset: targetOffset,
+        totalLength: snapshot.finalAssistantTotalLength,
+        complete: snapshot.finalAssistantEmittedSeq === snapshot.finalAssistantSeq,
+      });
+    }
+
+    if (snapshot.cursor > current.cursor) {
+      await apply({ kind: "advance_cursor", inputId: snapshot.inputId, generation: snapshot.generation, seq: snapshot.cursor });
+    }
+
+    if (snapshot.terminal && current.terminal !== snapshot.terminal) {
+      if (!snapshot.turnId) throw new BridgeError("session_broken", "Terminal translator checkpoint has no exact turn id");
+      await apply({
+        kind: "settle_terminal",
+        inputId: snapshot.inputId,
+        generation: snapshot.generation,
+        turnId: snapshot.turnId,
+        stopReason: snapshot.terminal,
+      });
+    }
+
+    if (snapshot.terminal) {
+      current = refreshCurrent();
+      if (!current.turnId || current.drainSeq === undefined || current.terminal !== snapshot.terminal) {
+        throw new BridgeError("session_broken", "Persisted terminal proof is incomplete");
+      }
+      if (!this.options.controller.session || !this.options.controller.requireBackgroundWorkDisabled) {
+        throw new BridgeError("provider_policy_unavailable", "Terminal lease release requires fresh provider turn/policy attestation");
+      }
+      const summary = await this.options.controller.session(snapshot.sessionId);
+      const attested = summary.providerTurn;
+      if (!attested || attested.inputId !== snapshot.inputId || attested.turnId !== current.turnId ||
+          attested.state !== "drained" || attested.drainedSeq !== current.drainSeq ||
+          attested.finalAssistantSeq !== (current.finalAssistantSeq ?? null)) {
+        throw new BridgeError("session_broken", "Fresh provider-turn attestation does not match persisted terminal proof");
+      }
+      try {
+        await this.options.controller.requireBackgroundWorkDisabled(snapshot.sessionId);
+      } catch {
+        throw new BridgeError("provider_policy_unavailable", "Fresh backgroundWork=disabled attestation failed before lease release");
+      }
+      await this.releaseLeaseAfterProof(snapshot.sessionId, {
+        kind: "drained",
+        sessionId: snapshot.sessionId,
+        inputId: snapshot.inputId,
+        generation: snapshot.generation,
+        turnId: current.turnId,
+        drainSeq: current.drainSeq,
+        cursor: current.cursor,
+        terminal: current.terminal,
+        policyAttested: true,
+      });
+      session = await this.applyDurableTransition(snapshot.sessionId, {
+        kind: "finalize_terminal",
+        inputId: snapshot.inputId,
+        generation: snapshot.generation,
+        turnId: current.turnId,
+        stopReason: current.terminal,
+      });
+    }
+    return session;
+  }
+
+  /**
+   * Production controller-only turn driver. Every accepted output/cursor checkpoint is projected
+   * through the narrow durable transition layer, and cancellation is re-read by exact generation
+   * before each provider event so a concurrent ACP cancel cannot be lost inside the translator.
+   */
+  async driveDurableProviderTurn(
+    controller: ProviderTurnController,
+    options: DurableProviderTurnDriveOptions,
+  ): Promise<DriveProviderTurnResult> {
+    if (!this.options.durableStore || !this.options.durableLease) {
+      throw new Error("Durable provider turn driving requires durable production state");
+    }
+    const session = await this.refreshDurable(options.sessionId);
+    const active = session.providerTranslation;
+    if (!active || session.activeInputId !== active.inputId || session.generation !== active.generation) {
+      throw new BridgeError("session_broken", "No exact durable provider generation is available to drive");
+    }
+
+    return driveProviderTurn(controller, {
+      sessionId: options.sessionId,
+      inputId: active.inputId,
+      generation: active.generation,
+      state: active,
+      cancelRequested: active.cancelRequested === true || session.cancelIntent === "requested",
+      ...(options.chunkSize === undefined ? {} : { chunkSize: options.chunkSize }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      emit: options.emit,
+      cancellationRequested: async () => {
+        const latest = await this.readPersisted(options.sessionId);
+        if (!latest) throw new BridgeError("session_broken", "Durable provider session disappeared while driving its turn");
+        const translation = latest.providerTranslation;
+        if (!translation || translation.inputId !== active.inputId || translation.generation !== active.generation) {
+          throw new BridgeError("session_broken", "Durable provider generation changed while driving its turn");
+        }
+        return latest.cancelIntent === "requested" || translation.cancelRequested === true;
+      },
+      persist: async (snapshot) => {
+        await this.checkpointProviderTranslation(snapshot);
+      },
+    });
+  }
+
+  /**
+   * Resolve the narrow race where CoS accepted the provider input record but has not created a
+   * native turn yet. A concurrent ACP cancel may authoritatively win as `not_sent`; that completes
+   * the original prompt as cancelled without inventing a drain marker for a turn that never existed.
+   */
+  async awaitDurableProviderTurnOrCancelledNotSent(
+    sessionId: string,
+    options: { readonly pollMs?: number; readonly signal?: AbortSignal } = {},
+  ): Promise<PendingProviderTurnCompletion> {
+    if (!this.options.durableStore || !this.options.durableLease) {
+      throw new Error("Pending provider-turn reconciliation requires durable production state");
+    }
+    if (!this.options.controller.session || !this.options.controller.input) {
+      throw new BridgeError("session_broken", "Provider turn/input reconciliation APIs are unavailable");
+    }
+    const pollMs = options.pollMs ?? 25;
+    for (;;) {
+      if (options.signal?.aborted) throw options.signal.reason ?? new Error("Provider turn wait aborted");
+      let session = await this.refreshDurable(sessionId);
+      const current = session.providerTranslation;
+      const inputId = session.activeInputId;
+      if (!current || !inputId || current.inputId !== inputId || current.generation !== session.generation) {
+        throw new BridgeError("session_broken", "Pending provider input lost its exact durable generation");
+      }
+
+      const summary = await this.options.controller.session(sessionId);
+      const turn = summary.providerTurn;
+      if (turn && turn.inputId === inputId) {
+        if (turn.state === "broken") throw new BridgeError("session_broken", "CoS marked the pending provider input broken");
+        if (turn.state !== "not_sent" && turn.turnId) return { kind: "turn_ready" };
+      }
+
+      const input = await this.options.controller.input(inputId);
+      if (input) await this.requireInputIdentity(session, input, inputId);
+      const authoritativeNotSent = input?.delivery === "not_sent" || (turn?.inputId === inputId && turn.state === "not_sent");
+      if (authoritativeNotSent) {
+        if (session.cancelIntent !== "requested" && current.cancelRequested !== true) {
+          throw new BridgeError("session_broken", "CoS reported not_sent without an authoritative cancellation intent");
+        }
+        await this.releaseLeaseAfterProof(sessionId, {
+          kind: "not_sent",
+          sessionId,
+          inputId,
+          generation: current.generation,
+        });
+        session = await this.applyDurableTransition(sessionId, {
+          kind: "settle_not_sent",
+          inputId,
+          generation: current.generation,
+        });
+        this.sessions.set(sessionId, session);
+        return { kind: "cancelled_not_sent" };
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  }
+
+  /** Complete a terminal checkpoint left durable by a crash between settlement and lease delete. */
+  async reconcilePersistedTerminal(sessionId: string): Promise<SessionState> {
+    if (!this.options.durableStore || !this.options.durableLease) {
+      throw new Error("Terminal reconciliation requires durable production state");
+    }
+    let session = await this.refreshDurable(sessionId);
+    const current = session.providerTranslation;
+    if (!current?.terminal) return session;
+    if (!current.turnId || current.drainSeq === undefined || current.cursor < current.drainSeq) {
+      throw new BridgeError("session_broken", "Persisted terminal proof is incomplete");
+    }
+    if (!this.options.controller.session || !this.options.controller.requireBackgroundWorkDisabled) {
+      throw new BridgeError("provider_policy_unavailable", "Terminal reconciliation requires provider turn/policy attestation");
+    }
+    const summary = await this.options.controller.session(sessionId);
+    const attested = summary.providerTurn;
+    if (!attested || attested.inputId !== current.inputId || attested.turnId !== current.turnId ||
+        attested.state !== "drained" || attested.drainedSeq !== current.drainSeq ||
+        attested.finalAssistantSeq !== (current.finalAssistantSeq ?? null)) {
+      throw new BridgeError("session_broken", "Persisted terminal proof no longer matches the provider turn attestation");
+    }
+    await this.options.controller.requireBackgroundWorkDisabled(sessionId);
+    await this.releaseLeaseAfterProof(sessionId, {
+      kind: "drained",
+      sessionId,
+      inputId: current.inputId,
+      generation: current.generation,
+      turnId: current.turnId,
+      drainSeq: current.drainSeq,
+      cursor: current.cursor,
+      terminal: current.terminal,
+      policyAttested: true,
+    });
+    session = await this.applyDurableTransition(sessionId, {
+      kind: "finalize_terminal",
+      inputId: current.inputId,
+      generation: current.generation,
+      turnId: current.turnId,
+      stopReason: current.terminal,
+    });
+    return session;
+  }
+
+  initialize(_protocolVersion: number): InitializeResponse {
+    void _protocolVersion;
     return {
-      protocolVersion,
+      protocolVersion: 1,
       agentCapabilities: {
         promptCapabilities: {},
         sessionCapabilities: { resume: {} },
       },
-      agentInfo: { name: "t3onsteroids", version: "0.0.0" },
+      agentInfo: { name: "t3onsteroids", version: BRIDGE_VERSION },
     };
   }
 
   newSession(request: NewSessionRequest): NewSessionResponse {
     rejectAdditionalDirectories(request.additionalDirectories);
+    rejectMcpServers(request.mcpServers);
     const sessionId = this.makeUuid();
     this.sessions.set(sessionId, newUnboundSession(sessionId, request.cwd));
     return { sessionId };
   }
 
   async resumeSession(request: ResumeSessionRequest): Promise<ResumeSessionResponse> {
+    if (request.mcpServers?.length) {
+      if (this.options.durableStore) {
+        const persisted = await this.readPersisted(request.sessionId);
+        const existing = persisted ?? this.sessions.get(request.sessionId) ?? newUnboundSession(request.sessionId, request.cwd);
+        const created = persisted ? existing : await this.ensureDurableCreated(existing);
+        await this.markBroken(created, "ambiguous_recovery");
+        return {};
+      }
+      rejectMcpServers(request.mcpServers);
+    }
+    if (this.options.durableStore) {
+      const persisted = await this.readPersisted(request.sessionId);
+      const draft = this.sessions.get(request.sessionId);
+      let existing = persisted ?? draft;
+
+      if (!existing) {
+        const reason: SessionState["recoveryReason"] = request.additionalDirectories?.length
+          ? "additional_directories"
+          : "unknown_resume";
+        const broken: SessionState = {
+          ...newUnboundSession(request.sessionId, request.cwd),
+          bindingState: "broken",
+          recoveryReason: reason,
+        };
+        const created = await this.options.durableStore.updateSession(request.sessionId, { kind: "create", state: broken });
+        if (created.status === "updated" || created.status === "exists") this.sessions.set(request.sessionId, created.value);
+        else this.sessions.set(request.sessionId, broken);
+        return {};
+      }
+
+      if (existing.bindingState === "broken") {
+        this.sessions.set(request.sessionId, existing);
+        return {};
+      }
+
+      if (request.additionalDirectories?.length) {
+        if (!persisted) existing = await this.ensureDurableCreated(existing);
+        await this.markBroken(existing, "additional_directories");
+        return {};
+      }
+
+      if (existing.canonicalCwd) {
+        let actual: string;
+        try {
+          actual = await this.canonicalize(request.cwd);
+        } catch {
+          if (!persisted) existing = await this.ensureDurableCreated(existing);
+          await this.markBroken(existing, "cwd_mismatch");
+          return {};
+        }
+        if (actual !== existing.canonicalCwd) {
+          if (!persisted) existing = await this.ensureDurableCreated(existing);
+          await this.markBroken(existing, "cwd_mismatch");
+          return {};
+        }
+      }
+      this.resumedCwds.set(request.sessionId, request.cwd);
+      this.sessions.set(request.sessionId, { ...existing, cwd: request.cwd });
+      return {};
+    }
+
     rejectAdditionalDirectories(request.additionalDirectories);
-    const persisted = await this.options.store.read(request.sessionId);
-    const existing = this.sessions.get(request.sessionId) ?? persisted ?? newUnboundSession(request.sessionId, request.cwd);
+    const persisted = await this.readPersisted(request.sessionId);
+    const existing = persisted ?? this.sessions.get(request.sessionId) ?? newUnboundSession(request.sessionId, request.cwd);
     if (existing.bindingState === "broken") throw new BridgeError("session_broken", "Session is marked broken and cannot be resumed automatically");
     if (existing.canonicalCwd) {
       const actual = await this.canonicalize(request.cwd);
@@ -238,10 +869,35 @@ export class AcpBridgeRuntime {
   }
 
   async prompt(request: PromptRequest): Promise<{ input: CosInputRecord; session: SessionState }> {
-    let session = this.sessions.get(request.sessionId) ?? (await this.options.store.read(request.sessionId));
+    this.options.metrics?.increment("promptReceived");
+    const inMemory = this.sessions.get(request.sessionId);
+    const persisted = await this.readPersisted(request.sessionId);
+    let session = persisted ?? inMemory;
+    const resumedCwd = this.resumedCwds.get(request.sessionId);
+    if (this.options.durableStore && persisted && resumedCwd &&
+        inMemory?.sessionId === persisted.sessionId &&
+        inMemory.bindingState === persisted.bindingState &&
+        inMemory.canonicalCwd === persisted.canonicalCwd) {
+      // resumeSession validates canonical identity but intentionally keeps the caller's current raw
+      // cwd as a process-local overlay. Preserve that validated spelling across every durable
+      // transition in this process rather than letting an older persisted spelling replace it.
+      session = { ...persisted, cwd: resumedCwd };
+    }
     if (!session) throw new BridgeError("session_not_found", "ACP session is unknown");
+    if (this.options.durableStore && !persisted) session = await this.ensureDurableCreated(session);
     if (session.bindingState === "broken") throw new BridgeError("session_broken", "Session is marked broken and requires recovery");
-    if (session.cancelIntent === "requested") throw new BridgeError("session_broken", "Pending cancellation must be reconciled before a new prompt");
+
+    if (this.options.durableStore && session.providerTranslation?.terminal) {
+      session = await this.reconcilePersistedTerminal(session.sessionId);
+    }
+    if (this.options.durableStore && session.cancelIntent === "requested") {
+      session = await this.reconcilePersistedCancellation(session);
+      if (session.cancelIntent === "requested") {
+        throw new BridgeError("input_busy", "Persisted cancellation is still awaiting exact provider settlement");
+      }
+    } else if (session.cancelIntent === "requested") {
+      throw new BridgeError("session_broken", "Pending cancellation must be reconciled before a new prompt");
+    }
     const cwd = session.cwd;
     if (!cwd) throw new BridgeError("project_unmapped", "Session has no cwd");
 
@@ -249,11 +905,103 @@ export class AcpBridgeRuntime {
     const canonicalRoot = await this.canonicalize(project.canonicalPath);
     const normalized = await normalizePrompt(request.prompt, session.interactionMode, canonicalRoot, this.canonicalize);
 
-    if (session.bindingState === "create_pending") {
+    if (this.options.durableStore && session.providerTranslation) {
+      const pendingInputId = session.providerTranslation.inputId;
+      const generation = session.providerTranslation.generation;
+      if (session.activeInputId !== pendingInputId) {
+        throw new BridgeError("session_broken", "Active durable input identity does not match provider translation state");
+      }
+
+      if (session.bindingState === "create_pending" &&
+          (session.canonicalCwd !== canonicalRoot || session.cosProjectId !== project.projectId)) {
+        await this.markBroken(session, "project_remapped");
+        throw new BridgeError("project_unmapped", "Pending provider binding no longer resolves to the same CoS project");
+      }
+
+      if (session.activeCosTurnId) {
+        if (!await this.durableLeaseMatches(session, pendingInputId, generation)) {
+          await this.markBroken(session, "ambiguous_recovery");
+          throw new BridgeError("session_broken", "Delivered provider turn no longer owns its exact durable lease");
+        }
+        if (session.bindingState === "create_pending") {
+          session = await this.applyDurableTransition(session.sessionId, {
+            kind: "binding",
+            inputId: pendingInputId,
+            generation,
+            bindingState: "bound",
+            canonicalCwd: canonicalRoot,
+            cosProjectId: project.projectId,
+          });
+        }
+        session = await this.applyDurableTransition(session.sessionId, { kind: "promote_mode", inputId: pendingInputId, generation });
+        throw new BridgeError("input_busy", "The previously delivered provider turn must finish before a new prompt is admitted");
+      }
+
+      const matchingLease = await this.durableLeaseMatches(session, pendingInputId, generation);
+      if (!matchingLease) {
+        // No matching profile lease means this prepared input never had authority to POST (or a
+        // proven-not-sent release already won). Clear only this exact generation and continue.
+        session = await this.applyDurableTransition(session.sessionId, {
+          kind: "settle_not_sent",
+          inputId: pendingInputId,
+          generation,
+        });
+      } else if (session.inputDispatchState === "prepared" && session.dispatchInputId === pendingInputId) {
+        // Crash after acquiring the lease but before the durable dispatched marker: POST was not
+        // authorized yet, so exact not-sent proof is local and deterministic.
+        await this.releaseLeaseAfterProof(session.sessionId, {
+          kind: "not_sent",
+          sessionId: session.sessionId,
+          inputId: pendingInputId,
+          generation,
+        });
+        session = await this.applyDurableTransition(session.sessionId, {
+          kind: "settle_not_sent",
+          inputId: pendingInputId,
+          generation,
+        });
+      } else {
+
+        if (!this.options.controller.input) {
+          throw new BridgeError("input_busy", "Outstanding provider input cannot be reconciled without the input read API");
+        }
+        const existing = await this.options.controller.input(pendingInputId);
+        if (!existing || existing.delivery === "unconfirmed" || existing.delivery === undefined) {
+          throw new BridgeError("input_busy", "Outstanding provider input is still delivery-unconfirmed");
+        }
+        await this.requireInputIdentity(session, existing, pendingInputId);
+        if (existing.delivery === "not_sent") {
+          await this.releaseLeaseAfterProof(session.sessionId, {
+            kind: "not_sent",
+            sessionId: session.sessionId,
+            inputId: pendingInputId,
+            generation,
+          });
+          session = await this.applyDurableTransition(session.sessionId, { kind: "settle_not_sent", inputId: pendingInputId, generation });
+        } else {
+          this.options.metrics?.increment("cosInputAcceptedOrReconciled");
+          if (session.bindingState === "create_pending") {
+            session = await this.applyDurableTransition(session.sessionId, {
+              kind: "binding",
+              inputId: pendingInputId,
+              generation,
+              bindingState: "bound",
+              canonicalCwd: canonicalRoot,
+              cosProjectId: project.projectId,
+            });
+          }
+          session = await this.applyDurableTransition(session.sessionId, { kind: "promote_mode", inputId: pendingInputId, generation });
+          throw new BridgeError("input_busy", "The previously accepted provider input must finish before a new prompt is admitted");
+        }
+      }
+    }
+
+    if (!this.options.durableStore && session.bindingState === "create_pending") {
       if (!session.activeInputId || !this.options.controller.input) {
         throw new BridgeError("project_unmapped", "Pending first CoS send requires reconciliation before retry");
       }
-      const existing = await this.options.controller.input(session.activeInputId);
+      const pendingInputId = session.activeInputId;
+      const existing = await this.options.controller.input(pendingInputId);
       if (!existing) throw new BridgeError("project_unmapped", "Pending first CoS send could not be reconciled safely");
       session = {
         ...session,
@@ -261,15 +1009,13 @@ export class AcpBridgeRuntime {
         canonicalCwd: canonicalRoot,
         cosProjectId: project.projectId,
       };
-      await this.options.store.write(session.sessionId, session);
+      await this.persistWholeForReference(session);
       this.sessions.set(session.sessionId, session);
     }
 
     if (session.bindingState === "bound") {
       if (session.canonicalCwd !== canonicalRoot || session.cosProjectId !== project.projectId) {
-        const broken = { ...session, bindingState: "broken" as const };
-        await this.options.store.write(session.sessionId, broken);
-        this.sessions.set(session.sessionId, broken);
+        await this.markBroken(session, "project_remapped");
         throw new BridgeError("project_unmapped", "Bound project root no longer resolves to the same CoS project");
       }
     }
@@ -278,17 +1024,49 @@ export class AcpBridgeRuntime {
 
     const first = session.bindingState === "unbound";
     const inputId = first ? session.sessionId : this.makeUuid();
-    await this.acquireLease(session.sessionId, inputId);
-    session = withInteractionMode(session, normalized.interactionMode);
-    if (first) {
-      session = {
-        ...session,
-        bindingState: "create_pending",
-        canonicalCwd: canonicalRoot,
-        cosProjectId: project.projectId,
-        activeInputId: inputId,
-      };
-      await this.options.store.write(session.sessionId, session);
+    const generation = (session.generation ?? 0) + 1;
+    if (this.options.durableStore) {
+      const leaseId = randomUUID().toLowerCase();
+      session = await this.applyDurableTransition(session.sessionId, {
+        kind: "begin_input",
+        inputId,
+        generation,
+        leaseId,
+        pendingInteractionMode: normalized.interactionMode,
+      });
+      if (first) {
+        session = await this.applyDurableTransition(session.sessionId, {
+          kind: "binding",
+          inputId,
+          generation,
+          bindingState: "create_pending",
+          canonicalCwd: canonicalRoot,
+          cosProjectId: project.projectId,
+        });
+      }
+      try {
+        await this.acquireLease(session.sessionId, inputId, generation, leaseId);
+      } catch (error) {
+        if (await this.durableLeaseMatches(session, inputId, generation)) {
+          await this.releaseLeaseAfterProof(session.sessionId, { kind: "not_sent", sessionId: session.sessionId, inputId, generation });
+        }
+        await this.applyDurableTransition(session.sessionId, { kind: "settle_not_sent", inputId, generation });
+        throw error;
+      }
+      session = await this.applyDurableTransition(session.sessionId, { kind: "mark_dispatched", inputId, generation });
+    } else {
+      await this.acquireLease(session.sessionId, inputId, generation);
+      session = withInteractionMode(session, normalized.interactionMode);
+      if (first) {
+        session = {
+          ...session,
+          bindingState: "create_pending",
+          canonicalCwd: canonicalRoot,
+          cosProjectId: project.projectId,
+          activeInputId: inputId,
+        };
+        await this.persistWholeForReference(session);
+      }
     }
 
     const input = await this.options.controller.send({
@@ -297,34 +1075,88 @@ export class AcpBridgeRuntime {
       ...(first ? { projectId: project.projectId, providerPolicy: v1ProviderSessionPolicy } : { sessionId: session.sessionId }),
     });
 
-    session = {
-      ...session,
-      bindingState: "bound",
-      canonicalCwd: canonicalRoot,
-      cosProjectId: project.projectId,
-      activeInputId: input.id,
-    };
-    await this.options.store.write(session.sessionId, session);
-    this.sessions.set(session.sessionId, session);
+    if (this.options.durableStore) {
+      await this.requireInputIdentity(session, input, inputId);
+      if (input.delivery === "not_sent") {
+        await this.releaseLeaseAfterProof(session.sessionId, { kind: "not_sent", sessionId: session.sessionId, inputId, generation });
+        session = await this.applyDurableTransition(session.sessionId, { kind: "settle_not_sent", inputId, generation });
+        throw new BridgeError("session_broken", "CoS authoritatively reported that the provider input was not sent");
+      }
+      if (input.delivery !== "sent" && input.delivery !== "pending") {
+        throw new BridgeError("input_busy", "CoS input delivery remains unconfirmed; the durable lease is retained for reconciliation");
+      }
+      this.options.metrics?.increment("cosInputAcceptedOrReconciled");
+      if (first) {
+        session = await this.applyDurableTransition(session.sessionId, {
+          kind: "binding",
+          inputId,
+          generation,
+          bindingState: "bound",
+          canonicalCwd: canonicalRoot,
+          cosProjectId: project.projectId,
+        });
+      }
+      session = await this.applyDurableTransition(session.sessionId, { kind: "promote_mode", inputId, generation });
+    } else {
+      if (input.delivery === "sent" || input.delivery === "pending") this.options.metrics?.increment("cosInputAcceptedOrReconciled");
+      session = {
+        ...session,
+        bindingState: "bound",
+        canonicalCwd: canonicalRoot,
+        cosProjectId: project.projectId,
+        activeInputId: input.id,
+      };
+      await this.persistWholeForReference(session);
+      this.sessions.set(session.sessionId, session);
+    }
     return { input, session };
   }
 
   async cancel(sessionId: string): Promise<void> {
-    let session = this.sessions.get(sessionId) ?? (await this.options.store.read(sessionId));
+    const persisted = await this.readPersisted(sessionId);
+    let session = this.options.durableStore ? (persisted ?? this.sessions.get(sessionId)) : (this.sessions.get(sessionId) ?? persisted);
     if (!session) throw new BridgeError("session_not_found", "ACP session is unknown");
     const activeInputId = session.activeInputId;
     if (!activeInputId) return;
 
+    if (this.options.durableStore) {
+      const generation = session.generation;
+      if (!generation || !session.providerTranslation || session.providerTranslation.inputId !== activeInputId) {
+        throw new BridgeError("session_broken", "Durable cancellation target is not bound to an exact provider generation");
+      }
+      const turnId = session.activeCosTurnId;
+      session = await this.applyDurableTransition(sessionId, {
+        kind: "set_cancel",
+        inputId: activeInputId,
+        generation,
+        ...(turnId ? { turnId } : {}),
+      });
+      if (turnId) {
+        if (this.options.controller.requestStopExactTurn) {
+          await this.options.controller.requestStopExactTurn(sessionId, turnId);
+        } else {
+          if (!this.options.controller.stopExactTurn) throw new BridgeError("session_broken", "Exact-turn Stop is unavailable");
+          await this.options.controller.stopExactTurn(sessionId, turnId);
+        }
+      } else {
+        if (!this.options.controller.cancelPendingInput) throw new BridgeError("session_broken", "Pending-input cancellation is unavailable");
+        await this.options.controller.cancelPendingInput(activeInputId);
+      }
+      // A delivered provider turn remains owned by this exact durable lease through turn_drained.
+      // Pending-input non-delivery is likewise reconciled separately before release.
+      return;
+    }
+
     if (session.activeCosTurnId) {
       const cancelTargetTurnId = session.activeCosTurnId;
       session = { ...session, cancelIntent: "requested", cancelTargetTurnId };
-      await this.options.store.write(sessionId, session);
+      await this.persistWholeForReference(session);
       this.sessions.set(sessionId, session);
       if (!this.options.controller.stopExactTurn) throw new BridgeError("session_broken", "Exact-turn Stop is unavailable");
       await this.options.controller.stopExactTurn(sessionId, cancelTargetTurnId);
     } else {
       session = { ...session, cancelIntent: "requested" };
-      await this.options.store.write(sessionId, session);
+      await this.persistWholeForReference(session);
       this.sessions.set(sessionId, session);
       if (!this.options.controller.cancelPendingInput) throw new BridgeError("session_broken", "Pending-input cancellation is unavailable");
       await this.options.controller.cancelPendingInput(activeInputId);
@@ -341,8 +1173,10 @@ export class AcpBridgeRuntime {
       ...(session.activeInputId === undefined ? {} : { activeInputId: session.activeInputId }),
       ...(session.activeCosTurnId === undefined ? {} : { activeCosTurnId: session.activeCosTurnId }),
     };
-    await this.options.store.write(sessionId, cleared);
+    await this.persistWholeForReference(cleared);
     this.sessions.set(sessionId, cleared);
-    await this.releaseLease();
+    if (this.options.lease && this.options.controllerIdentity) {
+      await this.options.lease.release(this.options.controllerIdentity, this.ownerId);
+    }
   }
 }

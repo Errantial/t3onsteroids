@@ -7,11 +7,13 @@ import {
 } from "../src/cos/index.js";
 
 const extensionFeatures = Object.fromEntries(Object.values(COS_PROVIDER_EXTENSION_FEATURES).map((feature) => [feature, 1]));
+const providerBuildId = "a".repeat(40);
 const extensionHealth = {
   protocol: 1,
   app: "chat-on-steroids",
   actions: { enabled: true, routes: ["POST /v1/inputs"] },
   features: extensionFeatures,
+  providerExtension: { apiVersion: 1, buildId: providerBuildId },
 };
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -25,6 +27,14 @@ describe("CoS provider extension contract", () => {
       fetch: vi.fn(async () => jsonResponse({ ...extensionHealth, features: { [COS_PROVIDER_EXTENSION_FEATURES.projectResolve]: 1 } })),
     });
     await expect(client.requireProviderExtension()).rejects.toMatchObject({ code: "provider_extension_unavailable" });
+  });
+
+  it("requires the exact provider extension build identity as well as all four features", async () => {
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), {
+      fetch: vi.fn(async () => jsonResponse({ ...extensionHealth, providerExtension: undefined })),
+    });
+    await expect(client.requireProviderExtension()).rejects.toMatchObject({ code: "provider_extension_unavailable" });
+    expect(parseHealth(extensionHealth).providerExtension).toEqual({ apiVersion: 1, buildId: providerBuildId });
   });
 
   it("resolves only the single exact canonical project returned by the controller", async () => {
@@ -147,7 +157,10 @@ describe("CoS provider extension contract", () => {
       if (text.endsWith("/v1/health")) return jsonResponse(extensionHealth);
       if (text.endsWith("/v1/inputs") && init?.method === "POST") {
         expect(JSON.parse(String(init.body))).toMatchObject({ providerPolicy: { backgroundWork: "disabled" } });
-        return jsonResponse({ id: "44444444-4444-4444-8444-444444444444", sessionId: "session-1", delivery: "sent" }, 202);
+        return jsonResponse({
+          input: { id: "44444444-4444-4444-8444-444444444444", sessionId: "session-1", delivery: "pending" },
+          replayed: false,
+        }, 202);
       }
       throw new Error(`unexpected ${text}`);
     });
@@ -156,6 +169,6 @@ describe("CoS provider extension contract", () => {
       id: "44444444-4444-4444-8444-444444444444",
       text: "hello",
       providerPolicy: { backgroundWork: "disabled" },
-    })).resolves.toMatchObject({ sessionId: "session-1", delivery: "sent" });
+    })).resolves.toMatchObject({ sessionId: "session-1", delivery: "pending" });
   });
 });

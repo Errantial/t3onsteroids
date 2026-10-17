@@ -10,5 +10,6 @@ npm-debug.log*
 !.env.example
 .idea/
 .vscode/
+.local-evidence/
 .DS_Store
 Thumbs.db

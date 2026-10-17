@@ -18,7 +18,9 @@ const readiness: CosControllerReadiness = {
     "provider-project-resolve-v1": 1,
     "provider-assistant-content-v1": 1,
     "provider-session-policy-v1": 1,
+    "provider-turn-drain-v1": 1,
   },
+  providerExtension: { apiVersion: 1, buildId: "a".repeat(40) },
 };
 
 function controller(overrides: Partial<BridgeController> = {}): BridgeController {

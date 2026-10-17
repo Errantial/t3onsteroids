@@ -2,13 +2,13 @@
 
 The codebase is pinned to T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`, CoS `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`, controller protocol 1, ACP SDK 1.9.0, Node 24, Windows x64.
 
-**Current state: pre-v1, not release-qualified.** The repository contains the bridge-side controller contract/runtime helpers, recovery guards, performance helpers, diagnostics and tests, but it does not yet contain a production ACP stdio agent entrypoint, the actual CoS provider-extension server implementation, the Phase-4 event translator, or durable/cross-process state and lease implementations. The authoritative remaining sequence is in `PLAN.md` under **Remaining work to finished v1**.
+**Current state: pre-v1, not release-qualified.** Steps 1–6 are source-complete and locally verified: the bridge has a production ACP stdio entrypoint, drain-aware event translator, durable/cross-process state and lease implementation, hardened controller/SSE/privacy boundary, metadata-only metrics/logging, and an audited development toolchain. The authoritative remaining sequence is in `PLAN.md` under **Remaining work to finished v1**; live performance/acceptance, current-head drift and final release preparation are still pending.
 
 ## Supported launcher
 
 T3 must launch a real executable with `shell:false`. The selected/validated **launch shape** is the installed real `node.exe` with the built `dist/cli/index.js` script as its argument. `.cmd`/`.bat` wrappers are unsupported. No standalone packager is bundled or implicitly downloaded.
 
-That packaging form is proven, but the current CLI is still setup/release tooling rather than the final ACP stdio provider. Do not configure it as the production provider until the production ACP entrypoint gate in `PLAN.md` is complete.
+That packaging form is proven and the no-argument CLI now serves the stable ACP v1 stdio provider. Do not treat the bridge as release-qualified until the provenance/live gates in `PLAN.md` are complete.
 
 ## Readiness diagnostics
 
@@ -24,17 +24,11 @@ The diagnostic is read-only. It checks controller discovery, health/protocol, pr
 
 Before v1 can be called finished/release-qualified, the project still needs:
 
-- the real CoS provider-extension build and tests;
-- a production ACP stdio entrypoint/harness;
-- the event translator and terminal-state machine;
-- durable crash-safe state plus a real cross-process admission lease;
-- remaining controller/SSE/privacy hardening;
-- development-toolchain advisory disposition;
 - live single-turn latency/browser/memory/reconnect qualification;
 - the pinned live T3→ACP→CoS acceptance matrix;
 - a separate current-T3-HEAD drift run and final clean-checkout release record.
 
-The live controller matrix is unavailable while CoS Local control API is disabled; mutating cases also require Allow actions. Those settings are never silently enabled by this project.
+The live controller matrix is unavailable while CoS Local control API is disabled. Every real bridged prompt/cancel/Stop also requires **Allow actions**, because `/v1/inputs`, pending-input cancel and exact-turn Stop are controller action routes even when the requested coding task itself is read-only/no-tool. Read-only diagnostics/project resolution and ACP provider-validation probes do not require Allow actions. Those settings are never silently enabled by this project.
 
 Current upstream T3 HEAD drift is a separate compatibility lane and does not change the pinned release contract.
 
@@ -42,4 +36,4 @@ V1 intentionally supports one active bridged turn per stable CoS controller iden
 
 ## Dependency audit disposition
 
-`npm audit` currently reports 12 advisories in the pinned development toolchain (1 moderate, 9 high, 2 critical). The affected direct packages are development-only `vitest@3.2.4` and `typescript-eslint@8.46.1`; runtime production dependency remains `@agentclientprotocol/sdk@1.9.0`. No automatic audit fix is applied because release compatibility is intentionally pinned. Before a production release, upgrade the dev-only toolchain in a separate compatibility change, rerun the full suite, and record the resulting audit state.
+The Step-6 development-toolchain audit is complete. The bridge now uses Vitest `5.0.5`, vite-node `6.0.0`, typescript-eslint `8.71.2`, ESLint / @eslint/js `9.39.5`, TypeScript `5.9.3`, and runtime `@agentclientprotocol/sdk@1.9.0`. A fresh `npm ci` followed by `npm audit --json` reports zero vulnerabilities; the full suite/build/package smoke also pass. See `docs/evidence/v1-06-toolchain-audit.md`.

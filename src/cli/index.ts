@@ -1,10 +1,16 @@
 #!/usr/bin/env node
 
 import { compatibility } from "../compatibility.js";
+import { runProductionAcpStdio } from "../acp/stdio.js";
 import { runSetupDiagnostics } from "../diagnostics.js";
 import { releaseReadiness } from "../release.js";
 
 export async function main(argv: readonly string[]): Promise<number> {
+  if (argv.length === 0) {
+    await runProductionAcpStdio();
+    return 0;
+  }
+
   if (argv.includes("--compatibility")) {
     process.stdout.write(`${JSON.stringify(compatibility)}\n`);
     return 0;
@@ -29,7 +35,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     return result.ready ? 0 : 3;
   }
 
-  if (argv.includes("--help") || argv.length === 0) {
+  if (argv.includes("--help")) {
     process.stdout.write(
       [
         "t3onsteroids",

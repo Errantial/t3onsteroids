@@ -1,6 +1,8 @@
 import { compatibility } from "./compatibility.js";
+import { BRIDGE_VERSION } from "./version.js";
 
 export interface ReleaseReadiness {
+  readonly bridgeVersion: string;
   readonly supportedConcurrency: 1;
   readonly platform: "win32-x64";
   readonly t3Pinned: true;
@@ -17,6 +19,7 @@ export interface ReleaseReadiness {
 
 export function releaseReadiness(): ReleaseReadiness {
   return {
+    bridgeVersion: BRIDGE_VERSION,
     supportedConcurrency: 1,
     platform: compatibility.platform.primary,
     t3Pinned: true,

@@ -47,3 +47,45 @@ export class MemoryAdmissionLease implements AdmissionLease {
     if (current?.ownerId === ownerId) this.leases.delete(controllerIdentity);
   }
 }
+
+export {
+  DurableSessionStore,
+  DURABLE_SESSION_SCHEMA_VERSION,
+  defaultStateDirectory,
+} from "./durable.js";
+export type {
+  DurableSessionRecord,
+  DurableSessionStoreOptions,
+  DurableSessionTransition,
+  SessionTransitionResult,
+  TaggedSessionRead,
+} from "./durable.js";
+export {
+  HardLinkMutex,
+  PowerShellWindowsProcessIdentity,
+  StateLockBusyError,
+  UnsupportedStateFilesystemError,
+  probeHardLinkStateFilesystem,
+} from "./mutex.js";
+export type {
+  HardLinkMutexHandle,
+  HardLinkMutexOptions,
+  LockOwnerRecord,
+  ProcessIdentityResult,
+  WindowsProcessIdentity,
+} from "./mutex.js";
+export {
+  DurableAdmissionLease,
+  canonicalProfileIdentityHash,
+  leaseReferencedSessionIds,
+} from "./lease.js";
+export type {
+  DurableAdmissionLeaseOptions,
+  DurableLeaseAcquireResult,
+  DurableLeaseReadResult,
+  DurableLeaseRecord,
+  LeaseReleaseProof,
+  LeaseReleaseResult,
+} from "./lease.js";
+export { createProductionStateContext } from "./production.js";
+export type { ProductionStateContext } from "./production.js";

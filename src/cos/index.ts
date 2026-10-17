@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { BridgeMetrics } from "../metrics.js";
 
 export const COS_CONTROL_PROTOCOL = 1 as const;
 export const COS_APP_ID = "chat-on-steroids" as const;
@@ -7,7 +8,13 @@ export const COS_PROVIDER_EXTENSION_FEATURES = {
   projectResolve: "provider-project-resolve-v1",
   assistantContent: "provider-assistant-content-v1",
   sessionPolicy: "provider-session-policy-v1",
+  turnDrain: "provider-turn-drain-v1",
 } as const;
+
+export interface CosProviderExtensionIdentity {
+  readonly apiVersion: 1;
+  readonly buildId: string;
+}
 
 export type CosErrorCode =
   | "controller_unavailable"
@@ -29,8 +36,8 @@ export class CosControllerError extends Error {
   readonly retryable: boolean;
   readonly status: number | undefined;
 
-  constructor(code: CosErrorCode, message: string, options: { retryable?: boolean; status?: number; cause?: unknown } = {}) {
-    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+  constructor(code: CosErrorCode, message: string, options: { retryable?: boolean; status?: number } = {}) {
+    super(message);
     this.name = "CosControllerError";
     this.code = code;
     this.retryable = options.retryable ?? false;
@@ -51,6 +58,7 @@ export interface CosControllerReadiness {
   readonly actionRoutes: readonly string[];
   readonly app: string;
   readonly features: Readonly<Record<string, number>>;
+  readonly providerExtension?: CosProviderExtensionIdentity | undefined;
 }
 
 export interface CosResolvedProject {
@@ -74,6 +82,16 @@ export interface CosProviderSessionPolicyAttestation {
   readonly enforced: true;
 }
 
+export type CosProviderTurnState = "admitted" | "active" | "closing" | "drained" | "not_sent" | "broken";
+
+export interface CosProviderTurnAttestation {
+  readonly inputId: string;
+  readonly state: CosProviderTurnState;
+  readonly turnId: string | null;
+  readonly drainedSeq: number | null;
+  readonly finalAssistantSeq: number | null;
+}
+
 export interface CosInputRecord {
   readonly id: string;
   readonly sessionId?: string | undefined;
@@ -84,11 +102,15 @@ export interface CosSessionSummary {
   readonly id: string;
   readonly activeTurnId?: string | null | undefined;
   readonly providerPolicy?: CosProviderSessionPolicyAttestation | undefined;
+  readonly providerTurn?: CosProviderTurnAttestation | undefined;
 }
 
 export interface CosEvent {
   readonly seq: number;
-  readonly type: string;
+  readonly position: number;
+  readonly time: number;
+  readonly kind: string;
+  readonly source: string;
   readonly turnId?: string | undefined;
   readonly [key: string]: unknown;
 }
@@ -116,6 +138,7 @@ export interface CosClientMetrics {
   readonly readRetries: number;
   readonly sseConnectAttempts: number;
   readonly sseReconnects: number;
+  readonly sseBackoffs: number;
   readonly assistantContentBytes: number;
   readonly assistantContentRequests: number;
 }
@@ -176,6 +199,47 @@ function parseProviderPolicy(value: unknown, context: string): CosProviderSessio
   return { backgroundWork: "disabled", enforced: true };
 }
 
+function nullableString(value: unknown, context: string): string | null {
+  if (value === null) return null;
+  return asString(value, context);
+}
+
+function nullablePositiveInteger(value: unknown, context: string): number | null {
+  if (value === null) return null;
+  const number = asNumber(value, context);
+  if (!Number.isSafeInteger(number) || number < 1) throw new CosControllerError("schema_mismatch", `${context} must be a positive integer or null`);
+  return number;
+}
+
+function parseProviderTurn(value: unknown, context: string): CosProviderTurnAttestation | undefined {
+  if (value === undefined || value === null) return undefined;
+  const row = asRecord(value, context);
+  const state = asString(row.state, `${context}.state`);
+  if (!["admitted", "active", "closing", "drained", "not_sent", "broken"].includes(state)) {
+    throw new CosControllerError("schema_mismatch", `${context}.state is invalid`);
+  }
+  return {
+    inputId: asString(row.inputId, `${context}.inputId`),
+    state: state as CosProviderTurnState,
+    turnId: nullableString(row.turnId, `${context}.turnId`),
+    drainedSeq: nullablePositiveInteger(row.drainedSeq, `${context}.drainedSeq`),
+    finalAssistantSeq: nullablePositiveInteger(row.finalAssistantSeq, `${context}.finalAssistantSeq`),
+  };
+}
+
+function parseProviderExtensionIdentity(value: unknown): CosProviderExtensionIdentity | undefined {
+  if (value === undefined || value === null) return undefined;
+  const row = asRecord(value, "health.providerExtension");
+  if (row.apiVersion !== 1) {
+    throw new CosControllerError("schema_mismatch", "health.providerExtension.apiVersion must be 1");
+  }
+  const buildId = asString(row.buildId, "health.providerExtension.buildId");
+  if (!/^[0-9a-f]{40}$/i.test(buildId) && buildId !== "development") {
+    throw new CosControllerError("schema_mismatch", "health.providerExtension.buildId must be a Git SHA or development");
+  }
+  return { apiVersion: 1, buildId: buildId.toLowerCase() };
+}
+
 export function parseHealth(value: unknown): CosControllerReadiness {
   const row = asRecord(value, "health");
   const actions = asRecord(row.actions, "health.actions");
@@ -199,6 +263,7 @@ export function parseHealth(value: unknown): CosControllerReadiness {
     actionsEnabled: actions.enabled,
     actionRoutes: actions.routes,
     features: parseFeatureMap(row.features),
+    providerExtension: parseProviderExtensionIdentity(row.providerExtension),
   };
 }
 
@@ -211,21 +276,34 @@ export async function discoverCosController(userDataDir: string): Promise<CosCon
       readFile(join(controlDir, "endpoint.json"), "utf8"),
       readFile(join(controlDir, "token"), "utf8"),
     ]);
-  } catch (cause) {
+  } catch {
     throw new CosControllerError("controller_unavailable", "CoS control API discovery files are unavailable", {
       retryable: true,
-      cause,
     });
   }
 
-  const endpoint = asRecord(JSON.parse(endpointRaw), "endpoint.json");
+  let parsedEndpoint: unknown;
+  try {
+    parsedEndpoint = JSON.parse(endpointRaw);
+  } catch {
+    throw new CosControllerError("schema_mismatch", "endpoint.json is malformed JSON");
+  }
+  const endpoint = asRecord(parsedEndpoint, "endpoint.json");
   const baseUrl = optionalString(endpoint.url ?? endpoint.baseUrl ?? endpoint.endpoint, "endpoint url");
   if (!baseUrl) {
     throw new CosControllerError("schema_mismatch", "endpoint.json does not contain a controller URL");
   }
-  const parsed = new URL(baseUrl);
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    throw new CosControllerError("schema_mismatch", "endpoint.json controller URL is invalid");
+  }
   if (parsed.protocol !== "http:" || (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost" && parsed.hostname !== "::1")) {
     throw new CosControllerError("schema_mismatch", "controller endpoint must be loopback HTTP");
+  }
+  if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+    throw new CosControllerError("schema_mismatch", "controller endpoint must be a credential-free loopback origin");
   }
 
   const trimmedToken = token.trim();
@@ -243,11 +321,11 @@ export async function discoverCosController(userDataDir: string): Promise<CosCon
 
 function mapHttpError(status: number, body: unknown): CosControllerError {
   const row = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : undefined;
-  const wireCode = row && typeof row.code === "string" ? row.code : undefined;
+  const wireCode = row && typeof (row.error ?? row.code) === "string" ? String(row.error ?? row.code) : undefined;
+  if (status === 403 && wireCode === "actions_disabled") return new CosControllerError("actions_disabled", "CoS controller actions are disabled", { status });
   if (status === 401 || status === 403) return new CosControllerError("controller_auth_changed", "CoS controller authentication changed", { retryable: true, status });
   if (status === 429) return new CosControllerError("rate_limited", "CoS controller rate limited the request", { retryable: true, status });
   if (status === 503 && wireCode === "queue_full") return new CosControllerError("queue_full", "CoS controller action queue is full", { retryable: true, status });
-  if (status === 409 && wireCode === "actions_disabled") return new CosControllerError("actions_disabled", "CoS controller actions are disabled", { status });
   if (status === 404 && wireCode === "project_unmapped") return new CosControllerError("project_unmapped", "No exact usable CoS project matches the requested canonical path", { status });
   if (status === 409 && wireCode === "provider_policy_unavailable") return new CosControllerError("provider_policy_unavailable", "Required CoS provider-session policy is unavailable", { status });
   return new CosControllerError("request_failed", `CoS controller request failed with HTTP ${status}`, { status });
@@ -264,6 +342,7 @@ export class CosControllerClient {
     readRetries: 0,
     sseConnectAttempts: 0,
     sseReconnects: 0,
+    sseBackoffs: 0,
     assistantContentBytes: 0,
     assistantContentRequests: 0,
   };
@@ -272,6 +351,7 @@ export class CosControllerClient {
     private readonly discover: () => Promise<CosControllerDiscovery>,
     private readonly transport: CosControllerTransport = { fetch: globalThis.fetch.bind(globalThis) },
     private readonly retryPolicy: RetryPolicy = DEFAULT_RETRY_POLICY,
+    private readonly bridgeMetrics?: BridgeMetrics,
   ) {}
 
   private async getDiscovery(force = false): Promise<CosControllerDiscovery> {
@@ -287,6 +367,8 @@ export class CosControllerClient {
         this.metricsState.readAttempts += 1;
         if (attempt > 1) this.metricsState.readRetries += 1;
       }
+      const method = String(init.method ?? "GET").toUpperCase();
+      this.bridgeMetrics?.increment(method === "GET" ? "controllerReadCount" : "controllerActionCount");
       const discovery = await this.getDiscovery(attempt > 1);
       const headers = new Headers(init.headers);
       headers.set("Authorization", `Bearer ${discovery.token}`);
@@ -311,18 +393,24 @@ export class CosControllerClient {
         if (cause instanceof CosControllerError) throw cause;
         lastError = cause;
         if (attempt >= maxAttempts) {
-          throw new CosControllerError("controller_unavailable", "CoS controller request failed", { retryable: true, cause });
+          throw new CosControllerError("controller_unavailable", "CoS controller request failed", { retryable: true });
         }
         const delay = Math.min(this.retryPolicy.baseDelayMs * 2 ** (attempt - 1), this.retryPolicy.maxDelayMs);
+        this.bridgeMetrics?.increment("backoffCount");
         await sleep(delay);
       }
     }
-    throw new CosControllerError("controller_unavailable", "CoS controller request failed", { retryable: true, cause: lastError });
+    void lastError;
+    throw new CosControllerError("controller_unavailable", "CoS controller request failed", { retryable: true });
   }
 
   private async readJson(path: string): Promise<unknown> {
     const response = await this.request(path, { method: "GET" }, { retryRead: true });
-    return response.json();
+    try {
+      return await response.json();
+    } catch {
+      throw new CosControllerError("schema_mismatch", "CoS controller returned malformed JSON");
+    }
   }
 
   async health(): Promise<CosControllerReadiness> {
@@ -336,6 +424,9 @@ export class CosControllerClient {
         throw new CosControllerError("provider_extension_unavailable", `Required CoS provider extension feature is unavailable: ${feature}`);
       }
     }
+    if (!readiness.providerExtension || readiness.providerExtension.apiVersion !== 1) {
+      throw new CosControllerError("provider_extension_unavailable", "Required CoS provider extension build identity is unavailable");
+    }
     return readiness;
   }
 
@@ -346,7 +437,13 @@ export class CosControllerClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     });
-    const row = asRecord(await response.json(), "project resolve response");
+    let value: unknown;
+    try {
+      value = await response.json();
+    } catch {
+      throw new CosControllerError("schema_mismatch", "project resolve response is malformed JSON");
+    }
+    const row = asRecord(value, "project resolve response");
     return {
       projectId: asString(row.projectId, "project resolve response.projectId"),
       name: asString(row.name, "project resolve response.name"),
@@ -356,7 +453,7 @@ export class CosControllerClient {
 
   async assistantContentChunk(sessionId: string, seq: number, offset = 0, limit = 16_384): Promise<CosAssistantContentChunk> {
     await this.requireProviderExtension();
-    if (!Number.isInteger(seq) || seq < 0 || !Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 65_536) {
+    if (!Number.isInteger(seq) || seq < 1 || !Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 2 || limit > 65_536) {
       throw new CosControllerError("schema_mismatch", "assistant content range is invalid");
     }
     const value = await this.readJson(`/v1/sessions/${encodeURIComponent(sessionId)}/events/${seq}/assistant-content?offset=${offset}&limit=${limit}`);
@@ -383,10 +480,9 @@ export class CosControllerClient {
     return { ...this.metricsState };
   }
 
-  async fullAssistantContent(sessionId: string, seq: number, chunkSize = 16_384): Promise<string> {
+  async *assistantContentChunks(sessionId: string, seq: number, chunkSize = 16_384): AsyncGenerator<CosAssistantContentChunk> {
     let offset = 0;
     let expectedTotal: number | undefined;
-    let result = "";
     for (;;) {
       const chunk = await this.assistantContentChunk(sessionId, seq, offset, chunkSize);
       if (chunk.sessionId !== sessionId || chunk.seq !== seq || chunk.offset !== offset) {
@@ -394,15 +490,25 @@ export class CosControllerClient {
       }
       if (expectedTotal === undefined) expectedTotal = chunk.totalLength;
       if (chunk.totalLength !== expectedTotal) throw new CosControllerError("schema_mismatch", "assistant content totalLength changed during retrieval");
-      result += chunk.text;
       offset += chunk.text.length;
       if (offset > expectedTotal) throw new CosControllerError("schema_mismatch", "assistant content exceeded declared totalLength");
+      if (!chunk.complete && chunk.text.length === 0) {
+        throw new CosControllerError("schema_mismatch", "assistant content returned an empty nonterminal chunk");
+      }
+      yield chunk;
       if (chunk.complete) {
         if (offset !== expectedTotal) throw new CosControllerError("schema_mismatch", "assistant content completed before declared totalLength");
-        return result;
+        return;
       }
-      if (chunk.text.length === 0) throw new CosControllerError("schema_mismatch", "assistant content returned an empty nonterminal chunk");
     }
+  }
+
+  async fullAssistantContent(sessionId: string, seq: number, chunkSize = 16_384): Promise<string> {
+    let result = "";
+    for await (const chunk of this.assistantContentChunks(sessionId, seq, chunkSize)) {
+      result += chunk.text;
+    }
+    return result;
   }
 
   async session(sessionId: string): Promise<CosSessionSummary> {
@@ -411,6 +517,7 @@ export class CosControllerClient {
       id: asString(row.id, "session.id"),
       activeTurnId: row.activeTurnId === null ? null : optionalString(row.activeTurnId, "session.activeTurnId"),
       providerPolicy: parseProviderPolicy(row.providerPolicy, "session.providerPolicy"),
+      providerTurn: parseProviderTurn(row.providerTurn, "session.providerTurn"),
     };
   }
 
@@ -424,9 +531,9 @@ export class CosControllerClient {
   }
 
   async input(inputId: string): Promise<CosInputRecord | undefined> {
-    const value = await this.readJson(`/v1/inputs?id=${encodeURIComponent(inputId)}`);
-    const rows = Array.isArray(value) ? value : asRecord(value, "inputs").items;
-    if (!Array.isArray(rows)) throw new CosControllerError("schema_mismatch", "inputs response must be an array or object with items");
+    const value = await this.readJson("/v1/inputs?limit=500");
+    const rows = asRecord(value, "inputs").inputs;
+    if (!Array.isArray(rows)) throw new CosControllerError("schema_mismatch", "inputs response must contain an inputs array");
     const match = rows.find((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && (entry as Record<string, unknown>).id === inputId);
     if (!match) return undefined;
     const row = asRecord(match, "input");
@@ -440,11 +547,19 @@ export class CosControllerClient {
   async events(sessionId: string, from?: number): Promise<readonly CosEvent[]> {
     const suffix = from === undefined ? "" : `?from=${encodeURIComponent(String(from))}`;
     const value = await this.readJson(`/v1/sessions/${encodeURIComponent(sessionId)}/events${suffix}`);
-    const rows = Array.isArray(value) ? value : asRecord(value, "events").items;
-    if (!Array.isArray(rows)) throw new CosControllerError("schema_mismatch", "events response must be an array or object with items");
+    const rows = asRecord(value, "events").events;
+    if (!Array.isArray(rows)) throw new CosControllerError("schema_mismatch", "events response must contain an events array");
     return rows.map((entry, index) => {
       const row = asRecord(entry, `events[${index}]`);
-      return { ...row, seq: asNumber(row.seq, `events[${index}].seq`), type: asString(row.type, `events[${index}].type`), turnId: optionalString(row.turnId, `events[${index}].turnId`) };
+      return {
+        ...row,
+        seq: asNumber(row.seq, `events[${index}].seq`),
+        position: asNumber(row.position, `events[${index}].position`),
+        time: asNumber(row.time, `events[${index}].time`),
+        kind: asString(row.kind, `events[${index}].kind`),
+        source: asString(row.source, `events[${index}].source`),
+        turnId: optionalString(row.turnId, `events[${index}].turnId`),
+      };
     });
   }
 
@@ -466,28 +581,62 @@ export class CosControllerClient {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(input),
       });
-      const row = asRecord(await response.json(), "send response");
-      return { id: asString(row.id ?? input.id, "send.id"), sessionId: optionalString(row.sessionId, "send.sessionId"), delivery: optionalString(row.delivery, "send.delivery") as CosInputRecord["delivery"] };
+      let value: unknown;
+      try {
+        value = await response.json();
+      } catch {
+        throw new CosControllerError("schema_mismatch", "send response is malformed JSON");
+      }
+      const envelope = asRecord(value, "send response");
+      if (typeof envelope.replayed !== "boolean") throw new CosControllerError("schema_mismatch", "send response.replayed must be boolean");
+      const row = asRecord(envelope.input, "send response.input");
+      const delivery = asString(row.delivery, "send response.input.delivery");
+      if (!["pending", "sent", "not_sent", "unconfirmed"].includes(delivery)) {
+        throw new CosControllerError("schema_mismatch", `Unknown input delivery state ${delivery}`);
+      }
+      return {
+        id: asString(row.id, "send response.input.id"),
+        sessionId: optionalString(row.sessionId, "send response.input.sessionId"),
+        delivery: delivery as NonNullable<CosInputRecord["delivery"]>,
+      };
     } catch (cause) {
       if (cause instanceof CosControllerError && !["controller_unavailable", "controller_auth_changed", "request_failed"].includes(cause.code)) throw cause;
       const existing = await this.input(input.id);
       if (existing) return existing;
-      throw new CosControllerError("delivery_unconfirmed", "Input delivery could not be confirmed after an ambiguous send failure", { cause });
+      throw new CosControllerError("delivery_unconfirmed", "Input delivery could not be confirmed after an ambiguous send failure");
     }
   }
 
   async cancelPendingInput(inputId: string): Promise<void> {
     const response = await this.request(`/v1/inputs/${encodeURIComponent(inputId)}/cancel`, { method: "POST" });
-    if (!response.ok) throw mapHttpError(response.status, undefined);
+    let value: unknown;
+    try {
+      value = await response.json();
+    } catch {
+      throw new CosControllerError("schema_mismatch", "pending-input cancel response is malformed JSON");
+    }
+    const row = asRecord(value, "pending-input cancel response");
+    if (row.ok !== true) throw new CosControllerError("schema_mismatch", "pending-input cancel response.ok must be true");
   }
 
-  async stopExactTurn(sessionId: string, turnId: string, options: { timeoutMs?: number; pollMs?: number } = {}): Promise<CosEvent> {
+  async requestStopExactTurn(sessionId: string, turnId: string): Promise<void> {
     const response = await this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/stop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ turnId }),
     });
-    if (response.status !== 202 && !response.ok) throw mapHttpError(response.status, undefined);
+    if (response.status !== 202) throw new CosControllerError("schema_mismatch", "Stop response status must be 202");
+    let value: unknown;
+    try {
+      value = await response.json();
+    } catch {
+      throw new CosControllerError("schema_mismatch", "Stop response is malformed JSON");
+    }
+    asRecord(value, "Stop response");
+  }
+
+  async stopExactTurn(sessionId: string, turnId: string, options: { timeoutMs?: number; pollMs?: number } = {}): Promise<CosEvent> {
+    await this.requestStopExactTurn(sessionId, turnId);
 
     const timeoutMs = options.timeoutMs ?? 10_000;
     const pollMs = options.pollMs ?? 50;
@@ -497,16 +646,18 @@ export class CosControllerClient {
       const rows = await this.events(sessionId, cursor || undefined);
       for (const event of rows) {
         cursor = Math.max(cursor, event.seq + 1);
-        if (event.type === "turn_end" && event.turnId === turnId) return event;
+        if (event.kind === "turn_end" && event.turnId === turnId) return event;
       }
       await sleep(pollMs);
     }
     throw new CosControllerError("turn_cancel_requested", `Stop was requested for turn ${turnId}, but matching turn_end was not observed`, { retryable: true });
   }
 
-  async *streamEvents(sessionId: string, options: { from?: number; signal?: AbortSignal } = {}): AsyncGenerator<CosEvent> {
+  async *streamEvents(sessionId: string, options: { from?: number; signal?: AbortSignal; rolloverMs?: number } = {}): AsyncGenerator<CosEvent> {
     let cursor = options.from;
     let connectedOnce = false;
+    let reconnectAttempt = 0;
+    const rolloverMs = options.rolloverMs ?? 29 * 60_000;
     while (!options.signal?.aborted) {
       const discovery = await this.getDiscovery();
       const headers = new Headers({ Accept: "text/event-stream", Authorization: `Bearer ${discovery.token}` });
@@ -514,23 +665,35 @@ export class CosControllerClient {
       try {
         this.metricsState.sseConnectAttempts += 1;
         if (connectedOnce) this.metricsState.sseReconnects += 1;
+        this.bridgeMetrics?.increment("sseConnectCount");
+        if (connectedOnce) this.bridgeMetrics?.increment("sseReconnectCount");
         const suffix = cursor === undefined ? "" : `?from=${encodeURIComponent(String(cursor))}`;
-        const requestInit: RequestInit = { headers };
-        if (options.signal) requestInit.signal = options.signal;
+        const streamController = new AbortController();
+        const onAbort = () => streamController.abort(options.signal?.reason);
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+        const timer = setTimeout(() => streamController.abort(new Error("sse_rollover")), rolloverMs);
+        const requestInit: RequestInit = { headers, signal: streamController.signal };
         const response = await this.transport.fetch(`${discovery.baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/events/stream${suffix}`, requestInit);
         if (!response.ok) throw mapHttpError(response.status, undefined);
         if (!response.body) throw new CosControllerError("controller_unavailable", "SSE response has no body", { retryable: true });
         connectedOnce = true;
         const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
         let buffer = "";
+        let sawEvent = false;
         for (;;) {
           const { value, done } = await reader.read();
           if (done) break;
           buffer += value;
           let boundary: number;
-          while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+          for (;;) {
+            const lf = buffer.indexOf("\n\n");
+            const crlf = buffer.indexOf("\r\n\r\n");
+            if (lf < 0 && crlf < 0) break;
+            const useCrlf = crlf >= 0 && (lf < 0 || crlf < lf);
+            boundary = useCrlf ? crlf : lf;
+            const separatorLength = useCrlf ? 4 : 2;
             const frame = buffer.slice(0, boundary).replace(/\r/g, "");
-            buffer = buffer.slice(boundary + 2);
+            buffer = buffer.slice(boundary + separatorLength);
             let id: number | undefined;
             const dataLines: string[] = [];
             for (const line of frame.split("\n")) {
@@ -538,26 +701,55 @@ export class CosControllerClient {
               else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
             }
             if (dataLines.length === 0) continue;
-            const row = asRecord(JSON.parse(dataLines.join("\n")), "SSE event");
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(dataLines.join("\n"));
+            } catch {
+              throw new CosControllerError("schema_mismatch", "SSE event data is malformed JSON");
+            }
+            const row = asRecord(parsed, "SSE event");
             const event: CosEvent = {
               ...row,
               seq: asNumber(row.seq ?? id, "SSE event.seq"),
-              type: asString(row.type, "SSE event.type"),
+              position: asNumber(row.position, "SSE event.position"),
+              time: asNumber(row.time, "SSE event.time"),
+              kind: asString(row.kind, "SSE event.kind"),
+              source: asString(row.source, "SSE event.source"),
               turnId: optionalString(row.turnId, "SSE event.turnId"),
             };
             cursor = event.seq + 1;
+            sawEvent = true;
             yield event;
           }
         }
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onAbort);
+        if (options.signal?.aborted) return;
+        reconnectAttempt = sawEvent ? 0 : reconnectAttempt + 1;
+        this.metricsState.sseBackoffs += 1;
+        this.bridgeMetrics?.increment("backoffCount");
+        const exponential = Math.min(this.retryPolicy.baseDelayMs * 2 ** Math.max(0, reconnectAttempt - 1), this.retryPolicy.maxDelayMs);
+        const jitter = Math.floor(exponential * 0.2 * Math.random());
+        await sleep(Math.min(this.retryPolicy.maxDelayMs, exponential + jitter));
       } catch (cause) {
         if (options.signal?.aborted) return;
         if (cause instanceof CosControllerError && cause.code === "controller_auth_changed") this.discovery = undefined;
-        else if (!(cause instanceof CosControllerError) && cause instanceof Error && cause.name === "AbortError") return;
+        else if (!(cause instanceof CosControllerError) && cause instanceof Error && cause.name === "AbortError") {
+          reconnectAttempt += 1;
+        }
         else if (!(cause instanceof CosControllerError) || !cause.retryable) {
           if (cause instanceof CosControllerError) throw cause;
           this.discovery = undefined;
         }
-        await sleep(this.retryPolicy.baseDelayMs);
+        else reconnectAttempt += 1;
+        this.metricsState.sseBackoffs += 1;
+        this.bridgeMetrics?.increment("backoffCount");
+        const exponential = Math.min(
+          this.retryPolicy.baseDelayMs * 2 ** Math.max(0, reconnectAttempt - 1),
+          this.retryPolicy.maxDelayMs,
+        );
+        const jitter = Math.floor(exponential * 0.2 * Math.random());
+        await sleep(Math.min(this.retryPolicy.maxDelayMs, exponential + jitter));
       }
     }
   }

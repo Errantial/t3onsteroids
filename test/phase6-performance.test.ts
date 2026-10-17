@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { CosControllerClient } from "../src/cos/index.js";
+import { BridgeMetrics } from "../src/metrics.js";
 import { BoundedAsyncQueue } from "../src/translate/queue.js";
 
 const extensionHealth = {
@@ -11,7 +12,9 @@ const extensionHealth = {
     "provider-project-resolve-v1": 1,
     "provider-assistant-content-v1": 1,
     "provider-session-policy-v1": 1,
+    "provider-turn-drain-v1": 1,
   },
+  providerExtension: { apiVersion: 1, buildId: "a".repeat(40) },
 };
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -26,8 +29,48 @@ describe("Phase 6 performance and concurrency qualification", () => {
     expect(queue.push(3)).toBe(true);
     expect(queue.push(4)).toBe(false);
     expect(queue.size).toBe(3);
+    expect(queue.highWater).toBe(3);
     await expect(queue.shift()).resolves.toBe(1);
     expect(queue.size).toBe(2);
+    expect(queue.highWater).toBe(3);
+  });
+
+  it("keeps bridge metrics metadata-only and content/token safe", () => {
+    const token = "partial-secret-token-fixture";
+    const prompt = "hostile prompt C:\\private\\repo with browser contents";
+    const metrics = new BridgeMetrics();
+    metrics.increment("promptReceived");
+    metrics.increment("controllerReadCount");
+    metrics.increment("sseConnectCount");
+    metrics.observeDrainHighWater(42);
+    metrics.observeQueueDepth(2, 5);
+    const serialized = JSON.stringify(metrics.snapshot());
+    expect(serialized).not.toContain(token);
+    expect(serialized).not.toContain(prompt);
+    expect(serialized).not.toContain("private");
+    expect(JSON.parse(serialized)).toMatchObject({
+      promptReceived: 1,
+      controllerReadCount: 1,
+      sseConnectCount: 1,
+      drainHighWaterSeq: 42,
+      currentQueueDepth: 2,
+      maxQueueDepth: 5,
+    });
+    expect(JSON.parse(serialized).rssHighWaterBytes).toBeGreaterThan(0);
+    expect(JSON.parse(serialized).lastUpdatedAt).toBeGreaterThanOrEqual(0);
+  });
+
+  it("wires controller attempts into the shared bridge metrics snapshot", async () => {
+    const metrics = new BridgeMetrics();
+    const fetch = vi.fn(async () => jsonResponse(extensionHealth));
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 },
+      metrics,
+    );
+    await client.health();
+    expect(metrics.snapshot()).toMatchObject({ controllerReadCount: 1 });
   });
 
   it("fetches long assistant content in O(final size) bytes", async () => {
@@ -57,7 +100,7 @@ describe("Phase 6 performance and concurrency qualification", () => {
   });
 
   it("does not spin on controller 503 queue_full", async () => {
-    const fetch = vi.fn(async () => jsonResponse({ code: "queue_full" }, 503));
+    const fetch = vi.fn(async () => jsonResponse({ error: "queue_full" }, 503));
     const client = new CosControllerClient(
       async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
       { fetch },
@@ -87,12 +130,12 @@ describe("Phase 6 performance and concurrency qualification", () => {
     const fetch = vi.fn(async () => {
       call += 1;
       if (call === 1) {
-        return new Response('id: 1\ndata: {"seq":1,"type":"assistant_message"}\n\n', {
+        return new Response('id: 1\nevent: assistant_message\ndata: {"seq":1,"position":1,"time":1,"kind":"assistant_message","source":"extension"}\n\n', {
           status: 200,
           headers: { "Content-Type": "text/event-stream" },
         });
       }
-      return new Response('id: 2\ndata: {"seq":2,"type":"turn_end","turnId":"t"}\n\n', {
+      return new Response('id: 2\nevent: turn_end\ndata: {"seq":2,"position":2,"time":2,"kind":"turn_end","source":"extension","turnId":"t"}\n\n', {
         status: 200,
         headers: { "Content-Type": "text/event-stream" },
       });

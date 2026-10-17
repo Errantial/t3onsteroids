@@ -1,4 +1,9 @@
+import { BRIDGE_VERSION } from "./version.js";
+
 export const compatibility = {
+  bridge: {
+    version: BRIDGE_VERSION,
+  },
   t3: {
     version: "0.0.46-nightly.20261013.3040",
     sha: "ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8",
@@ -20,4 +25,3 @@ export const compatibility = {
 } as const;
 
 export type Compatibility = typeof compatibility;
-

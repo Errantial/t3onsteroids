@@ -12,7 +12,8 @@ export interface DirectTurnSample {
 export interface SlowConsumerSample {
   readonly rssHighWaterBytes: number;
   readonly maxQueueDepth: number;
-  readonly queueCapacity: number;
+  /** Null means production uses synchronous downstream backpressure and owns no buffering queue. */
+  readonly queueCapacity: number | null;
   readonly sseReconnectCount: number;
   readonly backoffCount: number;
   readonly controllerReadCount: number;
@@ -78,7 +79,9 @@ export function qualifyStep7Performance(input: Step7PerformanceInput): Step7Perf
     postDrainP95: postDrainP95Ms !== null && postDrainP95Ms <= 250,
     drainDeadline: input.slowConsumer.drainedWithinMs !== null && input.slowConsumer.drainedWithinMs <= 30_000,
     rssHighWater: input.slowConsumer.rssHighWaterBytes < 256 * MIB,
-    queueBound: input.slowConsumer.maxQueueDepth <= input.slowConsumer.queueCapacity,
+    queueBound: input.slowConsumer.queueCapacity === null
+      ? input.slowConsumer.maxQueueDepth === 0
+      : input.slowConsumer.maxQueueDepth <= input.slowConsumer.queueCapacity,
     reconnectBound: input.slowConsumer.sseReconnectCount <= 1 || input.slowConsumer.backoffCount >= input.slowConsumer.sseReconnectCount - 1,
   } as const;
 

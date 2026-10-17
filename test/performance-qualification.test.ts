@@ -73,4 +73,28 @@ describe("Step 7 performance qualification", () => {
       reconnectBound: false,
     });
   });
+
+  it("models synchronous downstream backpressure as a zero-depth queue", () => {
+    const bridged = Array.from({ length: 10 }, () => ({ preSendMs: 1, drainMs: 1, postDrainMs: 1 }));
+    const direct = Array.from({ length: 10 }, () => ({ endToEndMs: 1 }));
+    const base = {
+      bridged,
+      direct,
+      slowConsumer: {
+        rssHighWaterBytes: 64 * 1024 * 1024,
+        maxQueueDepth: 0,
+        queueCapacity: null,
+        sseReconnectCount: 0,
+        backoffCount: 0,
+        controllerReadCount: 1,
+        controllerActionCount: 1,
+        drainedWithinMs: 1,
+      },
+    } as const;
+    expect(qualifyStep7Performance(base).checks.queueBound).toBe(true);
+    expect(qualifyStep7Performance({
+      ...base,
+      slowConsumer: { ...base.slowConsumer, maxQueueDepth: 1 },
+    }).checks.queueBound).toBe(false);
+  });
 });

@@ -61,13 +61,18 @@ describe("Phase 3 ACP shell and lazy binding", () => {
     expect(controller.send).not.toHaveBeenCalled();
   });
 
-  it("rejects nonempty MCP forwarding because v1 does not advertise or implement it", async () => {
+  it("accepts but does not forward T3-injected MCP metadata", async () => {
     const controller = makeController();
     const runtime = new AcpBridgeRuntime({ controller, store: new MemoryStateStore<SessionState>(), makeUuid: () => sessionId });
-    expect(() => runtime.newSession({
+    expect(runtime.newSession({
       cwd: "C:\\repo",
-      mcpServers: [{ name: "unsupported", command: "example", args: [], env: [] }],
-    })).toThrowError(BridgeError);
+      mcpServers: [{ name: "t3-code", command: "example", args: [], env: [] }],
+    })).toEqual({ sessionId });
+    await expect(runtime.resumeSession({
+      sessionId,
+      cwd: "C:\\repo",
+      mcpServers: [{ name: "t3-code", command: "example", args: [], env: [] }],
+    })).resolves.toEqual({});
     expect(controller.send).not.toHaveBeenCalled();
   });
 

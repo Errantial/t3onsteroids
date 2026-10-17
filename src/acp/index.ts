@@ -123,12 +123,6 @@ function rejectAdditionalDirectories(additionalDirectories: readonly string[] | 
   }
 }
 
-function rejectMcpServers(mcpServers: readonly unknown[] | undefined): void {
-  if (mcpServers && mcpServers.length > 0) {
-    throw new BridgeError("mcp_servers_unsupported", "MCP forwarding is not supported in v1");
-  }
-}
-
 function parseKnownT3Envelope(text: string, currentMode: InteractionMode): { text: string; mode: InteractionMode } {
   if (text.startsWith("/")) throw new BridgeError("unsupported_command", "Native T3 slash commands are not supported in v1");
   if (!text.includes("<t3_code_instructions>")) return { text, mode: currentMode };
@@ -790,23 +784,12 @@ export class AcpBridgeRuntime {
 
   newSession(request: NewSessionRequest): NewSessionResponse {
     rejectAdditionalDirectories(request.additionalDirectories);
-    rejectMcpServers(request.mcpServers);
     const sessionId = this.makeUuid();
     this.sessions.set(sessionId, newUnboundSession(sessionId, request.cwd));
     return { sessionId };
   }
 
   async resumeSession(request: ResumeSessionRequest): Promise<ResumeSessionResponse> {
-    if (request.mcpServers?.length) {
-      if (this.options.durableStore) {
-        const persisted = await this.readPersisted(request.sessionId);
-        const existing = persisted ?? this.sessions.get(request.sessionId) ?? newUnboundSession(request.sessionId, request.cwd);
-        const created = persisted ? existing : await this.ensureDurableCreated(existing);
-        await this.markBroken(created, "ambiguous_recovery");
-        return {};
-      }
-      rejectMcpServers(request.mcpServers);
-    }
     if (this.options.durableStore) {
       const persisted = await this.readPersisted(request.sessionId);
       const draft = this.sessions.get(request.sessionId);

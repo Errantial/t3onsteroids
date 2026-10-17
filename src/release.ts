@@ -8,10 +8,10 @@ export interface ReleaseReadiness {
   readonly t3Pinned: true;
   readonly cosPinned: true;
   readonly controllerProtocol: 1;
-  readonly productionAcpEntrypoint: false;
-  readonly cosProviderExtensionReady: false;
-  readonly eventTranslatorReady: false;
-  readonly durableRecoveryReady: false;
+  readonly productionAcpEntrypoint: true;
+  readonly cosProviderExtensionReady: true;
+  readonly eventTranslatorReady: true;
+  readonly durableRecoveryReady: true;
   readonly liveAcceptanceRequired: true;
   readonly currentHeadDriftRequired: true;
   readonly releaseQualified: false;
@@ -25,10 +25,10 @@ export function releaseReadiness(): ReleaseReadiness {
     t3Pinned: true,
     cosPinned: true,
     controllerProtocol: compatibility.cos.controlApiProtocol,
-    productionAcpEntrypoint: false,
-    cosProviderExtensionReady: false,
-    eventTranslatorReady: false,
-    durableRecoveryReady: false,
+    productionAcpEntrypoint: true,
+    cosProviderExtensionReady: true,
+    eventTranslatorReady: true,
+    durableRecoveryReady: true,
     liveAcceptanceRequired: true,
     currentHeadDriftRequired: true,
     releaseQualified: false,

@@ -14,7 +14,23 @@ export interface BridgeMetricsSnapshot {
   readonly maxQueueDepth: number;
   readonly rssHighWaterBytes: number;
   readonly lastUpdatedAt: number;
+  readonly recentTurns: readonly BridgeTurnTimingReceipt[];
 }
+
+export interface BridgeTurnTimingReceipt {
+  readonly sessionKey: string;
+  readonly generation: number;
+  readonly promptReceivedAt: number;
+  readonly cosInputAcceptedAt?: number;
+  readonly turnEndAt?: number;
+  readonly turnDrainedAt?: number;
+  readonly acpTerminalSentAt?: number;
+  readonly preSendMs?: number;
+  readonly drainMs?: number;
+  readonly postDrainMs?: number;
+}
+
+const MAX_RECENT_TURNS = 32;
 
 export class BridgeMetrics {
   private readonly startedAt = process.hrtime.bigint();
@@ -34,6 +50,7 @@ export class BridgeMetrics {
     maxQueueDepth: 0,
     rssHighWaterBytes: 0,
     lastUpdatedAt: 0,
+    recentTurns: [],
   };
 
   private monotonicNowMs(): number {
@@ -47,6 +64,56 @@ export class BridgeMetrics {
       rssHighWaterBytes: Math.max(this.state.rssHighWaterBytes, process.memoryUsage().rss),
       lastUpdatedAt: Math.max(this.state.lastUpdatedAt, this.monotonicNowMs()),
     };
+  }
+
+  private sessionKey(sessionId: string): string {
+    let hash = 2166136261;
+    for (let index = 0; index < sessionId.length; index += 1) {
+      hash ^= sessionId.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
+  }
+
+  monotonicTimestampMs(): number {
+    return this.monotonicNowMs();
+  }
+
+  private updateTiming(sessionId: string, generation: number, patch: Partial<BridgeTurnTimingReceipt>): void {
+    const current = [...this.state.recentTurns];
+    const sessionKey = this.sessionKey(sessionId);
+    const index = current.findIndex((receipt) => receipt.sessionKey === sessionKey && receipt.generation === generation);
+    const existing = index >= 0 ? current[index]! : undefined;
+    const next: BridgeTurnTimingReceipt = {
+      sessionKey,
+      generation,
+      promptReceivedAt: existing?.promptReceivedAt ?? this.monotonicNowMs(),
+      ...existing,
+      ...patch,
+    };
+    const derived: BridgeTurnTimingReceipt = {
+      ...next,
+      ...(next.cosInputAcceptedAt === undefined ? {} : { preSendMs: next.cosInputAcceptedAt - next.promptReceivedAt }),
+      ...(next.turnEndAt === undefined || next.turnDrainedAt === undefined ? {} : { drainMs: next.turnDrainedAt - next.turnEndAt }),
+      ...(next.turnDrainedAt === undefined || next.acpTerminalSentAt === undefined ? {} : { postDrainMs: next.acpTerminalSentAt - next.turnDrainedAt }),
+    };
+    if (index >= 0) current[index] = derived;
+    else current.push(derived);
+    this.update({ recentTurns: current.slice(-MAX_RECENT_TURNS) });
+  }
+
+  beginTurn(sessionId: string, generation: number, promptReceivedAt = this.monotonicNowMs()): void {
+    this.updateTiming(sessionId, generation, { promptReceivedAt });
+  }
+
+  markTurn(sessionId: string, generation: number, transition: "cos_input_accepted" | "turn_end" | "turn_drained" | "acp_terminal_sent"): void {
+    const now = this.monotonicNowMs();
+    switch (transition) {
+      case "cos_input_accepted": this.updateTiming(sessionId, generation, { cosInputAcceptedAt: now }); break;
+      case "turn_end": this.updateTiming(sessionId, generation, { turnEndAt: now }); break;
+      case "turn_drained": this.updateTiming(sessionId, generation, { turnDrainedAt: now }); break;
+      case "acp_terminal_sent": this.updateTiming(sessionId, generation, { acpTerminalSentAt: now }); break;
+    }
   }
 
   increment(field: keyof Pick<BridgeMetricsSnapshot,
@@ -74,6 +141,6 @@ export class BridgeMetrics {
 
   snapshot(): BridgeMetricsSnapshot {
     this.update({});
-    return { ...this.state };
+    return { ...this.state, recentTurns: this.state.recentTurns.map((receipt) => ({ ...receipt })) };
   }
 }

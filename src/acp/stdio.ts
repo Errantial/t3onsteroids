@@ -133,6 +133,10 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
         });
         if (!result.terminal) throw new Error("Provider event stream ended before authoritative terminal proof");
         metrics.increment("acpTerminalSent");
+        const terminalSession = await state.sessionStore.readSession(params.sessionId);
+        if (terminalSession.status === "found" && terminalSession.value.generation) {
+          metrics.markTurn(params.sessionId, terminalSession.value.generation, "acp_terminal_sent");
+        }
         return { stopReason: result.terminal.stopReason };
       } catch (error) {
         return safeRequestError(error);

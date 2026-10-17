@@ -529,6 +529,7 @@ export class AcpBridgeRuntime {
         outcome: snapshot.turnOutcome,
       });
       this.options.metrics?.increment("matchingTurnEndObserved");
+      this.options.metrics?.markTurn(snapshot.sessionId, snapshot.generation, "turn_end");
     }
 
     if (snapshot.drainSeq !== undefined && current.drainSeq !== snapshot.drainSeq) {
@@ -545,6 +546,7 @@ export class AcpBridgeRuntime {
       });
       this.options.metrics?.increment("matchingTurnDrainedObserved");
       this.options.metrics?.observeDrainHighWater(snapshot.drainSeq);
+      this.options.metrics?.markTurn(snapshot.sessionId, snapshot.generation, "turn_drained");
     }
 
     const currentOffset = current.finalAssistantOffset ?? 0;
@@ -869,6 +871,7 @@ export class AcpBridgeRuntime {
   }
 
   async prompt(request: PromptRequest): Promise<{ input: CosInputRecord; session: SessionState }> {
+    const promptReceivedAt = this.options.metrics?.monotonicTimestampMs();
     this.options.metrics?.increment("promptReceived");
     const inMemory = this.sessions.get(request.sessionId);
     const persisted = await this.readPersisted(request.sessionId);
@@ -1025,6 +1028,7 @@ export class AcpBridgeRuntime {
     const first = session.bindingState === "unbound";
     const inputId = first ? session.sessionId : this.makeUuid();
     const generation = (session.generation ?? 0) + 1;
+    this.options.metrics?.beginTurn(request.sessionId, generation, promptReceivedAt);
     if (this.options.durableStore) {
       const leaseId = randomUUID().toLowerCase();
       session = await this.applyDurableTransition(session.sessionId, {
@@ -1086,6 +1090,7 @@ export class AcpBridgeRuntime {
         throw new BridgeError("input_busy", "CoS input delivery remains unconfirmed; the durable lease is retained for reconciliation");
       }
       this.options.metrics?.increment("cosInputAcceptedOrReconciled");
+      this.options.metrics?.markTurn(session.sessionId, generation, "cos_input_accepted");
       if (first) {
         session = await this.applyDurableTransition(session.sessionId, {
           kind: "binding",
@@ -1098,7 +1103,10 @@ export class AcpBridgeRuntime {
       }
       session = await this.applyDurableTransition(session.sessionId, { kind: "promote_mode", inputId, generation });
     } else {
-      if (input.delivery === "sent" || input.delivery === "pending") this.options.metrics?.increment("cosInputAcceptedOrReconciled");
+      if (input.delivery === "sent" || input.delivery === "pending") {
+        this.options.metrics?.increment("cosInputAcceptedOrReconciled");
+        this.options.metrics?.markTurn(session.sessionId, generation, "cos_input_accepted");
+      }
       session = {
         ...session,
         bindingState: "bound",

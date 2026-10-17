@@ -60,6 +60,36 @@ describe("Phase 6 performance and concurrency qualification", () => {
     expect(JSON.parse(serialized).lastUpdatedAt).toBeGreaterThanOrEqual(0);
   });
 
+  it("records bounded monotonic timing receipts without retaining content", () => {
+    const metrics = new BridgeMetrics();
+    metrics.beginTurn("session-a", 3);
+    metrics.markTurn("session-a", 3, "cos_input_accepted");
+    metrics.markTurn("session-a", 3, "turn_end");
+    metrics.markTurn("session-a", 3, "turn_drained");
+    metrics.markTurn("session-a", 3, "acp_terminal_sent");
+    const [receipt] = metrics.snapshot().recentTurns;
+    expect(receipt).toMatchObject({ generation: 3 });
+    expect(receipt?.sessionKey).toMatch(/^[0-9a-f]{8}$/);
+    expect(receipt?.sessionKey).not.toBe("session-a");
+    expect(receipt?.preSendMs).toBeGreaterThanOrEqual(0);
+    expect(receipt?.drainMs).toBeGreaterThanOrEqual(0);
+    expect(receipt?.postDrainMs).toBeGreaterThanOrEqual(0);
+    const serialized = JSON.stringify(receipt);
+    expect(serialized).not.toContain("hostile prompt");
+    expect(serialized).not.toContain("assistant content");
+    expect(serialized).not.toContain("partial-secret-token-fixture");
+    expect(serialized).not.toContain("session-a");
+  });
+
+  it("bounds retained timing receipts to the newest 32 generations", () => {
+    const metrics = new BridgeMetrics();
+    for (let generation = 1; generation <= 40; generation += 1) metrics.beginTurn("session-a", generation);
+    const receipts = metrics.snapshot().recentTurns;
+    expect(receipts).toHaveLength(32);
+    expect(receipts[0]?.generation).toBe(9);
+    expect(receipts.at(-1)?.generation).toBe(40);
+  });
+
   it("wires controller attempts into the shared bridge metrics snapshot", async () => {
     const metrics = new BridgeMetrics();
     const fetch = vi.fn(async () => jsonResponse(extensionHealth));

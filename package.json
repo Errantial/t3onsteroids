@@ -1,0 +1,34 @@
+{
+  "name": "t3onsteroids",
+  "version": "0.0.0",
+  "private": true,
+  "description": "T3 Code compatibility bridge for Chat On Steroids",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "t3onsteroids": "dist/cli/index.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "package:smoke": "node dist/cli/index.js --release-readiness",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "verify": "npm run typecheck && npm run lint && npm test && npm run build && npm run package:smoke",
+    "dev": "node --enable-source-maps dist/cli/index.js"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.9.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.37.0",
+    "@types/node": "24.7.2",
+    "eslint": "9.37.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.46.1",
+    "vitest": "3.2.4"
+  }
+}

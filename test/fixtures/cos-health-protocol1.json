@@ -1,0 +1,13 @@
+{
+  "protocol": 1,
+  "app": "chat-on-steroids",
+  "actions": {
+    "enabled": false,
+    "routes": [
+      "POST /v1/inputs",
+      "POST /v1/inputs/{id}/cancel",
+      "POST /v1/sessions/{id}/stop"
+    ]
+  }
+}
+

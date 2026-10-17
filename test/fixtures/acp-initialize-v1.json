@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": 1,
+    "clientCapabilities": {},
+    "clientInfo": {
+      "name": "fixture-client",
+      "version": "0.0.0"
+    }
+  }
+}
+

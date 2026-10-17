@@ -27,10 +27,18 @@ describe("CoS protocol-1 controller client", () => {
     const dir = await mkdtemp(join(tmpdir(), "t3os-cos-"));
     const control = join(dir, "control-api");
     await mkdir(control);
-    await writeFile(join(control, "endpoint.json"), JSON.stringify({ url: "http://127.0.0.1:4567", pid: 42 }));
+    await writeFile(join(control, "endpoint.json"), JSON.stringify({ protocol: 1, port: 4567, pid: 42, startedAt: "2026-10-17T16:00:00.000Z" }));
     await writeFile(join(control, "token"), "super-secret-token\n");
     const discovered = await discoverCosController(dir);
-    expect(discovered).toEqual({ baseUrl: "http://127.0.0.1:4567", token: "super-secret-token", pid: 42, startedAt: undefined });
+    expect(discovered).toEqual({ baseUrl: "http://127.0.0.1:4567", token: "super-secret-token", pid: 42, startedAt: "2026-10-17T16:00:00.000Z" });
+
+    await writeFile(join(control, "endpoint.json"), JSON.stringify({ url: "http://127.0.0.1:4567", pid: 42 }));
+    await expect(discoverCosController(dir)).resolves.toMatchObject({ baseUrl: "http://127.0.0.1:4567", pid: 42 });
+
+    await writeFile(join(control, "endpoint.json"), JSON.stringify({ protocol: 2, port: 4567 }));
+    await expect(discoverCosController(dir)).rejects.toMatchObject({ code: "protocol_mismatch" });
+    await writeFile(join(control, "endpoint.json"), JSON.stringify({ protocol: 1, port: 0 }));
+    await expect(discoverCosController(dir)).rejects.toMatchObject({ code: "schema_mismatch" });
     await writeFile(join(control, "endpoint.json"), JSON.stringify({ url: "https://example.com" }));
     await expect(discoverCosController(dir)).rejects.not.toThrow(/super-secret-token/);
 

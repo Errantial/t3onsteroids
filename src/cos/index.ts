@@ -289,9 +289,21 @@ export async function discoverCosController(userDataDir: string): Promise<CosCon
     throw new CosControllerError("schema_mismatch", "endpoint.json is malformed JSON");
   }
   const endpoint = asRecord(parsedEndpoint, "endpoint.json");
-  const baseUrl = optionalString(endpoint.url ?? endpoint.baseUrl ?? endpoint.endpoint, "endpoint url");
+  const endpointProtocol = endpoint.protocol;
+  if (endpointProtocol !== undefined && endpointProtocol !== COS_CONTROL_PROTOCOL) {
+    throw new CosControllerError("protocol_mismatch", `Unsupported CoS control protocol ${String(endpointProtocol)}`);
+  }
+  const explicitBaseUrl = optionalString(endpoint.url ?? endpoint.baseUrl ?? endpoint.endpoint, "endpoint url");
+  const endpointPort = endpoint.port;
+  let baseUrl = explicitBaseUrl;
+  if (!baseUrl && endpointPort !== undefined) {
+    if (!Number.isSafeInteger(endpointPort) || (endpointPort as number) < 1 || (endpointPort as number) > 65_535) {
+      throw new CosControllerError("schema_mismatch", "endpoint.json port must be an integer from 1 through 65535");
+    }
+    baseUrl = `http://127.0.0.1:${endpointPort as number}`;
+  }
   if (!baseUrl) {
-    throw new CosControllerError("schema_mismatch", "endpoint.json does not contain a controller URL");
+    throw new CosControllerError("schema_mismatch", "endpoint.json does not contain a controller URL or port");
   }
   let parsed: URL;
   try {

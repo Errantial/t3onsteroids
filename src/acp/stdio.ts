@@ -1,5 +1,6 @@
 import { Readable, Writable } from "node:stream";
-import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
 
 import { AcpBridgeRuntime } from "./index.js";
@@ -158,4 +159,10 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
   );
   const connection = app.connect(stream);
   await connection.closed;
+
+  const metricsPath = env.T3ONSTEROIDS_METRICS_PATH?.trim();
+  if (metricsPath) {
+    await mkdir(dirname(metricsPath), { recursive: true });
+    await writeFile(metricsPath, `${JSON.stringify(metrics.snapshot(), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  }
 }

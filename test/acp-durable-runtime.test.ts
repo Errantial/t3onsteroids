@@ -95,6 +95,38 @@ function translation(extra: Partial<ProviderTurnTranslationState> = {}): Provide
 }
 
 describe("durable ACP runtime boundaries", () => {
+  it("waits for first-input delivery before reading the lazily-created CoS session", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    let inputReads = 0;
+    const sessionRead = vi.fn(async () => ({
+      id: sessionId,
+      providerTurn: {
+        inputId: sessionId,
+        state: "active" as const,
+        turnId,
+        drainedSeq: null,
+        finalAssistantSeq: null,
+      },
+    }));
+    const ctrl = controller({
+      send: vi.fn(async (input) => ({ id: input.id, sessionId: input.id, delivery: "pending" as const })),
+      input: vi.fn(async (id: string) => {
+        inputReads += 1;
+        return { id, sessionId, delivery: inputReads < 3 ? "pending" as const : "sent" as const };
+      }),
+      session: sessionRead,
+    });
+    const bridge = runtime(ctrl, store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "first open" }] });
+
+    await expect(bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 })).resolves.toEqual({ kind: "turn_ready" });
+    expect(inputReads).toBe(3);
+    expect(sessionRead).toHaveBeenCalledTimes(1);
+    expect(ctrl.send).toHaveBeenCalledTimes(1);
+  });
+
   it("settles the original pending prompt as cancelled when exact not_sent wins before a native turn exists", async () => {
     const root = await tempRoot();
     const { store, lease } = durable(root);

@@ -694,16 +694,36 @@ export class AcpBridgeRuntime {
         throw new BridgeError("session_broken", "Pending provider input lost its exact durable generation");
       }
 
-      const summary = await this.options.controller.session(sessionId);
-      const turn = summary.providerTurn;
-      if (turn && turn.inputId === inputId) {
-        if (turn.state === "broken") throw new BridgeError("session_broken", "CoS marked the pending provider input broken");
-        if (turn.state !== "not_sent" && turn.turnId) return { kind: "turn_ready" };
-      }
-
       const input = await this.options.controller.input(inputId);
       if (input) await this.requireInputIdentity(session, input, inputId);
-      const authoritativeNotSent = input?.delivery === "not_sent" || (turn?.inputId === inputId && turn.state === "not_sent");
+      if (input?.delivery === "sent") {
+        const summary = await this.options.controller.session(sessionId);
+        const turn = summary.providerTurn;
+        if (turn && turn.inputId === inputId) {
+          if (turn.state === "broken") throw new BridgeError("session_broken", "CoS marked the pending provider input broken");
+          if (turn.state === "not_sent") {
+            if (session.cancelIntent !== "requested" && current.cancelRequested !== true) {
+              throw new BridgeError("session_broken", "CoS reported not_sent without an authoritative cancellation intent");
+            }
+            await this.releaseLeaseAfterProof(sessionId, {
+              kind: "not_sent",
+              sessionId,
+              inputId,
+              generation: current.generation,
+            });
+            session = await this.applyDurableTransition(sessionId, {
+              kind: "settle_not_sent",
+              inputId,
+              generation: current.generation,
+            });
+            this.sessions.set(sessionId, session);
+            return { kind: "cancelled_not_sent" };
+          }
+          if (turn.turnId) return { kind: "turn_ready" };
+        }
+      }
+
+      const authoritativeNotSent = input?.delivery === "not_sent";
       if (authoritativeNotSent) {
         if (session.cancelIntent !== "requested" && current.cancelRequested !== true) {
           throw new BridgeError("session_broken", "CoS reported not_sent without an authoritative cancellation intent");

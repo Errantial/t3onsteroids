@@ -127,13 +127,13 @@ function parseKnownT3Envelope(text: string, currentMode: InteractionMode): { tex
   if (text.startsWith("/")) throw new BridgeError("unsupported_command", "Native T3 slash commands are not supported in v1");
   if (!text.includes("<t3_code_instructions>")) return { text, mode: currentMode };
 
-  const match = text.match(/^<t3_code_instructions>[\s\S]*?<user_request>([\s\S]*?)<\/user_request>[\s\S]*?<\/t3_code_instructions>$/);
+  const match = text.match(/^<t3_code_instructions>\n([\s\S]*?)\n<\/t3_code_instructions>\n\n<user_request>\n([\s\S]*?)\n<\/user_request>$/);
   if (!match) throw new BridgeError("t3_prompt_contract_mismatch", "Pinned T3 prompt wrapper did not match the supported contract");
-  const instructions = text.slice(0, text.indexOf("<user_request>"));
+  const instructions = match[1]!;
   let mode = currentMode;
   if (/\bplan\b/i.test(instructions)) mode = "plan";
   else if (/\bdefault\b/i.test(instructions)) mode = "default";
-  return { text: match[1]!, mode };
+  return { text: match[2]!, mode };
 }
 
 function looksLikeT3RuntimeBlock(text: string): boolean {

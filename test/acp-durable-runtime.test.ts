@@ -339,7 +339,7 @@ describe("durable ACP runtime boundaries", () => {
     });
     const first = runtime(ctrl, store, lease);
     first.newSession({ cwd: "C:\\repo", mcpServers: [] });
-    const planPrompt = [{ type: "text" as const, text: "<t3_code_instructions>mode plan<user_request>inspect</user_request></t3_code_instructions>" }];
+    const planPrompt = [{ type: "text" as const, text: "<t3_code_instructions>\nmode plan\n</t3_code_instructions>\n\n<user_request>\ninspect\n</user_request>" }];
 
     await expect(first.prompt({ sessionId, prompt: planPrompt })).rejects.toThrow("socket closed after dispatch");
     await expect(store.readSession(sessionId)).resolves.toMatchObject({

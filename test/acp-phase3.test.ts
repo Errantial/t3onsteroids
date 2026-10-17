@@ -149,7 +149,7 @@ describe("Phase 3 ACP shell and lazy binding", () => {
   it("normalizes known T3 wrapper/runtime blocks and preserves plan mode", async () => {
     const canonicalize = async (path: string) => path;
     const first = await normalizePrompt([
-      { type: "text", text: "<t3_code_instructions>mode plan<user_request>inspect only</user_request></t3_code_instructions>" },
+      { type: "text", text: "<t3_code_instructions>\nmode plan\n</t3_code_instructions>\n\n<user_request>\ninspect only\n</user_request>" },
       { type: "text", text: "runtime_info pull_request_linking host-only data" },
     ], "default", "C:\\repo", canonicalize);
     expect(first.interactionMode).toBe("plan");
@@ -162,7 +162,7 @@ describe("Phase 3 ACP shell and lazy binding", () => {
     expect(next.text).toContain("Plan mode:");
 
     const back = await normalizePrompt([
-      { type: "text", text: "<t3_code_instructions>mode default<user_request>implement now</user_request></t3_code_instructions>" },
+      { type: "text", text: "<t3_code_instructions>\nmode default\n</t3_code_instructions>\n\n<user_request>\nimplement now\n</user_request>" },
     ], next.interactionMode, "C:\\repo", canonicalize);
     expect(back.interactionMode).toBe("default");
     expect(back.text).toBe("implement now");

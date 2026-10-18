@@ -109,8 +109,11 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
       clientNotices = params.clientCapabilities?.session?.notices != null;
       return runtime.initialize(params.protocolVersion);
     })
-    .onRequest(acp.methods.agent.session.new, ({ params }) => {
+    .onRequest(acp.methods.agent.session.new, async ({ params }) => {
       try {
+        // Prime only the short-lived provider-extension attestation. This is best-effort setup
+        // work outside the prompt latency budget; prompt/send still own authoritative failure.
+        await controller.requireProviderExtension().catch(() => undefined);
         return runtime.newSession(params);
       } catch (error) {
         return safeRequestError(error);
@@ -145,10 +148,7 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
         });
         if (!result.terminal) throw new Error("Provider event stream ended before authoritative terminal proof");
         metrics.increment("acpTerminalSent");
-        const terminalSession = await state.sessionStore.readSession(params.sessionId);
-        if (terminalSession.status === "found" && terminalSession.value.generation) {
-          metrics.markTurn(params.sessionId, terminalSession.value.generation, "acp_terminal_sent");
-        }
+        metrics.markTurn(params.sessionId, result.state.generation, "acp_terminal_sent");
         await persistMetrics();
         return { stopReason: result.terminal.stopReason };
       } catch (error) {

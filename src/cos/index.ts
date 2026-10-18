@@ -524,7 +524,8 @@ export class CosControllerClient {
   }
 
   async session(sessionId: string): Promise<CosSessionSummary> {
-    const row = asRecord(await this.readJson(`/v1/sessions/${encodeURIComponent(sessionId)}`), "session");
+    const envelope = asRecord(await this.readJson(`/v1/sessions/${encodeURIComponent(sessionId)}`), "session response");
+    const row = asRecord(envelope.session ?? envelope, "session");
     return {
       id: asString(row.id, "session.id"),
       activeTurnId: row.activeTurnId === null ? null : optionalString(row.activeTurnId, "session.activeTurnId"),

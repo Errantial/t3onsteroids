@@ -53,6 +53,7 @@ class FakeCos {
   readonly pendingCancels: string[] = [];
   readonly server: Server;
   nextMode: InputMode = "active";
+  wrapSessionDetail = false;
   private nextTurn = 1;
 
   constructor(readonly projectDir: string) {
@@ -179,7 +180,8 @@ class FakeCos {
         json(res, 404, { error: "session_not_found" });
         return;
       }
-      json(res, 200, this.sessionSummary(session));
+      const summary = this.sessionSummary(session);
+      json(res, 200, this.wrapSessionDetail ? { session: summary } : summary);
       return;
     }
 
@@ -317,6 +319,7 @@ describe.runIf(process.platform === "win32")("built ACP stdio provider", () => {
     const state = path.join(root, "state");
     await Promise.all([fs.mkdir(control, { recursive: true }), fs.mkdir(project, { recursive: true })]);
     const fake = new FakeCos(project);
+    fake.wrapSessionDetail = true;
     const port = await fake.listen();
     await fs.writeFile(path.join(control, "endpoint.json"), JSON.stringify({ url: `http://127.0.0.1:${port}`, pid: process.pid }));
     await fs.writeFile(path.join(control, "token"), `${fake.token}\n`);

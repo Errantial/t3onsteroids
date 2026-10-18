@@ -133,6 +133,44 @@ describe("durable ACP runtime boundaries", () => {
       value: { generation: 1, interactionMode: "default", inputDispatchState: "dispatched" },
     });
   });
+
+  it("reconciles an exact promote_mode commit when every post-write lock release reports busy", async () => {
+    const root = await tempRoot();
+    const { store: baseStore, lease } = durable(root);
+    let injected = 0;
+    class RepeatedPostWriteBusyStore extends DurableSessionStore {
+      override async updateSession(...args: Parameters<DurableSessionStore["updateSession"]>) {
+        const result = await super.updateSession(...args);
+        if (args[1].kind === "promote_mode") {
+          injected += 1;
+          throw new StateLockBusyError("State mutex ownership changed before release");
+        }
+        return result;
+      }
+    }
+    const store = new RepeatedPostWriteBusyStore(root, {
+      probeFilesystem: false,
+      mutex: { identity: new TestIdentity(), timeoutMs: 1_000, pollMs: 2 },
+    });
+    await baseStore.init();
+    const send = vi.fn(async (input: { id: string; sessionId?: string }) => ({
+      id: input.id,
+      sessionId: input.sessionId ?? input.id,
+      delivery: "sent" as const,
+    }));
+    const bridge = runtime(controller({ send }), store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+
+    await expect(bridge.prompt({ sessionId, prompt: [{ type: "text", text: "one" }] })).resolves.toMatchObject({
+      session: { generation: 1, interactionMode: "default", inputDispatchState: "dispatched" },
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(injected).toBeGreaterThanOrEqual(1);
+    await expect(store.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { generation: 1, interactionMode: "default", inputDispatchState: "dispatched" },
+    });
+  });
   it("waits for first-input delivery before reading the lazily-created CoS session", async () => {
     const root = await tempRoot();
     const { store, lease } = durable(root);

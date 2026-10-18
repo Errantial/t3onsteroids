@@ -288,16 +288,51 @@ export class AcpBridgeRuntime {
     transition: DurableSessionTransition,
   ): Promise<SessionState> {
     if (!this.options.durableStore) throw new Error("Durable transition requested without durable store");
+    const committedPromotion = async (): Promise<SessionState | undefined> => {
+      if (transition.kind !== "promote_mode") return undefined;
+      const tagged = await this.options.durableStore!.readSession(sessionId);
+      if (tagged.status !== "found") return undefined;
+      const record = tagged.value;
+      const translation = record.providerTranslation;
+      if (record.generation !== transition.generation ||
+          record.activeInputId !== transition.inputId ||
+          translation?.generation !== transition.generation ||
+          translation.inputId !== transition.inputId ||
+          record.pendingInteractionMode !== undefined ||
+          record.modeTransitionInputId !== undefined) {
+        return undefined;
+      }
+      return record;
+    };
     let result;
     try {
       result = await this.options.durableStore.updateSession(sessionId, transition);
     } catch (error) {
       if (!(error instanceof StateLockBusyError) || transition.kind !== "promote_mode") throw error;
       // promote_mode is scoped to the exact durable input generation and is idempotent. A mutex
-      // release can fail after the atomic session replace has already committed; retrying the same
-      // transition lets the durable reducer prove that exact commit (unchanged) or apply it once
-      // after a pre-write lock loss. Every other mutation still fails closed on lock ambiguity.
-      result = await this.options.durableStore.updateSession(sessionId, transition);
+      // release can fail after the atomic session replace has already committed. Prefer proving
+      // that exact commit from the lock-free durable read; this avoids requiring a second mutex
+      // release to succeed merely to observe an already-committed transition.
+      const committed = await committedPromotion();
+      if (committed) {
+        this.sessions.set(sessionId, committed);
+        return committed;
+      }
+      // A pre-write lock loss has no durable promotion to prove, so retain one exact retry. If that
+      // retry itself reports an ambiguous post-write release failure, accept it only after the same
+      // generation/input proof appears durably; otherwise fail closed with the original error path.
+      try {
+        result = await this.options.durableStore.updateSession(sessionId, transition);
+      } catch (retryError) {
+        if (retryError instanceof StateLockBusyError) {
+          const committedAfterRetry = await committedPromotion();
+          if (committedAfterRetry) {
+            this.sessions.set(sessionId, committedAfterRetry);
+            return committedAfterRetry;
+          }
+        }
+        throw retryError;
+      }
     }
     if (result.status === "updated" || result.status === "unchanged") {
       this.sessions.set(sessionId, result.value);

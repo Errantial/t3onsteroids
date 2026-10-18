@@ -622,7 +622,8 @@ export class DurableSessionStore {
   async updateSession(sessionId: string, transition: DurableSessionTransition): Promise<SessionTransitionResult> {
     await this.init();
     return this.withLocalSessionQueue(sessionId, () => this.mutex(sessionId).withLock(async () => {
-      if (await this.activeQuarantine(sessionId)) return { status: "quarantined" };
+      // readSession owns the quarantine check. Repeating it here doubled the same ENOENT/read on
+      // every durable transition, including both first-prompt commits on the live critical path.
       const currentRead = await this.readSession(sessionId);
       if (currentRead.status === "corrupt" || currentRead.status === "unsupportedSchema") return { status: "quarantined" };
       if (transition.kind === "create") {

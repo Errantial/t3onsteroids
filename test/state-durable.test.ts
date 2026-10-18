@@ -164,6 +164,50 @@ describe("Windows hard-link state mutex", () => {
 });
 
 describe("durable tagged session state", () => {
+  it("queues same-process overlapping mutations before the hard-link mutex timeout", async () => {
+    const root = await tempRoot();
+    const identity = new FakeIdentity(1001, "638962560000000001");
+    const durable = new DurableSessionStore(root, {
+      probeFilesystem: false,
+      mutex: { identity, timeoutMs: 25, pollMs: 2 },
+    });
+    await durable.updateSession(sessionId, { kind: "create", state: initial() });
+    await durable.updateSession(sessionId, { kind: "begin_input", inputId, generation: 1 });
+    await durable.updateSession(sessionId, { kind: "bind_turn", inputId, generation: 1, turnId });
+
+    const originalWriteFile = fs.writeFile.bind(fs);
+    let delayed = false;
+    const writeSpy = vi.spyOn(fs, "writeFile").mockImplementation(async (...args: Parameters<typeof fs.writeFile>) => {
+      const [file] = args;
+      if (!delayed && String(file).includes(`${sessionId}.json.`)) {
+        delayed = true;
+        await new Promise((resolve) => setTimeout(resolve, 75));
+      }
+      return originalWriteFile(...args);
+    });
+
+    try {
+      const cursor = durable.updateSession(sessionId, { kind: "advance_cursor", inputId, generation: 1, seq: 9 });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const cancel = durable.updateSession(sessionId, { kind: "set_cancel", inputId, generation: 1, turnId });
+      await expect(Promise.all([cursor, cancel])).resolves.toEqual([
+        expect.objectContaining({ status: "updated" }),
+        expect.objectContaining({ status: "updated" }),
+      ]);
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    await expect(durable.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: {
+        cosEventCursor: 9,
+        cancelIntent: "requested",
+        providerTranslation: { cursor: 9, cancelRequested: true, turnId },
+      },
+    });
+  });
+
   it("serializes concurrent cursor and cancellation transitions without erasing either winner", async () => {
     const root = await tempRoot();
     const durable = store(root);

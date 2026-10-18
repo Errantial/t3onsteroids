@@ -485,6 +485,7 @@ export interface DurableSessionStoreOptions {
 export class DurableSessionStore {
   private readonly now: () => number;
   private readonly mutexOptions: HardLinkMutexOptions;
+  private readonly localQueues = new Map<string, Promise<void>>();
   private initialized = false;
 
   constructor(
@@ -509,6 +510,27 @@ export class DurableSessionStore {
 
   private mutex(sessionId: string): HardLinkMutex {
     return new HardLinkMutex(path.join(this.root, "locks", "sessions"), `session-${sessionId}`, this.mutexOptions);
+  }
+
+  /**
+   * Serialize mutations from this DurableSessionStore instance before taking the cross-process
+   * hard-link mutex. The file mutex is deliberately non-reentrant and fail-closed, so two async
+   * mutations from one ACP runtime that overlap on the same session must queue locally instead of
+   * competing with one another until the external lock timeout expires.
+   */
+  private async withLocalSessionQueue<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.localQueues.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    this.localQueues.set(sessionId, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.localQueues.get(sessionId) === tail) this.localQueues.delete(sessionId);
+    }
   }
 
   async init(): Promise<void> {
@@ -597,7 +619,7 @@ export class DurableSessionStore {
 
   async updateSession(sessionId: string, transition: DurableSessionTransition): Promise<SessionTransitionResult> {
     await this.init();
-    return this.mutex(sessionId).withLock(async () => {
+    return this.withLocalSessionQueue(sessionId, () => this.mutex(sessionId).withLock(async () => {
       if (await this.activeQuarantine(sessionId)) return { status: "quarantined" };
       const currentRead = await this.readSession(sessionId);
       if (currentRead.status === "corrupt" || currentRead.status === "unsupportedSchema") return { status: "quarantined" };
@@ -633,7 +655,7 @@ export class DurableSessionStore {
       });
       await this.writeRecord(updated);
       return { status: "updated", value: updated };
-    });
+    }));
   }
 
   async pruneBroken(

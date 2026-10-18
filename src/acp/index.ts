@@ -13,7 +13,7 @@ import {
   type ProviderTurnController,
   type ProviderTurnOutputEffect,
 } from "../translate/driver.js";
-import type { ProviderTurnTranslationState } from "../translate/events.js";
+import { newProviderTurnTranslationState, type ProviderTurnTranslationState } from "../translate/events.js";
 import { StateLockBusyError } from "../state/index.js";
 import type {
   AdmissionLease,
@@ -964,7 +964,6 @@ export class AcpBridgeRuntime {
       session = { ...persisted, cwd: resumedCwd };
     }
     if (!session) throw new BridgeError("session_not_found", "ACP session is unknown");
-    if (this.options.durableStore && !persisted) session = await this.ensureDurableCreated(session);
     if (session.bindingState === "broken") throw new BridgeError("session_broken", "Session is marked broken and requires recovery");
 
     if (this.options.durableStore && session.providerTranslation?.terminal) {
@@ -1108,22 +1107,55 @@ export class AcpBridgeRuntime {
     this.options.metrics?.beginTurn(request.sessionId, generation, promptReceivedAt);
     if (this.options.durableStore) {
       const leaseId = randomUUID().toLowerCase();
-      session = await this.applyDurableTransition(session.sessionId, {
-        kind: "begin_input",
-        inputId,
-        generation,
-        leaseId,
-        pendingInteractionMode: normalized.interactionMode,
-      });
-      if (first) {
-        session = await this.applyDurableTransition(session.sessionId, {
-          kind: "binding",
-          inputId,
-          generation,
+      if (first && !persisted) {
+        // session/new is intentionally memory-only. On the first prompt, persist the complete
+        // pre-POST recovery checkpoint atomically instead of serializing three separate session
+        // writes (create -> begin_input -> create_pending binding). This state is still strictly
+        // before send authority: inputDispatchState=prepared, and a crash before lease acquisition
+        // is reconciled as proven not-sent exactly like the previous multi-transition sequence.
+        const prepared: SessionState = {
+          ...session,
           bindingState: "create_pending",
           canonicalCwd: canonicalRoot,
           cosProjectId: project.projectId,
+          activeInputId: inputId,
+          inputDispatchState: "prepared",
+          dispatchInputId: inputId,
+          admissionLeaseId: leaseId,
+          generation,
+          providerTranslation: newProviderTurnTranslationState({
+            sessionId: session.sessionId,
+            inputId,
+            generation,
+            cancelRequested: false,
+          }),
+          pendingInteractionMode: normalized.interactionMode,
+          modeTransitionInputId: inputId,
+        };
+        const created = await this.options.durableStore.updateSession(session.sessionId, { kind: "create", state: prepared });
+        if (created.status !== "updated") {
+          throw new BridgeError("input_busy", "Concurrent durable state appeared while the first provider input was being prepared");
+        }
+        session = created.value;
+        this.sessions.set(session.sessionId, session);
+      } else {
+        session = await this.applyDurableTransition(session.sessionId, {
+          kind: "begin_input",
+          inputId,
+          generation,
+          leaseId,
+          pendingInteractionMode: normalized.interactionMode,
         });
+        if (first) {
+          session = await this.applyDurableTransition(session.sessionId, {
+            kind: "binding",
+            inputId,
+            generation,
+            bindingState: "create_pending",
+            canonicalCwd: canonicalRoot,
+            cosProjectId: project.projectId,
+          });
+        }
       }
       try {
         await this.acquireLease(session.sessionId, inputId, generation, leaseId);

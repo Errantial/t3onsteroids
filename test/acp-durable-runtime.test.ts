@@ -205,6 +205,48 @@ describe("durable ACP runtime boundaries", () => {
     expect(ctrl.send).toHaveBeenCalledTimes(1);
   });
 
+  it("collapses first-prompt durable preparation before the CoS send boundary", async () => {
+    const root = await tempRoot();
+    const identity = new TestIdentity();
+    const transitionKinds: string[] = [];
+    class RecordingStore extends DurableSessionStore {
+      override async updateSession(...args: Parameters<DurableSessionStore["updateSession"]>) {
+        transitionKinds.push(args[1].kind);
+        return super.updateSession(...args);
+      }
+    }
+    const store = new RecordingStore(root, {
+      probeFilesystem: false,
+      mutex: { identity, timeoutMs: 1_000, pollMs: 2 },
+    });
+    const lease = new DurableAdmissionLease(root, "a".repeat(64), {
+      identity,
+      mutex: { identity, timeoutMs: 1_000, pollMs: 2 },
+    });
+    await store.init();
+    let beforeSend: string[] = [];
+    const send = vi.fn(async (input: { id: string }) => {
+      beforeSend = [...transitionKinds];
+      return { id: input.id, sessionId, delivery: "sent" as const };
+    });
+    const bridge = runtime(controller({ send }), store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "first" }] });
+
+    expect(beforeSend).toEqual(["create", "mark_dispatched"]);
+    const durableSession = await store.readSession(sessionId);
+    expect(durableSession).toMatchObject({
+      status: "found",
+      value: {
+        bindingState: "bound",
+        generation: 1,
+        inputDispatchState: "dispatched",
+        activeInputId: sessionId,
+      },
+    });
+  });
+
   it("keeps polling after a transient provider-turn session read failure once the exact input is sent", async () => {
     const root = await tempRoot();
     const { store, lease } = durable(root);

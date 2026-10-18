@@ -729,7 +729,13 @@ export class AcpBridgeRuntime {
     if (!this.options.controller.session || !this.options.controller.input) {
       throw new BridgeError("session_broken", "Provider turn/input reconciliation APIs are unavailable");
     }
-    const pollMs = options.pollMs ?? 25;
+    // CoS exposes a 600 authenticated-read/minute controller budget. This wait runs before the
+    // provider event SSE can take over, so a tight 25 ms loop can exhaust that entire budget in a
+    // few seconds and then starve the stream that would deliver the authoritative turn events.
+    // One active provider turn is supported; 500 ms keeps this reconciliation bounded while
+    // adding at most half a second to the variance-sensitive end-to-end metric, not pre-send.
+    const pollMs = options.pollMs ?? 500;
+    let sentInputProven = false;
     for (;;) {
       if (options.signal?.aborted) throw options.signal.reason ?? new Error("Provider turn wait aborted");
       let session = await this.refreshDurable(sessionId);
@@ -739,18 +745,23 @@ export class AcpBridgeRuntime {
         throw new BridgeError("session_broken", "Pending provider input lost its exact durable generation");
       }
 
-      let input: Awaited<ReturnType<NonNullable<BridgeController["input"]>>>;
-      try {
-        input = await this.options.controller.input(inputId);
-      } catch (cause) {
-        if (cause && typeof cause === "object" && "retryable" in cause && (cause as { retryable?: unknown }).retryable === true) {
-          await new Promise((resolve) => setTimeout(resolve, pollMs));
-          continue;
+      const cancellationPending = session.cancelIntent === "requested" || current.cancelRequested === true;
+      let input: Awaited<ReturnType<NonNullable<BridgeController["input"]>>> | undefined;
+      if (!sentInputProven || cancellationPending) {
+        try {
+          input = await this.options.controller.input(inputId);
+        } catch (cause) {
+          if (cause && typeof cause === "object" && "retryable" in cause && (cause as { retryable?: unknown }).retryable === true) {
+            await new Promise((resolve) => setTimeout(resolve, pollMs));
+            continue;
+          }
+          throw cause;
         }
-        throw cause;
+        if (input) await this.requireInputIdentity(session, input, inputId);
+        if (input?.delivery === "sent") sentInputProven = true;
       }
-      if (input) await this.requireInputIdentity(session, input, inputId);
-      if (input?.delivery === "sent") {
+
+      if (sentInputProven) {
         let summary: Awaited<ReturnType<NonNullable<BridgeController["session"]>>>;
         try {
           summary = await this.options.controller.session(sessionId);

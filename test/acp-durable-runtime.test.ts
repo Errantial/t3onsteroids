@@ -238,6 +238,40 @@ describe("durable ACP runtime boundaries", () => {
     await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { inputId: sessionId, generation: 1 } });
   });
 
+  it("does not re-read an immutable sent input while waiting for its provider turn", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    let sessionReads = 0;
+    const input = vi.fn(async (id: string) => ({ id, sessionId, delivery: "sent" as const }));
+    const session = vi.fn(async () => {
+      sessionReads += 1;
+      return {
+        id: sessionId,
+        providerTurn: sessionReads < 4
+          ? undefined
+          : {
+              inputId: sessionId,
+              state: "active" as const,
+              turnId,
+              drainedSeq: null,
+              finalAssistantSeq: null,
+            },
+      };
+    });
+    const ctrl = controller({
+      send: vi.fn(async (row) => ({ id: row.id, sessionId, delivery: "sent" as const })),
+      input,
+      session,
+    });
+    const bridge = runtime(ctrl, store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "pending turn" }] });
+
+    await expect(bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 })).resolves.toEqual({ kind: "turn_ready" });
+    expect(input).toHaveBeenCalledTimes(1);
+    expect(session).toHaveBeenCalledTimes(4);
+  });
+
   it("fails closed if a pending first input names a different session", async () => {
     const root = await tempRoot();
     const { store, lease } = durable(root);

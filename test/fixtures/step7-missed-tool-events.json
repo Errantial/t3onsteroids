@@ -1,0 +1,58 @@
+[
+  {
+    "seq": 3,
+    "position": 1,
+    "time": 1792353974083,
+    "kind": "user_message",
+    "source": "extension",
+    "inputId": "54536a86-8a18-45ef-a27a-e3915416ca82",
+    "inputDelivery": "confirmed"
+  },
+  {
+    "seq": 2,
+    "position": 2,
+    "time": 1792353974817,
+    "kind": "tool_call",
+    "source": "mcp",
+    "tool": {
+      "name": "read",
+      "attribution": "request_id"
+    }
+  },
+  {
+    "seq": 4,
+    "position": 4,
+    "time": 1792353975439,
+    "kind": "turn_start",
+    "source": "extension",
+    "turnId": "g-1xca7p11dxohza-0-1"
+  },
+  {
+    "seq": 7,
+    "position": 7,
+    "time": 1792353978000,
+    "kind": "turn_end",
+    "source": "extension",
+    "turnId": "g-1xca7p11dxohza-0-1",
+    "outcome": "completed"
+  },
+  {
+    "seq": 8,
+    "position": 8,
+    "time": 1792353978447,
+    "kind": "page_tool",
+    "source": "extension",
+    "label": "Read AGENTS instructions"
+  },
+  {
+    "seq": 9,
+    "position": 9,
+    "time": 1792353978528,
+    "kind": "turn_drained",
+    "source": "app",
+    "turnId": "g-1xca7p11dxohza-0-1",
+    "inputId": "54536a86-8a18-45ef-a27a-e3915416ca82",
+    "highWaterSeq": 9,
+    "finalAssistantSeq": 6
+  }
+]

@@ -8,6 +8,7 @@ import type { CosProviderTurnAttestation } from "../src/cos/index.js";
 import {
   DurableAdmissionLease,
   DurableSessionStore,
+  StateLockBusyError,
   type WindowsProcessIdentity,
 } from "../src/state/index.js";
 import type { ProviderTurnController, ProviderTurnOutputEffect } from "../src/translate/driver.js";
@@ -95,6 +96,43 @@ function translation(extra: Partial<ProviderTurnTranslationState> = {}): Provide
 }
 
 describe("durable ACP runtime boundaries", () => {
+  it("reconciles an exact promote_mode commit that reports a post-write state-lock failure", async () => {
+    const root = await tempRoot();
+    const { store: baseStore, lease } = durable(root);
+    let injected = false;
+    class PostWriteBusyStore extends DurableSessionStore {
+      override async updateSession(...args: Parameters<DurableSessionStore["updateSession"]>) {
+        const result = await super.updateSession(...args);
+        if (!injected && args[1].kind === "promote_mode") {
+          injected = true;
+          throw new StateLockBusyError("State mutex ownership changed before release");
+        }
+        return result;
+      }
+    }
+    const store = new PostWriteBusyStore(root, {
+      probeFilesystem: false,
+      mutex: { identity: new TestIdentity(), timeoutMs: 1_000, pollMs: 2 },
+    });
+    await baseStore.init();
+    const send = vi.fn(async (input: { id: string; sessionId?: string }) => ({
+      id: input.id,
+      sessionId: input.sessionId ?? input.id,
+      delivery: "pending" as const,
+    }));
+    const bridge = runtime(controller({ send }), store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+
+    await expect(bridge.prompt({ sessionId, prompt: [{ type: "text", text: "one" }] })).resolves.toMatchObject({
+      session: { generation: 1, interactionMode: "default", inputDispatchState: "dispatched" },
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(injected).toBe(true);
+    await expect(store.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { generation: 1, interactionMode: "default", inputDispatchState: "dispatched" },
+    });
+  });
   it("waits for first-input delivery before reading the lazily-created CoS session", async () => {
     const root = await tempRoot();
     const { store, lease } = durable(root);

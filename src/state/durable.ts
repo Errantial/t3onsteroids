@@ -292,7 +292,9 @@ function normalTransition(record: DurableSessionRecord, transition: Exclude<Dura
     case "promote_mode": {
       const current = translationFor(record, transition.generation, transition.inputId);
       if (!("cursor" in current)) return current;
-      if (record.modeTransitionInputId !== transition.inputId || record.activeInputId !== transition.inputId) return { status: "wrong_input", value: record };
+      if (record.activeInputId !== transition.inputId) return { status: "wrong_input", value: record };
+      if (record.pendingInteractionMode === undefined && record.modeTransitionInputId === undefined) return { status: "unchanged", value: record };
+      if (record.modeTransitionInputId !== transition.inputId) return { status: "wrong_input", value: record };
       if (record.pendingInteractionMode === undefined) return { status: "unchanged", value: record };
       const { pendingInteractionMode, modeTransitionInputId: _mode, ...rest } = record;
       void _mode;

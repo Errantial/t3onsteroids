@@ -14,6 +14,7 @@ import {
   type ProviderTurnOutputEffect,
 } from "../translate/driver.js";
 import type { ProviderTurnTranslationState } from "../translate/events.js";
+import { StateLockBusyError } from "../state/index.js";
 import type {
   AdmissionLease,
   DurableAdmissionLease,
@@ -287,7 +288,17 @@ export class AcpBridgeRuntime {
     transition: DurableSessionTransition,
   ): Promise<SessionState> {
     if (!this.options.durableStore) throw new Error("Durable transition requested without durable store");
-    const result = await this.options.durableStore.updateSession(sessionId, transition);
+    let result;
+    try {
+      result = await this.options.durableStore.updateSession(sessionId, transition);
+    } catch (error) {
+      if (!(error instanceof StateLockBusyError) || transition.kind !== "promote_mode") throw error;
+      // promote_mode is scoped to the exact durable input generation and is idempotent. A mutex
+      // release can fail after the atomic session replace has already committed; retrying the same
+      // transition lets the durable reducer prove that exact commit (unchanged) or apply it once
+      // after a pre-write lock loss. Every other mutation still fails closed on lock ambiguity.
+      result = await this.options.durableStore.updateSession(sessionId, transition);
+    }
     if (result.status === "updated" || result.status === "unchanged") {
       this.sessions.set(sessionId, result.value);
       return result.value;

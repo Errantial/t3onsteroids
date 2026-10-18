@@ -79,10 +79,44 @@ describe("Windows hard-link state mutex", () => {
 
     const first = await new HardLinkMutex(locks, "one", { identity }).acquire();
     await first.release();
+    const initialQueries = query.mock.calls.filter(([pid]) => pid === process.pid).length;
+    expect(initialQueries).toBeGreaterThanOrEqual(1);
+    expect(initialQueries).toBeLessThanOrEqual(3);
     const second = await new HardLinkMutex(locks, "two", { identity }).acquire();
     await second.release();
 
-    expect(query.mock.calls.filter(([pid]) => pid === process.pid)).toHaveLength(1);
+    expect(query.mock.calls.filter(([pid]) => pid === process.pid)).toHaveLength(initialQueries);
+  });
+
+  it("retries current-process identity only for positive proof and does not cache an exhausted failure", async () => {
+    const identity = new PowerShellWindowsProcessIdentity();
+    const query = vi.spyOn(identity, "query")
+      .mockResolvedValueOnce({ status: "identity_unknown", reason: "timeout" })
+      .mockResolvedValueOnce({ status: "live", processStartTicks: "638962560000000123" });
+
+    await expect(identity.current()).resolves.toEqual({
+      pid: process.pid,
+      processStartTicks: "638962560000000123",
+    });
+    await expect(identity.current()).resolves.toEqual({
+      pid: process.pid,
+      processStartTicks: "638962560000000123",
+    });
+    expect(query).toHaveBeenCalledTimes(2);
+
+    const exhausted = new PowerShellWindowsProcessIdentity();
+    const exhaustedQuery = vi.spyOn(exhausted, "query")
+      .mockResolvedValueOnce({ status: "identity_unknown", reason: "timeout" })
+      .mockResolvedValueOnce({ status: "identity_unknown", reason: "query_failed" })
+      .mockResolvedValueOnce({ status: "not_found" })
+      .mockResolvedValueOnce({ status: "live", processStartTicks: "638962560000000456" });
+
+    await expect(exhausted.current()).rejects.toThrow("Current process identity could not be verified safely");
+    await expect(exhausted.current()).resolves.toEqual({
+      pid: process.pid,
+      processStartTicks: "638962560000000456",
+    });
+    expect(exhaustedQuery).toHaveBeenCalledTimes(4);
   });
 
   it.runIf(process.platform === "win32")("memoizes the default durable-store process identity across transitions", async () => {

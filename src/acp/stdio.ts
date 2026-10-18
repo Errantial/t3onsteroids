@@ -87,7 +87,7 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
   const env = options.env ?? process.env;
   const metrics = options.metrics ?? new BridgeMetrics();
   const userDataDir = cosUserDataDirectory(env);
-  const state = await createProductionStateContext(userDataDir, env);
+  const state = await createProductionStateContext(userDataDir, env, { warmProcessIdentity: true });
   const controller = new CosControllerClient(() => discoverCosController(userDataDir), undefined, undefined, metrics);
   let clientNotices = false;
   const runtime = new AcpBridgeRuntime({

@@ -9,6 +9,11 @@ export interface ProductionStateContext {
   readonly admissionLease: DurableAdmissionLease;
 }
 
+export interface ProductionStateContextOptions {
+  /** Resolve the exact current-process identity before serving live mutations. */
+  readonly warmProcessIdentity?: boolean;
+}
+
 /**
  * Build the production filesystem-backed state domain for one canonical CoS profile.
  *
@@ -20,6 +25,7 @@ export interface ProductionStateContext {
 export async function createProductionStateContext(
   userDataDir: string,
   env: NodeJS.ProcessEnv = process.env,
+  options: ProductionStateContextOptions = {},
 ): Promise<ProductionStateContext> {
   const stateDirectory = defaultStateDirectory(env);
   const profileIdentityHash = await canonicalProfileIdentityHash(userDataDir);
@@ -34,6 +40,12 @@ export async function createProductionStateContext(
     identity: processIdentity,
     mutex: { identity: processIdentity },
   });
+  if (options.warmProcessIdentity) {
+    // The live ACP provider warms this once during startup so the first durable mutation stays free
+    // of PowerShell launch latency. Generic state-context consumers can remain lazy when they never
+    // mutate state, which also avoids unnecessary child-process pressure in read-only/test paths.
+    await processIdentity.current();
+  }
   await sessionStore.init();
   const protectedSessions = await leaseReferencedSessionIds(stateDirectory);
   await sessionStore.pruneBroken(undefined, protectedSessions);

@@ -78,6 +78,24 @@ function parseOwner(raw: string): LockOwnerRecord | null {
 export class PowerShellWindowsProcessIdentity implements WindowsProcessIdentity {
   private currentIdentity: Promise<{ readonly pid: number; readonly processStartTicks: string }> | null = null;
 
+  private async resolveCurrent(): Promise<{ readonly pid: number; readonly processStartTicks: string }> {
+    // The PowerShell child can occasionally miss its two-second deadline while Windows is under
+    // process-launch pressure. Never weaken the positive-proof requirement, but give the current
+    // process a small bounded opportunity to obtain that proof before failing closed. This retry is
+    // deliberately limited to our own identity; stale-owner queries below remain single-shot so an
+    // ambiguous external owner can never be reclaimed by optimism.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const result = await this.query(process.pid);
+      if (result.status === "live") {
+        return { pid: process.pid, processStartTicks: result.processStartTicks };
+      }
+      if (attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
+    throw new StateLockBusyError("Current process identity could not be verified safely");
+  }
+
   async query(pid: number): Promise<ProcessIdentityResult> {
     if (!positivePid(pid)) return { status: "identity_unknown", reason: "invalid_pid" };
     const systemRoot = process.env.SystemRoot;
@@ -115,12 +133,15 @@ export class PowerShellWindowsProcessIdentity implements WindowsProcessIdentity 
   }
 
   current(): Promise<{ readonly pid: number; readonly processStartTicks: string }> {
-    this.currentIdentity ??= (async () => {
-      const result = await this.query(process.pid);
-      if (result.status !== "live") throw new StateLockBusyError("Current process identity could not be verified safely");
-      return { pid: process.pid, processStartTicks: result.processStartTicks };
-    })();
-    return this.currentIdentity;
+    if (this.currentIdentity) return this.currentIdentity;
+    const pending = this.resolveCurrent();
+    this.currentIdentity = pending;
+    // Cache only positive proof. A transiently exhausted retry budget must fail this operation
+    // closed without poisoning every later mutation in the same long-lived ACP process.
+    void pending.catch(() => {
+      if (this.currentIdentity === pending) this.currentIdentity = null;
+    });
+    return pending;
   }
 }
 

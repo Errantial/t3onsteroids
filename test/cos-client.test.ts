@@ -147,6 +147,20 @@ describe("CoS protocol-1 controller client", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it("classifies temporary controller read saturation as retryable", async () => {
+    const fetch = vi.fn(async () => jsonResponse({ error: "busy", detail: "too many reads are waiting on the app; retry shortly" }, 503));
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    );
+    await expect(client.session("session-1")).rejects.toMatchObject({
+      code: "request_failed",
+      status: 503,
+      retryable: true,
+    });
+  });
+
   it("resumes SSE from the last observed sequence after reconnect", async () => {
     const seen: string[] = [];
     let call = 0;

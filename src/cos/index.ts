@@ -148,6 +148,7 @@ const DEFAULT_RETRY_POLICY: RetryPolicy = {
   baseDelayMs: 50,
   maxDelayMs: 500,
 };
+const PROVIDER_EXTENSION_READINESS_TTL_MS = 1_000;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -352,6 +353,7 @@ function sleep(ms: number): Promise<void> {
 
 export class CosControllerClient {
   private discovery: CosControllerDiscovery | undefined;
+  private providerExtensionReadiness: { readonly value: CosControllerReadiness; readonly expiresAt: number } | undefined;
   private metricsState = {
     readAttempts: 0,
     readRetries: 0,
@@ -370,6 +372,7 @@ export class CosControllerClient {
   ) {}
 
   private async getDiscovery(force = false): Promise<CosControllerDiscovery> {
+    if (force) this.providerExtensionReadiness = undefined;
     if (force || !this.discovery) this.discovery = await this.discover();
     return this.discovery;
   }
@@ -400,6 +403,7 @@ export class CosControllerClient {
         const mapped = mapHttpError(response.status, body);
         if (mapped.code === "controller_auth_changed" && attempt < maxAttempts) {
           this.discovery = undefined;
+          this.providerExtensionReadiness = undefined;
           lastError = mapped;
           continue;
         }
@@ -433,6 +437,10 @@ export class CosControllerClient {
   }
 
   async requireProviderExtension(): Promise<CosControllerReadiness> {
+    const now = Date.now();
+    if (this.providerExtensionReadiness && this.providerExtensionReadiness.expiresAt > now) {
+      return this.providerExtensionReadiness.value;
+    }
     const readiness = await this.health();
     for (const feature of Object.values(COS_PROVIDER_EXTENSION_FEATURES)) {
       if (readiness.features[feature] !== 1) {
@@ -442,6 +450,10 @@ export class CosControllerClient {
     if (!readiness.providerExtension || readiness.providerExtension.apiVersion !== 1) {
       throw new CosControllerError("provider_extension_unavailable", "Required CoS provider extension build identity is unavailable");
     }
+    this.providerExtensionReadiness = {
+      value: readiness,
+      expiresAt: now + PROVIDER_EXTENSION_READINESS_TTL_MS,
+    };
     return readiness;
   }
 

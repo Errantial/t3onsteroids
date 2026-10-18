@@ -78,6 +78,36 @@ describe("CoS protocol-1 controller client", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("reuses a recent successful provider-extension readiness attestation", async () => {
+    let healthReads = 0;
+    const extensionHealth = {
+      ...health,
+      features: {
+        "provider-project-resolve-v1": 1,
+        "provider-assistant-content-v1": 1,
+        "provider-session-policy-v1": 1,
+        "provider-turn-drain-v1": 1,
+      },
+      providerExtension: { apiVersion: 1, buildId: "a".repeat(40) },
+    };
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).endsWith("/v1/health")) {
+        healthReads += 1;
+        return jsonResponse(extensionHealth);
+      }
+      throw new Error(`unexpected ${String(url)}`);
+    });
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+    );
+
+    await expect(client.requireProviderExtension()).resolves.toMatchObject({ actionsEnabled: true });
+    await expect(client.requireProviderExtension()).resolves.toMatchObject({ actionsEnabled: true });
+    await expect(client.requireProviderExtension()).resolves.toMatchObject({ actionsEnabled: true });
+    expect(healthReads).toBe(1);
+  });
+
   it("reconciles an ambiguous send before deciding whether to retry", async () => {
     const id = "11111111-1111-4111-8111-111111111111";
     let postCount = 0;

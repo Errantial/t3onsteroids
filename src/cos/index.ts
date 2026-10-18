@@ -678,22 +678,26 @@ export class CosControllerClient {
       const discovery = await this.getDiscovery();
       const headers = new Headers({ Accept: "text/event-stream", Authorization: `Bearer ${discovery.token}` });
       if (cursor !== undefined) headers.set("Last-Event-ID", String(Math.max(0, cursor - 1)));
+      let streamController: AbortController | undefined;
+      let onAbort: (() => void) | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let reader: ReadableStreamDefaultReader<string> | undefined;
       try {
         this.metricsState.sseConnectAttempts += 1;
         if (connectedOnce) this.metricsState.sseReconnects += 1;
         this.bridgeMetrics?.increment("sseConnectCount");
         if (connectedOnce) this.bridgeMetrics?.increment("sseReconnectCount");
         const suffix = cursor === undefined ? "" : `?from=${encodeURIComponent(String(cursor))}`;
-        const streamController = new AbortController();
-        const onAbort = () => streamController.abort(options.signal?.reason);
+        streamController = new AbortController();
+        onAbort = () => streamController!.abort(options.signal?.reason);
         options.signal?.addEventListener("abort", onAbort, { once: true });
-        const timer = setTimeout(() => streamController.abort(new Error("sse_rollover")), rolloverMs);
+        timer = setTimeout(() => streamController!.abort(new Error("sse_rollover")), rolloverMs);
         const requestInit: RequestInit = { headers, signal: streamController.signal };
         const response = await this.transport.fetch(`${discovery.baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/events/stream${suffix}`, requestInit);
         if (!response.ok) throw mapHttpError(response.status, undefined);
         if (!response.body) throw new CosControllerError("controller_unavailable", "SSE response has no body", { retryable: true });
         connectedOnce = true;
-        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+        reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
         let buffer = "";
         let sawEvent = false;
         for (;;) {
@@ -773,6 +777,19 @@ export class CosControllerClient {
         );
         const jitter = Math.floor(exponential * 0.2 * Math.random());
         await sleep(Math.min(this.retryPolicy.maxDelayMs, exponential + jitter));
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        if (onAbort) options.signal?.removeEventListener("abort", onAbort);
+        // A provider-turn consumer normally returns as soon as the authoritative drain has been
+        // emitted and acknowledged. Async-generator return does not automatically cancel this
+        // nested fetch body, so without an explicit finally every completed turn can leave one
+        // held CoS event stream behind until its 30-minute server lifetime expires. Closing both
+        // sides here frees the controller's bounded stream slot immediately on terminal return.
+        if (streamController && !streamController.signal.aborted) streamController.abort(new Error("sse_consumer_closed"));
+        if (reader) {
+          try { await reader.cancel(); } catch { /* the abort above may already have closed it */ }
+          try { reader.releaseLock(); } catch { /* an already-closed reader may have no lock */ }
+        }
       }
     }
   }

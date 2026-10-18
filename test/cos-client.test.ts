@@ -307,4 +307,33 @@ describe("CoS protocol-1 controller client", () => {
     expect(rows).toEqual([26, 27]);
     expect(seen[1]).toContain("from=27");
   });
+
+  it("closes the active SSE transport when its consumer stops after a delivered event", async () => {
+    let bodyCancelled = false;
+    let requestAborted = false;
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => { requestAborted = true; }, { once: true });
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(
+            'id: 7\nevent: turn_drained\ndata: {"seq":7,"position":7,"time":7,"kind":"turn_drained","source":"app","turnId":"t","inputId":"11111111-1111-4111-8111-111111111111","highWaterSeq":7,"finalAssistantSeq":5}\n\n',
+          ));
+        },
+        cancel() { bodyCancelled = true; },
+      });
+      return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    });
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1 },
+    );
+
+    for await (const event of client.streamEvents("session")) {
+      expect(event.seq).toBe(7);
+      break;
+    }
+
+    expect(bodyCancelled || requestAborted).toBe(true);
+  });
 });

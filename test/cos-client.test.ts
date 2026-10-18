@@ -175,6 +175,20 @@ describe("CoS protocol-1 controller client", () => {
     });
   });
 
+  it("classifies a not-yet-readable provider session projection as retryable", async () => {
+    const fetch = vi.fn(async () => jsonResponse({ error: "session_not_found" }, 404));
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    );
+    await expect(client.session("session-1")).rejects.toMatchObject({
+      code: "request_failed",
+      status: 404,
+      retryable: true,
+    });
+  });
+
   it("resumes SSE from the last observed sequence after reconnect", async () => {
     const seen: string[] = [];
     let call = 0;

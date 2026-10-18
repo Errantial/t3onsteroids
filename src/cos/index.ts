@@ -339,6 +339,7 @@ function mapHttpError(status: number, body: unknown): CosControllerError {
   if (status === 429) return new CosControllerError("rate_limited", "CoS controller rate limited the request", { retryable: true, status });
   if (status === 503 && wireCode === "busy") return new CosControllerError("request_failed", "CoS controller read capacity is temporarily busy", { retryable: true, status });
   if (status === 504 && wireCode === "timeout") return new CosControllerError("request_failed", "CoS controller read timed out while its owner was still working", { retryable: true, status });
+  if (status === 404 && wireCode === "session_not_found") return new CosControllerError("request_failed", "CoS session projection is not readable yet", { retryable: true, status });
   if (status === 503 && wireCode === "queue_full") return new CosControllerError("queue_full", "CoS controller action queue is full", { retryable: true, status });
   if (status === 404 && wireCode === "project_unmapped") return new CosControllerError("project_unmapped", "No exact usable CoS project matches the requested canonical path", { status });
   if (status === 409 && wireCode === "provider_policy_unavailable") return new CosControllerError("provider_policy_unavailable", "Required CoS provider-session policy is unavailable", { status });

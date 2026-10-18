@@ -366,11 +366,10 @@ export class AcpBridgeRuntime {
   }
 
   private async requireInputIdentity(session: SessionState, input: CosInputRecord, expectedInputId: string): Promise<void> {
-    const accepted = input.delivery === "sent" || input.delivery === "pending";
     const wrongId = input.id !== expectedInputId;
     const wrongSession = input.sessionId !== undefined && input.sessionId !== session.sessionId;
-    const missingAcceptedSession = accepted && input.sessionId !== session.sessionId;
-    if (!wrongId && !wrongSession && !missingAcceptedSession) return;
+    const missingSentSession = input.delivery === "sent" && input.sessionId !== session.sessionId;
+    if (!wrongId && !wrongSession && !missingSentSession) return;
     await this.markBroken(session, "ambiguous_recovery");
     throw new BridgeError("session_broken", "CoS input identity does not match the exact durable provider input/session");
   }

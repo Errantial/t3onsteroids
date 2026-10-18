@@ -113,7 +113,9 @@ describe("durable ACP runtime boundaries", () => {
       send: vi.fn(async (input) => ({ id: input.id, sessionId: input.id, delivery: "pending" as const })),
       input: vi.fn(async (id: string) => {
         inputReads += 1;
-        return { id, sessionId, delivery: inputReads < 3 ? "pending" as const : "sent" as const };
+        return inputReads < 3
+          ? { id, delivery: "pending" as const }
+          : { id, sessionId, delivery: "sent" as const };
       }),
       session: sessionRead,
     });
@@ -124,6 +126,36 @@ describe("durable ACP runtime boundaries", () => {
     await expect(bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 })).resolves.toEqual({ kind: "turn_ready" });
     expect(inputReads).toBe(3);
     expect(sessionRead).toHaveBeenCalledTimes(1);
+    expect(ctrl.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed if a pending first input names a different session", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    const ctrl = controller({
+      send: vi.fn(async (input) => ({ id: input.id, delivery: "pending" as const })),
+      input: vi.fn(async (id: string) => ({ id, sessionId: secondSessionId, delivery: "pending" as const })),
+    });
+    const bridge = runtime(ctrl, store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "first open" }] });
+
+    await expect(bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 })).rejects.toMatchObject({ code: "session_broken" });
+    expect(ctrl.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed if a sent first input still lacks the exact session identity", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    const ctrl = controller({
+      send: vi.fn(async (input) => ({ id: input.id, delivery: "pending" as const })),
+      input: vi.fn(async (id: string) => ({ id, delivery: "sent" as const })),
+    });
+    const bridge = runtime(ctrl, store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "first open" }] });
+
+    await expect(bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 })).rejects.toMatchObject({ code: "session_broken" });
     expect(ctrl.send).toHaveBeenCalledTimes(1);
   });
 

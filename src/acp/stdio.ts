@@ -109,11 +109,8 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
       clientNotices = params.clientCapabilities?.session?.notices != null;
       return runtime.initialize(params.protocolVersion);
     })
-    .onRequest(acp.methods.agent.session.new, async ({ params }) => {
+    .onRequest(acp.methods.agent.session.new, ({ params }) => {
       try {
-        // Prime only the short-lived provider-extension attestation. This is best-effort setup
-        // work outside the prompt latency budget; prompt/send still own authoritative failure.
-        await controller.requireProviderExtension().catch(() => undefined);
         return runtime.newSession(params);
       } catch (error) {
         return safeRequestError(error);

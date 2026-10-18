@@ -129,6 +129,39 @@ describe("durable ACP runtime boundaries", () => {
     expect(ctrl.send).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps polling after a transient provider-turn session read failure once the exact input is sent", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    let sessionReads = 0;
+    const transient = Object.assign(new Error("temporary controller read failure"), { retryable: true });
+    const ctrl = controller({
+      send: vi.fn(async (input) => ({ id: input.id, sessionId, delivery: "sent" as const })),
+      input: vi.fn(async (id: string) => ({ id, sessionId, delivery: "sent" as const })),
+      session: vi.fn(async () => {
+        sessionReads += 1;
+        if (sessionReads === 1) throw transient;
+        return {
+          id: sessionId,
+          providerTurn: {
+            inputId: sessionId,
+            state: "active" as const,
+            turnId,
+            drainedSeq: null,
+            finalAssistantSeq: null,
+          },
+        };
+      }),
+    });
+    const bridge = runtime(ctrl, store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "pending" }] });
+    await expect(bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 })).resolves.toEqual({ kind: "turn_ready" });
+    expect(sessionReads).toBe(2);
+    expect(ctrl.send).toHaveBeenCalledTimes(1);
+    await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { inputId: sessionId, generation: 1 } });
+  });
+
   it("fails closed if a pending first input names a different session", async () => {
     const root = await tempRoot();
     const { store, lease } = durable(root);

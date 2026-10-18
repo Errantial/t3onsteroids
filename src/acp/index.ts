@@ -693,10 +693,28 @@ export class AcpBridgeRuntime {
         throw new BridgeError("session_broken", "Pending provider input lost its exact durable generation");
       }
 
-      const input = await this.options.controller.input(inputId);
+      let input: Awaited<ReturnType<NonNullable<BridgeController["input"]>>>;
+      try {
+        input = await this.options.controller.input(inputId);
+      } catch (cause) {
+        if (cause && typeof cause === "object" && "retryable" in cause && (cause as { retryable?: unknown }).retryable === true) {
+          await new Promise((resolve) => setTimeout(resolve, pollMs));
+          continue;
+        }
+        throw cause;
+      }
       if (input) await this.requireInputIdentity(session, input, inputId);
       if (input?.delivery === "sent") {
-        const summary = await this.options.controller.session(sessionId);
+        let summary: Awaited<ReturnType<NonNullable<BridgeController["session"]>>>;
+        try {
+          summary = await this.options.controller.session(sessionId);
+        } catch (cause) {
+          if (cause && typeof cause === "object" && "retryable" in cause && (cause as { retryable?: unknown }).retryable === true) {
+            await new Promise((resolve) => setTimeout(resolve, pollMs));
+            continue;
+          }
+          throw cause;
+        }
         const turn = summary.providerTurn;
         if (turn && turn.inputId === inputId) {
           if (turn.state === "broken") throw new BridgeError("session_broken", "CoS marked the pending provider input broken");

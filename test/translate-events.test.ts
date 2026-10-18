@@ -110,6 +110,22 @@ async function collectFinal(
 }
 
 describe("provider turn event translation", () => {
+  it("accepts a follow-up user_message correlation turn id while binding the attested native turn", async () => {
+    const deps = dependencies();
+    const translator = new ProviderTurnTranslator({ sessionId, inputId, generation: 2 }, deps);
+
+    expect(await translator.consume(event(9, "user_message", {
+      inputId,
+      turnId: "e73199f5-c969-4f8e-bace-c2f9051f4d5e",
+      inputDelivery: "confirmed",
+    }))).toEqual([]);
+    expect(translator.state()).toMatchObject({ cursor: 9, turnId });
+
+    expect(await translator.consume(event(10, "turn_start", { turnId }))).toEqual([]);
+    expect(translator.state()).toMatchObject({ cursor: 10, turnId });
+    expect(deps.providerTurn).toHaveBeenCalled();
+  });
+
   it("emits no assistant prose before drain and retrieves only corrected final B named by finalAssistantSeq", async () => {
     let turn = activeTurn();
     const full = "Corrected final B — complete.";

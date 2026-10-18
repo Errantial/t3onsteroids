@@ -297,8 +297,11 @@ export class ProviderTurnTranslator {
         break;
       case "user_message": {
         if (stringField(event, "inputId") === this.stateValue.inputId) {
-          const turn = await this.exactProviderTurn();
-          if (event.turnId && turn.turnId && event.turnId !== turn.turnId) this.fail("provider_turn_mismatch", "Provider input delivery row names a different turn");
+          // Follow-up provider inputs can carry a user-message correlation id in `turnId` that is
+          // distinct from the native provider turn id (`g-...`). The exact input id still proves
+          // that this is our delivery row; bind native turn identity only from the fresh provider-
+          // turn attestation / provider-visible turn events below.
+          await this.exactProviderTurn();
         }
         break;
       }

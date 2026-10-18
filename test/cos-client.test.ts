@@ -274,4 +274,37 @@ describe("CoS protocol-1 controller client", () => {
     expect(rows).toEqual([8, 9]);
     expect(seen[1]).toContain("from=9");
   });
+
+  it("reconnects after a controller end frame and resumes from the exact cursor", async () => {
+    const seen: string[] = [];
+    let call = 0;
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      seen.push(String(url));
+      call += 1;
+      if (call === 1) {
+        return new Response(
+          'id: 26\nevent: turn_end\ndata: {"seq":26,"position":26,"time":26,"kind":"turn_end","source":"extension","turnId":"t"}\n\n' +
+          'event: end\ndata: {"reason":"error"}\n\n',
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        );
+      }
+      return new Response(
+        'id: 27\nevent: turn_drained\ndata: {"seq":27,"position":27,"time":27,"kind":"turn_drained","source":"app","turnId":"t","inputId":"11111111-1111-4111-8111-111111111111","highWaterSeq":27,"finalAssistantSeq":25}\n\n',
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      );
+    });
+    const abort = new AbortController();
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1 },
+    );
+    const rows = [];
+    for await (const event of client.streamEvents("s", { signal: abort.signal })) {
+      rows.push(event.seq);
+      if (event.seq === 27) abort.abort();
+    }
+    expect(rows).toEqual([26, 27]);
+    expect(seen[1]).toContain("from=27");
+  });
 });

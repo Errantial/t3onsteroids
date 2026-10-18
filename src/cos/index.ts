@@ -711,12 +711,19 @@ export class CosControllerClient {
             const frame = buffer.slice(0, boundary).replace(/\r/g, "");
             buffer = buffer.slice(boundary + separatorLength);
             let id: number | undefined;
+            let eventName: string | undefined;
             const dataLines: string[] = [];
             for (const line of frame.split("\n")) {
               if (line.startsWith("id:")) id = Number(line.slice(3).trim());
+              else if (line.startsWith("event:")) eventName = line.slice(6).trim();
               else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
             }
             if (dataLines.length === 0) continue;
+            // CoS uses an unnumbered `event: end` control frame to retire an SSE connection
+            // (max lifetime, controller stop/error, slow consumer, etc.). It is not a session
+            // event and therefore has no seq/position/time/kind/source fields. Treat it as a
+            // reconnect boundary; the next request resumes from the exact last event cursor.
+            if (eventName === "end") continue;
             let parsed: unknown;
             try {
               parsed = JSON.parse(dataLines.join("\n"));

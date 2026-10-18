@@ -161,6 +161,20 @@ describe("CoS protocol-1 controller client", () => {
     });
   });
 
+  it("classifies a bounded controller read deadline as retryable", async () => {
+    const fetch = vi.fn(async () => jsonResponse({ error: "timeout", detail: "the app did not answer in time; /v1/health may still answer" }, 504));
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    );
+    await expect(client.session("session-1")).rejects.toMatchObject({
+      code: "request_failed",
+      status: 504,
+      retryable: true,
+    });
+  });
+
   it("resumes SSE from the last observed sequence after reconnect", async () => {
     const seen: string[] = [];
     let call = 0;

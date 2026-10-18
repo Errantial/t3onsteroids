@@ -63,12 +63,34 @@ describe("Phase 6 performance and concurrency qualification", () => {
   it("records bounded monotonic timing receipts without retaining content", () => {
     const metrics = new BridgeMetrics();
     metrics.beginTurn("session-a", 3);
+    metrics.observePreSendPhases("session-a", 3, {
+      persistedReadMs: 1,
+      projectResolveMs: 2,
+      promptNormalizeMs: 3,
+      readinessMs: 4,
+      durablePrepareMs: 5,
+      leaseAcquireMs: 6,
+      markDispatchedMs: 7,
+      inputSendMs: 8,
+    });
     metrics.markTurn("session-a", 3, "cos_input_accepted");
     metrics.markTurn("session-a", 3, "turn_end");
     metrics.markTurn("session-a", 3, "turn_drained");
     metrics.markTurn("session-a", 3, "acp_terminal_sent");
     const [receipt] = metrics.snapshot().recentTurns;
-    expect(receipt).toMatchObject({ generation: 3 });
+    expect(receipt).toMatchObject({
+      generation: 3,
+      preSendPhases: {
+        persistedReadMs: 1,
+        projectResolveMs: 2,
+        promptNormalizeMs: 3,
+        readinessMs: 4,
+        durablePrepareMs: 5,
+        leaseAcquireMs: 6,
+        markDispatchedMs: 7,
+        inputSendMs: 8,
+      },
+    });
     expect(receipt?.sessionKey).toMatch(/^[0-9a-f]{8}$/);
     expect(receipt?.sessionKey).not.toBe("session-a");
     expect(receipt?.preSendMs).toBeGreaterThanOrEqual(0);

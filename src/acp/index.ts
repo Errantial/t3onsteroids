@@ -951,7 +951,9 @@ export class AcpBridgeRuntime {
     const promptReceivedAt = this.options.metrics?.monotonicTimestampMs();
     this.options.metrics?.increment("promptReceived");
     const inMemory = this.sessions.get(request.sessionId);
+    let phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
     const persisted = await this.readPersisted(request.sessionId);
+    const persistedReadMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
     let session = persisted ?? inMemory;
     const resumedCwd = this.resumedCwds.get(request.sessionId);
     if (this.options.durableStore && persisted && resumedCwd &&
@@ -980,9 +982,13 @@ export class AcpBridgeRuntime {
     const cwd = session.cwd;
     if (!cwd) throw new BridgeError("project_unmapped", "Session has no cwd");
 
+    phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
     const project = await this.options.controller.resolveProject(cwd);
+    const projectResolveMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
+    phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
     const canonicalRoot = await this.canonicalize(project.canonicalPath);
     const normalized = await normalizePrompt(request.prompt, session.interactionMode, canonicalRoot, this.canonicalize);
+    const promptNormalizeMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
 
     if (this.options.durableStore && session.providerTranslation) {
       const pendingInputId = session.providerTranslation.inputId;
@@ -1099,14 +1105,20 @@ export class AcpBridgeRuntime {
       }
     }
 
+    phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
     await this.requirePromptReadiness(session);
+    const readinessMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
 
     const first = session.bindingState === "unbound";
     const inputId = first ? session.sessionId : this.makeUuid();
     const generation = (session.generation ?? 0) + 1;
     this.options.metrics?.beginTurn(request.sessionId, generation, promptReceivedAt);
+    let durablePrepareMs = 0;
+    let leaseAcquireMs = 0;
+    let markDispatchedMs = 0;
     if (this.options.durableStore) {
       const leaseId = randomUUID().toLowerCase();
+      phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
       if (first && !persisted) {
         // session/new is intentionally memory-only. On the first prompt, persist the complete
         // pre-POST recovery checkpoint atomically instead of serializing three separate session
@@ -1157,8 +1169,11 @@ export class AcpBridgeRuntime {
           });
         }
       }
+      durablePrepareMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
       try {
+        phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
         await this.acquireLease(session.sessionId, inputId, generation, leaseId);
+        leaseAcquireMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
       } catch (error) {
         if (await this.durableLeaseMatches(session, inputId, generation)) {
           await this.releaseLeaseAfterProof(session.sessionId, { kind: "not_sent", sessionId: session.sessionId, inputId, generation });
@@ -1166,7 +1181,9 @@ export class AcpBridgeRuntime {
         await this.applyDurableTransition(session.sessionId, { kind: "settle_not_sent", inputId, generation });
         throw error;
       }
+      phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
       session = await this.applyDurableTransition(session.sessionId, { kind: "mark_dispatched", inputId, generation });
+      markDispatchedMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
     } else {
       await this.acquireLease(session.sessionId, inputId, generation);
       session = withInteractionMode(session, normalized.interactionMode);
@@ -1182,10 +1199,22 @@ export class AcpBridgeRuntime {
       }
     }
 
+    phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
     const input = await this.options.controller.send({
       id: inputId,
       text: normalized.text,
       ...(first ? { projectId: project.projectId, providerPolicy: v1ProviderSessionPolicy } : { sessionId: session.sessionId }),
+    });
+    const inputSendMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
+    this.options.metrics?.observePreSendPhases(session.sessionId, generation, {
+      persistedReadMs,
+      projectResolveMs,
+      promptNormalizeMs,
+      readinessMs,
+      durablePrepareMs,
+      leaseAcquireMs,
+      markDispatchedMs,
+      inputSendMs,
     });
 
     if (this.options.durableStore) {

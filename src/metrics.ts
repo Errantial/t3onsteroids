@@ -28,6 +28,18 @@ export interface BridgeTurnTimingReceipt {
   readonly preSendMs?: number;
   readonly drainMs?: number;
   readonly postDrainMs?: number;
+  readonly preSendPhases?: BridgePreSendPhaseTimings;
+}
+
+export interface BridgePreSendPhaseTimings {
+  readonly persistedReadMs: number;
+  readonly projectResolveMs: number;
+  readonly promptNormalizeMs: number;
+  readonly readinessMs: number;
+  readonly durablePrepareMs: number;
+  readonly leaseAcquireMs: number;
+  readonly markDispatchedMs: number;
+  readonly inputSendMs: number;
 }
 
 const MAX_RECENT_TURNS = 32;
@@ -104,6 +116,10 @@ export class BridgeMetrics {
 
   beginTurn(sessionId: string, generation: number, promptReceivedAt = this.monotonicNowMs()): void {
     this.updateTiming(sessionId, generation, { promptReceivedAt });
+  }
+
+  observePreSendPhases(sessionId: string, generation: number, phases: BridgePreSendPhaseTimings): void {
+    this.updateTiming(sessionId, generation, { preSendPhases: { ...phases } });
   }
 
   markTurn(sessionId: string, generation: number, transition: "cos_input_accepted" | "turn_end" | "turn_drained" | "acp_terminal_sent"): void {

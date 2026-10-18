@@ -8,6 +8,7 @@ import { BridgeError } from "./index.js";
 import { CosControllerError } from "../cos/index.js";
 import { CosControllerClient, discoverCosController } from "../cos/index.js";
 import { createProductionStateContext } from "../state/index.js";
+import { StateLockBusyError, UnsupportedStateFilesystemError } from "../state/index.js";
 import type { ProviderTurnOutputEffect } from "../translate/driver.js";
 import { TranslationError } from "../translate/events.js";
 import { BridgeMetrics } from "../metrics.js";
@@ -31,6 +32,9 @@ function toolStatus(outcome: string): "completed" | "failed" {
 
 function safeRequestError(error: unknown): never {
   if (error instanceof BridgeError || error instanceof TranslationError || error instanceof CosControllerError) {
+    throw new acp.RequestError(-32000, "Bridge request failed", { code: error.code });
+  }
+  if (error instanceof StateLockBusyError || error instanceof UnsupportedStateFilesystemError) {
     throw new acp.RequestError(-32000, "Bridge request failed", { code: error.code });
   }
   throw new acp.RequestError(-32000, "Bridge internal error", { code: "internal_error" });

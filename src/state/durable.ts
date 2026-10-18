@@ -6,6 +6,7 @@ import type { ProviderTurnTranslationState, StableTerminalStopReason } from "../
 import type { InputDispatchState, InteractionMode, RecoveryReason, SessionState } from "../session/index.js";
 import {
   HardLinkMutex,
+  PowerShellWindowsProcessIdentity,
   type HardLinkMutexOptions,
   probeHardLinkStateFilesystem,
 } from "./mutex.js";
@@ -483,6 +484,7 @@ export interface DurableSessionStoreOptions {
 
 export class DurableSessionStore {
   private readonly now: () => number;
+  private readonly mutexOptions: HardLinkMutexOptions;
   private initialized = false;
 
   constructor(
@@ -490,6 +492,9 @@ export class DurableSessionStore {
     private readonly options: DurableSessionStoreOptions = {},
   ) {
     this.now = options.now ?? Date.now;
+    this.mutexOptions = options.mutex?.identity
+      ? options.mutex
+      : { ...options.mutex, identity: new PowerShellWindowsProcessIdentity() };
   }
 
   private sessionPath(sessionId: string): string {
@@ -503,7 +508,7 @@ export class DurableSessionStore {
   }
 
   private mutex(sessionId: string): HardLinkMutex {
-    return new HardLinkMutex(path.join(this.root, "locks", "sessions"), `session-${sessionId}`, this.options.mutex);
+    return new HardLinkMutex(path.join(this.root, "locks", "sessions"), `session-${sessionId}`, this.mutexOptions);
   }
 
   async init(): Promise<void> {

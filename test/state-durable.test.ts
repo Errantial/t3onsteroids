@@ -28,8 +28,10 @@ const turnId = "turn-1";
 
 class FakeIdentity implements WindowsProcessIdentity {
   readonly queries = new Map<number, ProcessIdentityResult>();
+  currentCalls = 0;
   constructor(readonly pid: number, readonly ticks: string) {}
   async current(): Promise<{ readonly pid: number; readonly processStartTicks: string }> {
+    this.currentCalls += 1;
     return { pid: this.pid, processStartTicks: this.ticks };
   }
   async query(pid: number): Promise<ProcessIdentityResult> {
@@ -69,6 +71,35 @@ function store(root: string, identity = new FakeIdentity(1001, "6389625600000000
 }
 
 describe("Windows hard-link state mutex", () => {
+  it.runIf(process.platform === "win32")("memoizes the current PowerShell process identity across repeated mutex instances", async () => {
+    const root = await tempRoot();
+    const locks = path.join(root, "locks");
+    const identity = new PowerShellWindowsProcessIdentity();
+    const query = vi.spyOn(identity, "query");
+
+    const first = await new HardLinkMutex(locks, "one", { identity }).acquire();
+    await first.release();
+    const second = await new HardLinkMutex(locks, "two", { identity }).acquire();
+    await second.release();
+
+    expect(query.mock.calls.filter(([pid]) => pid === process.pid)).toHaveLength(1);
+  });
+
+  it.runIf(process.platform === "win32")("memoizes the default durable-store process identity across transitions", async () => {
+    const root = await tempRoot();
+    const durable = new DurableSessionStore(root, { probeFilesystem: false });
+
+    await durable.updateSession(sessionId, { kind: "create", state: initial() });
+    await durable.updateSession(sessionId, { kind: "begin_input", inputId, generation: 1 });
+    await durable.updateSession(sessionId, { kind: "bind_turn", inputId, generation: 1, turnId });
+    await durable.updateSession(sessionId, { kind: "advance_cursor", inputId, generation: 1, seq: 1 });
+
+    await expect(durable.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { activeCosTurnId: turnId, cosEventCursor: 1 },
+    });
+  });
+
   it("acquires only after complete owner metadata exists and survives an orphan temp file", async () => {
     const root = await tempRoot();
     await probeHardLinkStateFilesystem(root);

@@ -1,5 +1,6 @@
 import { DurableSessionStore, defaultStateDirectory } from "./durable.js";
 import { DurableAdmissionLease, canonicalProfileIdentityHash, leaseReferencedSessionIds } from "./lease.js";
+import { PowerShellWindowsProcessIdentity } from "./mutex.js";
 
 export interface ProductionStateContext {
   readonly stateDirectory: string;
@@ -22,8 +23,17 @@ export async function createProductionStateContext(
 ): Promise<ProductionStateContext> {
   const stateDirectory = defaultStateDirectory(env);
   const profileIdentityHash = await canonicalProfileIdentityHash(userDataDir);
-  const sessionStore = new DurableSessionStore(stateDirectory);
-  const admissionLease = new DurableAdmissionLease(stateDirectory, profileIdentityHash);
+  // Production state mutations share one verified process identity. Constructing a fresh
+  // PowerShell-backed identity for every short session mutex would launch a new PowerShell query
+  // per durable transition and can time out under load before the first provider-event checkpoint.
+  // The identity object itself memoizes current(), while still querying other PIDs when stale-lock
+  // proof is actually required.
+  const processIdentity = new PowerShellWindowsProcessIdentity();
+  const sessionStore = new DurableSessionStore(stateDirectory, { mutex: { identity: processIdentity } });
+  const admissionLease = new DurableAdmissionLease(stateDirectory, profileIdentityHash, {
+    identity: processIdentity,
+    mutex: { identity: processIdentity },
+  });
   await sessionStore.init();
   const protectedSessions = await leaseReferencedSessionIds(stateDirectory);
   await sessionStore.pruneBroken(undefined, protectedSessions);

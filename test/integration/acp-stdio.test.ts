@@ -6,6 +6,7 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { compatibility } from "../../src/compatibility.js";
 
 type InputMode = "active" | "pending_cancel";
 
@@ -48,10 +49,12 @@ class FakeCos {
   readonly streamWaiters = new Map<string, (() => void)[]>();
   readonly inputs: FakeSession[] = [];
   readonly token = "stdio-integration-secret";
-  readonly buildId = "a".repeat(40);
+  readonly buildId = compatibility.cos.providerExtension.buildId;
   readonly stopRequests: { sessionId: string; turnId: string }[] = [];
   readonly pendingCancels: string[] = [];
   readonly server: Server;
+  inputPostAttempts = 0;
+  missingProviderFeature: string | null = null;
   nextMode: InputMode = "active";
   wrapSessionDetail = false;
   private nextTurn = 1;
@@ -101,16 +104,18 @@ class FakeCos {
     const url = new URL(req.url, "http://127.0.0.1");
 
     if (req.method === "GET" && url.pathname === "/v1/health") {
+      const features: Record<string, number> = {
+        "provider-project-resolve-v1": 1,
+        "provider-assistant-content-v1": 1,
+        "provider-session-policy-v1": 1,
+        "provider-turn-drain-v1": 1,
+      };
+      if (this.missingProviderFeature) delete features[this.missingProviderFeature];
       json(res, 200, {
         protocol: 1,
         app: "chat-on-steroids",
         actions: { enabled: true, routes: ["POST /v1/inputs"] },
-        features: {
-          "provider-project-resolve-v1": 1,
-          "provider-assistant-content-v1": 1,
-          "provider-session-policy-v1": 1,
-          "provider-turn-drain-v1": 1,
-        },
+        features,
         providerExtension: { apiVersion: 1, buildId: this.buildId },
       });
       return;
@@ -135,6 +140,7 @@ class FakeCos {
     }
 
     if (req.method === "POST" && url.pathname === "/v1/inputs") {
+      this.inputPostAttempts += 1;
       const request = await body(req);
       const inputId = String(request.id ?? "");
       const sessionId = String(request.sessionId ?? inputId);
@@ -398,6 +404,170 @@ describe.runIf(process.platform === "win32")("built ACP stdio provider", () => {
             acpTerminalSent: 1,
           });
         });
+    } finally {
+      child.stdin.end();
+      await fake.close();
+    }
+    expect(stderr).toBe("");
+  }, 30_000);
+
+  it("sends exact Stop for an active cancellation and settles only after the matching drain", async () => {
+    const root = await tempRoot();
+    const profile = path.join(root, "profile");
+    const control = path.join(profile, "control-api");
+    const project = path.join(root, "project");
+    const state = path.join(root, "state");
+    await Promise.all([fs.mkdir(control, { recursive: true }), fs.mkdir(project, { recursive: true })]);
+    const fake = new FakeCos(project);
+    fake.wrapSessionDetail = true;
+    const port = await fake.listen();
+    await fs.writeFile(path.join(control, "endpoint.json"), JSON.stringify({ url: `http://127.0.0.1:${port}`, pid: process.pid }));
+    await fs.writeFile(path.join(control, "token"), `${fake.token}\n`);
+
+    const child = spawn(process.execPath, [path.join(process.cwd(), "dist", "cli", "index.js")], {
+      cwd: process.cwd(),
+      env: { ...process.env, T3ONSTEROIDS_COS_USER_DATA_DIR: profile, T3ONSTEROIDS_STATE_DIR: state },
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    children.push(child);
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+
+    try {
+      await acp.client({ name: "stdio-integration" }).connectWith(childStream(child), async (ctx) => {
+        await ctx.request(acp.methods.agent.initialize, { protocolVersion: 2, clientCapabilities: {} });
+        const created = await ctx.request(acp.methods.agent.session.new, { cwd: project, mcpServers: [] });
+        fake.nextMode = "active";
+        let settled = false;
+        const prompt = ctx.request(acp.methods.agent.session.prompt, {
+          sessionId: created.sessionId,
+          prompt: [{ type: "text", text: "cancel the active turn" }],
+        }).finally(() => { settled = true; });
+
+        await fake.waitForStream(created.sessionId);
+        const session = fake.sessions.get(created.sessionId);
+        if (!session?.turnId) throw new Error("active fake session lacks turn id");
+        await ctx.notify(acp.methods.agent.session.cancel, { sessionId: created.sessionId });
+        await waitUntil(() => fake.stopRequests.length === 1);
+        expect(fake.stopRequests).toEqual([{ sessionId: created.sessionId, turnId: session.turnId }]);
+
+        fake.emit(created.sessionId, "turn_end", 1, { outcome: "stopped" });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(settled).toBe(false);
+
+        fake.emit(created.sessionId, "turn_drained", 2, {
+          inputId: session.inputId,
+          highWaterSeq: 2,
+          finalAssistantSeq: null,
+        });
+        await expect(prompt).resolves.toEqual({ stopReason: "cancelled" });
+      });
+    } finally {
+      child.stdin.end();
+      await fake.close();
+    }
+    expect(stderr).toBe("");
+  }, 30_000);
+
+  it("reattaches a healthy durable session after child restart without posting a replacement input", async () => {
+    const root = await tempRoot();
+    const profile = path.join(root, "profile");
+    const control = path.join(profile, "control-api");
+    const project = path.join(root, "project");
+    const state = path.join(root, "state");
+    await Promise.all([fs.mkdir(control, { recursive: true }), fs.mkdir(project, { recursive: true })]);
+    const fake = new FakeCos(project);
+    fake.wrapSessionDetail = true;
+    const port = await fake.listen();
+    await fs.writeFile(path.join(control, "endpoint.json"), JSON.stringify({ url: `http://127.0.0.1:${port}`, pid: process.pid }));
+    await fs.writeFile(path.join(control, "token"), `${fake.token}\n`);
+    const env = { ...process.env, T3ONSTEROIDS_COS_USER_DATA_DIR: profile, T3ONSTEROIDS_STATE_DIR: state };
+    let sessionId = "";
+    let stderr = "";
+
+    const first = spawn(process.execPath, [path.join(process.cwd(), "dist", "cli", "index.js")], {
+      cwd: process.cwd(), env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+    });
+    children.push(first);
+    first.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    await acp.client({ name: "stdio-integration" }).connectWith(childStream(first), async (ctx) => {
+      await ctx.request(acp.methods.agent.initialize, { protocolVersion: 2, clientCapabilities: {} });
+      const created = await ctx.request(acp.methods.agent.session.new, { cwd: project, mcpServers: [] });
+      sessionId = created.sessionId;
+      const prompt = ctx.request(acp.methods.agent.session.prompt, {
+        sessionId,
+        prompt: [{ type: "text", text: "establish durable session" }],
+      });
+      await fake.waitForStream(sessionId);
+      const session = fake.sessions.get(sessionId);
+      if (!session?.turnId) throw new Error("active fake session lacks turn id");
+      fake.emit(sessionId, "turn_end", 1, { outcome: "completed" });
+      fake.emit(sessionId, "turn_drained", 2, { inputId: session.inputId, highWaterSeq: 2, finalAssistantSeq: null });
+      await expect(prompt).resolves.toEqual({ stopReason: "end_turn" });
+    });
+    first.stdin.end();
+    if (first.exitCode === null) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("first provider child did not exit")), 5_000);
+        first.once("exit", () => { clearTimeout(timer); resolve(); });
+      });
+    }
+
+    const inputPostsBeforeResume = fake.inputPostAttempts;
+    const second = spawn(process.execPath, [path.join(process.cwd(), "dist", "cli", "index.js")], {
+      cwd: process.cwd(), env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+    });
+    children.push(second);
+    second.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    try {
+      await acp.client({ name: "stdio-integration" }).connectWith(childStream(second), async (ctx) => {
+        await ctx.request(acp.methods.agent.initialize, { protocolVersion: 2, clientCapabilities: {} });
+        await expect(ctx.request(acp.methods.agent.session.resume, { sessionId, cwd: project, mcpServers: [] })).resolves.toEqual({});
+        expect(fake.inputPostAttempts).toBe(inputPostsBeforeResume);
+        expect(fake.inputs).toHaveLength(inputPostsBeforeResume);
+      });
+    } finally {
+      second.stdin.end();
+      await fake.close();
+    }
+    expect(stderr).toBe("");
+  }, 30_000);
+
+  it("fails explicit provider validation before any /v1/inputs mutation", async () => {
+    const root = await tempRoot();
+    const profile = path.join(root, "profile");
+    const control = path.join(profile, "control-api");
+    const project = path.join(root, "project");
+    const state = path.join(root, "state");
+    await Promise.all([fs.mkdir(control, { recursive: true }), fs.mkdir(project, { recursive: true })]);
+    const fake = new FakeCos(project);
+    fake.missingProviderFeature = "provider-turn-drain-v1";
+    const port = await fake.listen();
+    await fs.writeFile(path.join(control, "endpoint.json"), JSON.stringify({ url: `http://127.0.0.1:${port}`, pid: process.pid }));
+    await fs.writeFile(path.join(control, "token"), `${fake.token}\n`);
+
+    const child = spawn(process.execPath, [path.join(process.cwd(), "dist", "cli", "index.js")], {
+      cwd: process.cwd(),
+      env: { ...process.env, T3ONSTEROIDS_COS_USER_DATA_DIR: profile, T3ONSTEROIDS_STATE_DIR: state },
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    children.push(child);
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+
+    try {
+      await acp.client({ name: "stdio-integration" }).connectWith(childStream(child), async (ctx) => {
+        await ctx.request(acp.methods.agent.initialize, { protocolVersion: 2, clientCapabilities: {} });
+        const created = await ctx.request(acp.methods.agent.session.new, { cwd: project, mcpServers: [] });
+        await expect(ctx.request(acp.methods.agent.session.prompt, {
+          sessionId: created.sessionId,
+          prompt: [{ type: "text", text: "must fail provider validation" }],
+        })).rejects.toMatchObject({ data: { code: "provider_extension_unavailable" } });
+        expect(fake.inputPostAttempts).toBe(0);
+        expect(fake.inputs).toHaveLength(0);
+      });
     } finally {
       child.stdin.end();
       await fake.close();

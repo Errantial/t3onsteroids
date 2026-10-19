@@ -793,7 +793,16 @@ export class AcpBridgeRuntime {
             this.sessions.set(sessionId, session);
             return { kind: "cancelled_not_sent" };
           }
-          if (turn.turnId) return { kind: "turn_ready" };
+          if (turn.turnId) {
+            session = await this.applyDurableTransition(sessionId, {
+              kind: "bind_turn",
+              inputId,
+              generation: current.generation,
+              turnId: turn.turnId,
+            });
+            this.sessions.set(sessionId, session);
+            return { kind: "turn_ready" };
+          }
         }
       }
 

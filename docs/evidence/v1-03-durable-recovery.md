@@ -4,9 +4,9 @@ Status: PASS
 
 # V1 Step 3 — durable state, recovery and admission lease
 
-`bridgeImplementationCommit`: `7c717e1632e228a9af276f65a017be18bd4540c6`.
+`bridgeImplementationCommit`: `3cb315830850305fc7c772b497d70c1c8249a1cc`.
 
-Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `e571a421b3aa1b43acec3efc9695f5081cc224b0` (browser-extension file stamp remains separately `a8e3d21511dc`); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
+Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc` (browser-extension file stamp separately `a35dccb10b05`); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
 Validated production durability covers the Windows hard-link mutation mutex and capability probe; tagged/quarantined session reads; guarded narrow transitions preserving concurrent cursor/cancel/mode state; provisional first-session binding/mode state while CoS delivery is only `pending`; exact unwind to unbound/prior mode when cancellation proves `not_sent`; exact generation/input/turn checks; stable profile-derived admission identity; one long-lived cross-process lease; stale-owner and PID-reuse handling without heartbeat-only stealing; crash-safe create/send/cancel/Stop recovery; lease retention through `turn_end`; release only after authoritative drain/final persistence proof; exact cancellation-target persistence; safe unknown/corrupt resume quarantine; and prevention of stale reconciler deletion of replacement leases.
 
@@ -17,11 +17,10 @@ Deterministic Step-8 built-stdio coverage now exercises recovery through the com
 Current-machine bridge validation from this exact implementation tuple:
 
 ```text
-npx vitest run test/cos-provider-extension.test.ts  PASS — 11/11 tests
-npm run verify                              PASS — 25 files / 232 tests
-npm audit --json                            PASS — 0 vulnerabilities at every severity
+npm run verify                              PASS — 25/25 test files, 233/233 tests
+npm audit --json                            PASS — exit 0; 0 vulnerabilities at every severity
 git diff --check                            PASS
 package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false
 ```
 
-The deterministic recovery gate is green for this exact implementation tuple. The repaired CoS idle-close behavior protects an exact durable `closing` provider turn until it resolves to `drained`, `not_sent`, or `broken`, preventing idle tab cleanup from destroying the drain owner while preserving the existing fail-closed restart/reconciliation rules. The Step-1 summary records the current full-CoS-verify state separately. Step 7 and Step 8 live/browser acceptance are not claimed here, and overall release qualification remains false.
+The deterministic recovery gate is green for this exact implementation tuple. The repaired CoS idle-close behavior protects an exact durable `closing` provider turn until it resolves to `drained`, `not_sent`, or `broken`, and the later terminal-proof repairs tolerate bounded transient null/transport failures without weakening the authoritative drain fence. The Step-1 summary explicitly does not claim a full-CoS-verify PASS. Step 7 and Step 8 live/browser acceptance are not claimed here, and overall release qualification remains false.

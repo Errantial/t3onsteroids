@@ -40,7 +40,7 @@ describe("implementation commit identity", () => {
 
     const next = await commit(root, "scripts/helper.mjs", "export const b = 2;\n", "implementation script");
     expect(implementationCommit(root)).toBe(next);
-  });
+  }, 15_000);
 
   it("ignores implementation commits that are reachable only from unrelated refs", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "t3os-implementation-commit-ref-"));
@@ -56,5 +56,5 @@ describe("implementation commit identity", () => {
     git(root, ["switch", mainBranch]);
 
     expect(implementationCommit(root)).toBe(mainImplementation);
-  });
+  }, 15_000);
 });

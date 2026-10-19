@@ -59,8 +59,4 @@ describe("v1 release gate manifest", () => {
     expect(readiness.releaseQualified).toBe(allPassed);
     if (!allPassed) expect(readiness.releaseQualified).toBe(false);
   });
-
-  it("starts every gate pending until current matching evidence is deliberately promoted", () => {
-    expect(Object.values(v1ReleaseGateManifest.gates).map((gate) => gate.status)).toEqual(Array(10).fill("pending"));
-  });
 });

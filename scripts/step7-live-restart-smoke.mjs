@@ -18,6 +18,7 @@ import {
   requiredOption,
   writeEvidence,
 } from "./step7-live-smoke-lib.mjs";
+import { directNoToolPrompt } from "./step7-performance-live-lib.mjs";
 
 function moduleSpecifier(value) {
   return value.startsWith("file:") ? value : pathToFileURL(resolve(value)).href;
@@ -115,7 +116,7 @@ async function bridgeConnection({ acp, bridgeCli, projectPath, profile, stateDir
         }
         const result = await ctx.request(acp.methods.agent.session.prompt, {
           sessionId: resolvedSessionId,
-          prompt: [{ type: "text", text: `Reply exactly: ${expected}` }],
+          prompt: [{ type: "text", text: directNoToolPrompt(expected) }],
         });
         stopReason = result.stopReason;
       });
@@ -181,7 +182,7 @@ async function providerRestartConnection({ acp, bridgeCli, projectPath, profile,
         sessionId = created.sessionId;
         const first = await ctx.request(acp.methods.agent.session.prompt, {
           sessionId,
-          prompt: [{ type: "text", text: `Reply exactly: ${expectedFirst}` }],
+          prompt: [{ type: "text", text: directNoToolPrompt(expectedFirst) }],
         });
         firstTurn = { stopReason: first.stopReason, finalMatched: firstAssistant === expectedFirst, assistantChars: firstAssistant.length, toolLikeCount: firstToolLikeCount };
         beforeRestart = await discover(profile);
@@ -191,7 +192,7 @@ async function providerRestartConnection({ acp, bridgeCli, projectPath, profile,
         collectingSecond = true;
         const second = await ctx.request(acp.methods.agent.session.prompt, {
           sessionId,
-          prompt: [{ type: "text", text: `Reply exactly: ${expectedSecond}` }],
+          prompt: [{ type: "text", text: directNoToolPrompt(expectedSecond) }],
         });
         secondTurn = { stopReason: second.stopReason, finalMatched: secondAssistant === expectedSecond, assistantChars: secondAssistant.length, toolLikeCount: secondToolLikeCount };
       });

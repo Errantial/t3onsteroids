@@ -18,7 +18,6 @@ export interface ProviderTurnAnalysis {
 }
 
 export function directNoToolPrompt(expectedText: string): string;
-export function directVisibleAssistantText(text: string): string;
 export function directProviderInput(options: {
   inputId: string;
   expectedText: string;

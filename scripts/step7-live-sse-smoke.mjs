@@ -11,6 +11,7 @@ import {
   requiredOption,
   writeEvidence,
 } from "./step7-live-smoke-lib.mjs";
+import { directNoToolPrompt } from "./step7-performance-live-lib.mjs";
 
 function moduleSpecifier(value) {
   return value.startsWith("file:") ? value : pathToFileURL(resolve(value)).href;
@@ -102,7 +103,7 @@ const inputId = randomUUID();
 const expected = `STEP7-SSE-${randomUUID()}`;
 const sent = await client.send({
   id: inputId,
-  text: `Reply exactly: ${expected}`,
+  text: directNoToolPrompt(expected),
   projectId: project.projectId,
   providerPolicy: { backgroundWork: "disabled" },
 });

@@ -21,17 +21,6 @@ function assistantText(event) {
   return typeof row.text === "string" ? row.text : null;
 }
 
-// ChatGPT may render a trailing Core-app chip as this Markdown-shaped provider annotation even
-// when the answer itself used no tool. It is presentation metadata, not answer prose. Keep the
-// exception deliberately exact: one known Core label, one validated app://asdk_app_* target, and
-// only at end-of-message. Arbitrary text/links still make an exact-reply sample fail.
-const CORE_APP_REFERENCE_SUFFIX = / \[\$chat-on-steroids-core\]\(app:\/\/asdk_app_[A-Za-z0-9_-]{1,160}\)$/;
-
-export function directVisibleAssistantText(text) {
-  if (typeof text !== "string") throw new TypeError("text must be a string");
-  return text.replace(CORE_APP_REFERENCE_SUFFIX, "");
-}
-
 function isToolLike(event) {
   return event?.kind === "tool_call" || event?.kind === "page_tool" || event?.kind === "agent_message";
 }
@@ -40,7 +29,7 @@ export function directNoToolPrompt(expectedText) {
   if (typeof expectedText !== "string" || expectedText.length === 0) {
     throw new TypeError("expectedText must be a non-empty string");
   }
-  return `Do not use tools. Reply exactly: ${expectedText}`;
+  return `Reply with exactly this token and nothing else. Do not append citations, source links, app links, plugin links, tool references, markdown, or commentary. Do not use tools. Token: ${expectedText}`;
 }
 
 export function directProviderInput({ inputId, expectedText, projectId }) {
@@ -79,7 +68,7 @@ export function analyzeDirectTurn(events, { inputId, expectedText, endToEndMs })
     turnEndObserved: Boolean(turnEnd),
     turnId: typeof turnEnd?.turnId === "string" ? turnEnd.turnId : null,
     finalObserved: finalText !== null,
-    finalMatched: finalText !== null && directVisibleAssistantText(finalText) === expectedText,
+    finalMatched: finalText === expectedText,
     finalAssistantChars: finalText?.length ?? 0,
     toolLikeCount,
     endToEndMs: asFiniteNonNegative(endToEndMs, "endToEndMs"),

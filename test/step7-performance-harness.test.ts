@@ -7,7 +7,6 @@ import {
   directInputProof,
   directNoToolPrompt,
   directProviderInput,
-  directVisibleAssistantText,
   evaluateDirectPairedEvidence,
   evaluateSlowConsumerEvidence,
   slowConsumerPerformanceSample,
@@ -19,7 +18,7 @@ const healthyBrowser = { connectionState: "connected", bridgePaired: true, bridg
 describe("Step 7 live performance harness", () => {
   it("uses an explicit no-tool exact-reply prompt for the paired direct baseline", () => {
     expect(directNoToolPrompt("STEP7-DIRECT-01-token")).toBe(
-      "Do not use tools. Reply exactly: STEP7-DIRECT-01-token",
+      "Reply with exactly this token and nothing else. Do not append citations, source links, app links, plugin links, tool references, markdown, or commentary. Do not use tools. Token: STEP7-DIRECT-01-token",
     );
   });
 
@@ -30,35 +29,10 @@ describe("Step 7 live performance harness", () => {
       projectId: "22222222-2222-4222-8222-222222222222",
     })).toEqual({
       id: "11111111-1111-4111-8111-111111111111",
-      text: "Do not use tools. Reply exactly: STEP7-DIRECT-01-token",
+      text: "Reply with exactly this token and nothing else. Do not append citations, source links, app links, plugin links, tool references, markdown, or commentary. Do not use tools. Token: STEP7-DIRECT-01-token",
       projectId: "22222222-2222-4222-8222-222222222222",
       providerPolicy: { backgroundWork: "disabled" },
     });
-  });
-
-  it("treats only one exact trailing Core app reference as presentation metadata", () => {
-    const expected = "STEP7-DIRECT-01-token";
-    const suffix = " [$chat-on-steroids-core](app://asdk_app_6aaf2b885780819194a6848835cc6115)";
-    expect(directVisibleAssistantText(expected + suffix)).toBe(expected);
-    expect(directVisibleAssistantText(expected + " extra")).toBe(expected + " extra");
-    expect(directVisibleAssistantText(expected + " [$chat-on-steroids-core](https://example.com)")).not.toBe(expected);
-    expect(directVisibleAssistantText(expected + " [$other-app](app://asdk_app_6aaf2b885780819194a6848835cc6115)")).not.toBe(expected);
-
-    const inputId = "11111111-1111-4111-8111-111111111111";
-    const base = [
-      { position: 1, kind: "user_message", inputId, inputDelivery: "confirmed" },
-      { position: 3, kind: "turn_end", turnId: "turn-a" },
-    ];
-    expect(analyzeDirectTurn([
-      base[0],
-      { position: 2, kind: "assistant_message", final: true, message: { text: expected + suffix } },
-      base[1],
-    ], { inputId, expectedText: expected, endToEndMs: 10 }).finalMatched).toBe(true);
-    expect(analyzeDirectTurn([
-      base[0],
-      { position: 2, kind: "assistant_message", final: true, message: { text: expected + " extra" } },
-      base[1],
-    ], { inputId, expectedText: expected, endToEndMs: 10 }).finalMatched).toBe(false);
   });
 
   it("proves each direct send from its exact send response and confirmed session event", () => {

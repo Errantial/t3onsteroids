@@ -3,7 +3,6 @@ import { join } from "node:path";
 
 import { compatibility } from "./compatibility.js";
 import {
-  COS_PROVIDER_EXTENSION_FEATURES,
   CosControllerClient,
   discoverCosController,
   type CosControllerReadiness,
@@ -30,13 +29,6 @@ export interface SetupDiagnosticsOptions {
   readonly cwd?: string;
   readonly discover?: typeof discoverCosController;
   readonly clientFactory?: (discover: () => Promise<Awaited<ReturnType<typeof discoverCosController>>>) => CosControllerClient;
-}
-
-function featureStatus(readiness: CosControllerReadiness): SetupDiagnosticItem {
-  const missing = Object.values(COS_PROVIDER_EXTENSION_FEATURES).filter((feature) => readiness.features[feature] !== 1);
-  return missing.length === 0
-    ? { id: "provider-extension", status: "ok", message: "Required CoS provider extension features are available." }
-    : { id: "provider-extension", status: "error", message: `Missing required CoS provider extension features: ${missing.join(", ")}.` };
 }
 
 export async function runSetupDiagnostics(options: SetupDiagnosticsOptions): Promise<SetupDiagnosticsResult> {
@@ -71,7 +63,20 @@ export async function runSetupDiagnostics(options: SetupDiagnosticsOptions): Pro
     return { ready: false, compatibility, items };
   }
 
-  items.push(featureStatus(readiness));
+  try {
+    await client.requireProviderExtension();
+    items.push({
+      id: "provider-extension",
+      status: "ok",
+      message: `Pinned CoS provider extension ${compatibility.cos.providerExtension.buildId} is available with all required v1 features.`,
+    });
+  } catch {
+    items.push({
+      id: "provider-extension",
+      status: "error",
+      message: `CoS provider extension does not match pinned build ${compatibility.cos.providerExtension.buildId} and required v1 features.`,
+    });
+  }
   items.push({
     id: "actions",
     status: readiness.actionsEnabled ? "ok" : "error",

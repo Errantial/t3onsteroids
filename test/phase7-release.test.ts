@@ -1,6 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { main } from "../src/cli/index.js";
+import { compatibility } from "../src/compatibility.js";
 import { runSetupDiagnostics } from "../src/diagnostics.js";
 import { releaseReadiness } from "../src/release.js";
 import { CosControllerClient, type CosControllerDiscovery } from "../src/cos/index.js";
@@ -15,8 +19,20 @@ const extensionHealth = {
     "provider-session-policy-v1": 1,
     "provider-turn-drain-v1": 1,
   },
-  providerExtension: { apiVersion: 1, buildId: "a".repeat(40) },
+  providerExtension: { apiVersion: 1, buildId: compatibility.cos.providerExtension.buildId },
 };
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
+});
+
+async function diagnosticRoot(): Promise<string> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "t3os-diagnostics-"));
+  roots.push(root);
+  await fs.mkdir(path.join(root, "control-api"));
+  return root;
+}
 
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
@@ -57,6 +73,29 @@ describe("Phase 7 release readiness", () => {
     }).catch((error) => ({ error }));
     // The filesystem precheck intentionally fails for the fake path before network discovery.
     expect(JSON.stringify(result)).not.toContain("do-not-leak");
+  });
+
+  it.each([
+    [compatibility.cos.providerExtension.buildId, true],
+    ["b".repeat(40), false],
+    ["development", false],
+  ])("diagnoses provider-extension build %s against the exact compatibility pin", async (buildId, expectedReady) => {
+    const root = await diagnosticRoot();
+    const discovery: CosControllerDiscovery = { baseUrl: "http://127.0.0.1:9", token: "diagnostic-secret" };
+    const health = { ...extensionHealth, providerExtension: { apiVersion: 1, buildId } };
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).endsWith("/v1/health")) return json(health);
+      throw new Error(`unexpected ${String(url)}`);
+    });
+    const result = await runSetupDiagnostics({
+      userDataDir: root,
+      discover: vi.fn(async () => discovery),
+      clientFactory: (discover) => new CosControllerClient(discover, { fetch }),
+    });
+
+    expect(result.ready).toBe(expectedReady);
+    expect(result.items.find((item) => item.id === "provider-extension")?.status).toBe(expectedReady ? "ok" : "error");
+    expect(JSON.stringify(result)).not.toContain("diagnostic-secret");
   });
 
   it("keeps diagnostics explicit when user-data is unavailable", async () => {

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { compatibility } from "../src/compatibility.js";
 import {
   COS_PROVIDER_EXTENSION_FEATURES,
   CosControllerClient,
@@ -7,7 +8,7 @@ import {
 } from "../src/cos/index.js";
 
 const extensionFeatures = Object.fromEntries(Object.values(COS_PROVIDER_EXTENSION_FEATURES).map((feature) => [feature, 1]));
-const providerBuildId = "a".repeat(40);
+const providerBuildId = compatibility.cos.providerExtension.buildId;
 const extensionHealth = {
   protocol: 1,
   app: "chat-on-steroids",
@@ -27,13 +28,36 @@ describe("CoS provider extension contract", () => {
       fetch: vi.fn(async () => jsonResponse({ ...extensionHealth, features: { [COS_PROVIDER_EXTENSION_FEATURES.projectResolve]: 1 } })),
     });
     await expect(client.requireProviderExtension()).rejects.toMatchObject({ code: "provider_extension_unavailable" });
+
+    const futureVersionClient = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), {
+      fetch: vi.fn(async () => jsonResponse({
+        ...extensionHealth,
+        features: { ...extensionFeatures, [COS_PROVIDER_EXTENSION_FEATURES.turnDrain]: 2 },
+      })),
+    });
+    await expect(futureVersionClient.requireProviderExtension()).rejects.toMatchObject({ code: "provider_extension_unavailable" });
   });
 
   it("requires the exact provider extension build identity as well as all four features", async () => {
-    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), {
+    const missingClient = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), {
       fetch: vi.fn(async () => jsonResponse({ ...extensionHealth, providerExtension: undefined })),
     });
-    await expect(client.requireProviderExtension()).rejects.toMatchObject({ code: "provider_extension_unavailable" });
+    await expect(missingClient.requireProviderExtension()).rejects.toMatchObject({ code: "provider_extension_unavailable" });
+
+    const wrongBuildClient = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), {
+      fetch: vi.fn(async () => jsonResponse({ ...extensionHealth, providerExtension: { apiVersion: 1, buildId: "b".repeat(40) } })),
+    });
+    await expect(wrongBuildClient.requireProviderExtension()).rejects.toMatchObject({ code: "provider_extension_unavailable" });
+
+    const developmentClient = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), {
+      fetch: vi.fn(async () => jsonResponse({ ...extensionHealth, providerExtension: { apiVersion: 1, buildId: "development" } })),
+    });
+    await expect(developmentClient.requireProviderExtension()).rejects.toMatchObject({ code: "provider_extension_unavailable" });
+
+    const exactClient = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), {
+      fetch: vi.fn(async () => jsonResponse(extensionHealth)),
+    });
+    await expect(exactClient.requireProviderExtension()).resolves.toMatchObject({ providerExtension: { apiVersion: 1, buildId: providerBuildId } });
     expect(parseHealth(extensionHealth).providerExtension).toEqual({ apiVersion: 1, buildId: providerBuildId });
   });
 

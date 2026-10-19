@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { compatibility } from "../src/compatibility.js";
 import {
   CosControllerClient,
   CosControllerError,
@@ -88,7 +89,7 @@ describe("CoS protocol-1 controller client", () => {
         "provider-session-policy-v1": 1,
         "provider-turn-drain-v1": 1,
       },
-      providerExtension: { apiVersion: 1, buildId: "a".repeat(40) },
+      providerExtension: { apiVersion: 1, buildId: compatibility.cos.providerExtension.buildId },
     };
     const fetch = vi.fn(async (url: string | URL | Request) => {
       if (String(url).endsWith("/v1/health")) {

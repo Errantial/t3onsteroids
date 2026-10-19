@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { compatibility } from "../src/compatibility.js";
 import { v1ReleaseGateManifest } from "../src/release-manifest.js";
 import { releaseReadiness } from "../src/release.js";
 
@@ -38,8 +39,8 @@ describe("v1 release gate manifest", () => {
   it("keeps provider extension and drift metadata valid whenever those gates pass", () => {
     const extension = v1ReleaseGateManifest.gates.cosProviderExtension;
     if (extension.status === "pass") {
-      expect(extension.extensionBuildId).toMatch(/^[0-9a-f]{40}$/);
-      expect(Object.values(extension.featureVersions)).toEqual([1, 1, 1, 1]);
+      expect(extension.extensionBuildId).toBe(compatibility.cos.providerExtension.buildId);
+      expect(extension.featureVersions).toEqual(compatibility.cos.providerExtension.features);
     }
 
     const drift = v1ReleaseGateManifest.gates.t3HeadDrift;

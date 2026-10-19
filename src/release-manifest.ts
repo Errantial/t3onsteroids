@@ -1,3 +1,5 @@
+import { compatibility } from "./compatibility.js";
+
 export type V1ReleaseGateStatus = "pending" | "pass";
 
 export interface V1ReleaseGate {
@@ -6,13 +8,8 @@ export interface V1ReleaseGate {
 }
 
 export interface CosProviderExtensionGate extends V1ReleaseGate {
-  readonly extensionBuildId: string | null;
-  readonly featureVersions: Readonly<{
-    "provider-project-resolve-v1": 1;
-    "provider-assistant-content-v1": 1;
-    "provider-session-policy-v1": 1;
-    "provider-turn-drain-v1": 1;
-  }>;
+  readonly extensionBuildId: typeof compatibility.cos.providerExtension.buildId | null;
+  readonly featureVersions: typeof compatibility.cos.providerExtension.features;
 }
 
 export interface T3HeadDriftGate extends V1ReleaseGate {
@@ -42,12 +39,7 @@ export const v1ReleaseGateManifest: V1ReleaseGateManifest = {
       status: "pending",
       evidencePath: "docs/evidence/v1-01-cos-extension.md",
       extensionBuildId: null,
-      featureVersions: {
-        "provider-project-resolve-v1": 1,
-        "provider-assistant-content-v1": 1,
-        "provider-session-policy-v1": 1,
-        "provider-turn-drain-v1": 1,
-      },
+      featureVersions: compatibility.cos.providerExtension.features,
     },
     eventTranslator: { status: "pending", evidencePath: "docs/evidence/v1-02-event-translator.md" },
     durableRecovery: { status: "pending", evidencePath: "docs/evidence/v1-03-durable-recovery.md" },

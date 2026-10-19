@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { AcpBridgeRuntime, type BridgeController } from "../src/acp/index.js";
+import { compatibility } from "../src/compatibility.js";
 import type { CosControllerReadiness } from "../src/cos/index.js";
 import type { SessionState } from "../src/session/index.js";
 import { MemoryAdmissionLease, MemoryStateStore } from "../src/state/index.js";
@@ -20,7 +21,7 @@ const readiness: CosControllerReadiness = {
     "provider-session-policy-v1": 1,
     "provider-turn-drain-v1": 1,
   },
-  providerExtension: { apiVersion: 1, buildId: "a".repeat(40) },
+  providerExtension: { apiVersion: 1, buildId: compatibility.cos.providerExtension.buildId },
 };
 
 function controller(overrides: Partial<BridgeController> = {}): BridgeController {

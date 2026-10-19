@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { compatibility } from "../src/compatibility.js";
 import { CosControllerClient } from "../src/cos/index.js";
 import { BridgeMetrics } from "../src/metrics.js";
 import { BoundedAsyncQueue } from "../src/translate/queue.js";
@@ -14,7 +15,7 @@ const extensionHealth = {
     "provider-session-policy-v1": 1,
     "provider-turn-drain-v1": 1,
   },
-  providerExtension: { apiVersion: 1, buildId: "a".repeat(40) },
+  providerExtension: { apiVersion: 1, buildId: compatibility.cos.providerExtension.buildId },
 };
 
 function jsonResponse(value: unknown, status = 200): Response {

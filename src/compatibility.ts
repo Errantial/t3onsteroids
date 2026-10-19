@@ -13,6 +13,16 @@ export const compatibility = {
     version: "2.1.39",
     sha: "87ae9d631f82d8da2f462d910410031ad8f97ac5",
     controlApiProtocol: 1,
+    providerExtension: {
+      apiVersion: 1,
+      buildId: "d5f27e7486c977351401ab1801fb01112aa2919b",
+      features: {
+        "provider-project-resolve-v1": 1,
+        "provider-assistant-content-v1": 1,
+        "provider-session-policy-v1": 1,
+        "provider-turn-drain-v1": 1,
+      },
+    },
   },
   acp: {
     sdk: "@agentclientprotocol/sdk",

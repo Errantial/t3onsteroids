@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { compatibility } from "../compatibility.js";
 import type { BridgeMetrics } from "../metrics.js";
 
 export const COS_CONTROL_PROTOCOL = 1 as const;
@@ -442,12 +443,14 @@ export class CosControllerClient {
       return this.providerExtensionReadiness.value;
     }
     const readiness = await this.health();
-    for (const feature of Object.values(COS_PROVIDER_EXTENSION_FEATURES)) {
-      if (readiness.features[feature] !== 1) {
+    for (const [feature, version] of Object.entries(compatibility.cos.providerExtension.features)) {
+      if (readiness.features[feature] !== version) {
         throw new CosControllerError("provider_extension_unavailable", `Required CoS provider extension feature is unavailable: ${feature}`);
       }
     }
-    if (!readiness.providerExtension || readiness.providerExtension.apiVersion !== 1) {
+    if (!readiness.providerExtension
+      || readiness.providerExtension.apiVersion !== compatibility.cos.providerExtension.apiVersion
+      || readiness.providerExtension.buildId !== compatibility.cos.providerExtension.buildId) {
       throw new CosControllerError("provider_extension_unavailable", "Required CoS provider extension build identity is unavailable");
     }
     this.providerExtensionReadiness = {

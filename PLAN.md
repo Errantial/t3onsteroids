@@ -1,16 +1,16 @@
 # T3 Code ↔ Chat On Steroids Compatibility Plan
 
-Status: implementation in progress. The bridge contracts, controller client, lazy-binding runtime, recovery guards, offline performance guard tests and release diagnostics exist, but v1 is **not yet release-complete**. The authoritative path to a finished v1 is the "Remaining work to finished v1" section below.
+Status: v1 release qualification remains in progress; the post-v1 durable multi-chat scheduler is implemented and committed, but live concurrency qualification is pending. This branch is a separate post-v1 lane and must not be treated as part of the pinned v1 release tuple. The authoritative path to a finished v1 is the "Remaining work to finished v1" section below.
 
 ## Current implementation checkpoint
 
-As of the current repository state:
+As of the post-v1 concurrency worktree on 2026-10-19:
 
-- **Complete in this repository:** project/tooling foundation, compatibility metadata, typed protocol-1 CoS client, bridge-side project/content/policy extension contracts, prompt normalization, lazy session binding, per-prompt readiness/policy checks, cancellation-intent state-machine handling, single-controller admission leasing semantics, bounded retry/backpressure helpers, release diagnostics, and offline/package-smoke tests.
-- **Partially complete:** the provider-extension client still lacks the newly source-validated `provider-turn-drain-v1` contract; ACP runtime semantics exist as library code, but there is no production stdio ACP agent entrypoint yet; persistence and admission leasing are currently memory implementations rather than durable/cross-process production implementations; Phase-1 stream/JSON hardening still has known cleanup items.
-- **Not yet implemented here:** the actual CoS provider extension described in Phase 2, the Phase-4 event translator/terminal-state machine, durable state/lease storage, production ACP stdio wiring, and the complete pinned live end-to-end acceptance matrix.
-- **Previously proven externally:** a disposable Local ACP spike on the pinned running T3 build exercised initialize/new/prompt/stream/Stop, and the exact pinned stock CoS protocol-1 controller suite passed 136/136 targeted tests.
-- **Release status:** pre-v1. Do not describe the provider as compatible/release-qualified until the remaining v1 gates below are complete.
+- **Implemented and committed:** production ACP stdio wiring, durable cross-process session state, recovery/cancellation reconciliation, and the post-v1 scheduler at `b8640281c52b932bc7f8cd3d6f5048164a7beb0a`. The scheduler provides a bounded profile-wide active set, FIFO waiting queue, exact queued cancellation/release, and legacy single-lease state compatibility.
+- **Offline qualification:** the current cancellation-reconciliation hardening is covered by deterministic residual-state regression cases. `npm run verify` passes 25 test files / 253 tests and package smoke; `supportedConcurrency=1` and `releaseQualified=false` remain the reported values.
+- **Live concurrency qualification:** not passed. The isolated candidate executable and extension artifacts match their recorded hashes/build identity, but the isolated Chrome profile is logged out and the candidate reports that it is waiting for the browser extension. Controller discovery files are absent, so the harness recorded `SETUP_INVALID` before sending any test prompts. See `docs/evidence/post-v1-concurrency-qualification.md` and `live-runs/20261019T232918Z-preflight-not-ready` under `.local-evidence/post-v1-concurrency`.
+- **Advertised capability:** retain `supportedConcurrency=1` until the complete isolated two-chat gate passes on measured evidence. Four-chat qualification remains gated on a passing two-chat result and must prove the fifth SSE stream can coexist with four bridged sessions. Implement and test a versioned multiplexed event-stream contract if the controller's four-stream cap starves other CoS activity.
+- **Release status:** v1 is not release-qualified while its independent release gates remain pending. Do not infer release qualification from scheduler implementation or offline tests.
 
 ## Objective
 
@@ -326,7 +326,7 @@ V1 behavior:
 - stream full-content chunks rather than buffering arbitrarily large messages in one allocation;
 - keep ACP startup free of CoS HTTP/browser side effects so T3 health probes remain cheap.
 
-**Current post-v1 implementation:** commit b8640281c52b932bc7f8cd3d6f5048164a7beb0a on feat/post-v1-concurrency replaces the binary lease with a durable profile-wide scheduler, a bounded active set, a FIFO waiting queue, exact cancellation/release, and legacy single-lease state compatibility. The production capability remains at one until live evidence qualifies a higher ceiling. Next, qualify two simultaneous chats, then four; measure browser reliability, queue depth, memory, controller utilization, latency, cancellation isolation and stale-event isolation. Respect the controller's four-SSE global cap. If four bridged chats cannot coexist safely with controller overhead or other clients, implement and test a versioned multiplexed event-stream contract before advertising four.
+**Current post-v1 implementation:** commit b8640281c52b932bc7f8cd3d6f5048164a7beb0a on feat/post-v1-concurrency replaces the binary lease with a durable profile-wide scheduler, a bounded active set, a FIFO waiting queue, exact cancellation/release, and legacy single-lease state compatibility. The current offline bridge gate passes, including full exact-generation cancellation settlement checks. The live gate remains setup-invalid until the isolated candidate is authenticated, paired, and controller-ready; the recorded preflight attempt sent no test prompts. The production capability remains at one until live evidence qualifies a higher ceiling. Next, qualify two simultaneous chats, then four; measure browser reliability, queue depth, memory, controller utilization, latency, cancellation isolation and stale-event isolation. Respect the controller's four-SSE global cap. If four bridged chats cannot coexist safely with controller overhead or other clients, implement and test a versioned multiplexed event-stream contract before advertising four.
 
 Initial performance gates:
 

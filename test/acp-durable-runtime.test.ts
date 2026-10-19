@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { AcpBridgeRuntime, type BridgeController } from "../src/acp/index.js";
+import { AcpBridgeRuntime, isFullySettledNotSentGeneration, type BridgeController } from "../src/acp/index.js";
+import type { SessionState } from "../src/session/index.js";
 import type { CosProviderTurnAttestation } from "../src/cos/index.js";
 import {
   DurableAdmissionLease,
@@ -97,7 +98,46 @@ function translation(extra: Partial<ProviderTurnTranslationState> = {}): Provide
   };
 }
 
+const residualSettlementFields: ReadonlyArray<readonly [string, Partial<SessionState>]> = [
+  ["active input", { activeInputId: sessionId }],
+  ["active turn", { activeCosTurnId: turnId }],
+  ["provider translation", { providerTranslation: translation() }],
+  ["cancel target", { cancelTargetTurnId: turnId }],
+  ["cancel intent", { cancelIntent: "requested" }],
+  ["dispatch state", { inputDispatchState: "prepared" }],
+  ["dispatch input", { dispatchInputId: sessionId }],
+  ["admission lease", { admissionLeaseId: journalLeaseId }],
+  ["pending mode", { pendingInteractionMode: "plan" }],
+  ["mode transition input", { modeTransitionInputId: sessionId }],
+  ["tentative binding", { bindingState: "create_pending" }],
+];
+
 describe("durable ACP runtime boundaries", () => {
+  it("accepts only the exact generation with every not-sent field settled", () => {
+    const settled: SessionState = {
+      sessionId,
+      bindingState: "unbound",
+      interactionMode: "default",
+      cancelIntent: "none",
+      generation: 1,
+    };
+    expect(isFullySettledNotSentGeneration(settled, 1)).toBe(true);
+    expect(isFullySettledNotSentGeneration(settled, 2)).toBe(false);
+    expect(isFullySettledNotSentGeneration(undefined, 1)).toBe(false);
+  });
+
+  it.each(residualSettlementFields)("rejects a settled generation with residual %s state", (_field, residual) => {
+    const settledWithResidual: SessionState = {
+      sessionId,
+      bindingState: "unbound",
+      interactionMode: "default",
+      cancelIntent: "none",
+      generation: 1,
+      ...residual,
+    };
+    expect(isFullySettledNotSentGeneration(settledWithResidual, 1)).toBe(false);
+  });
+
   it("dispatches two different ACP sessions concurrently when the measured slot override is two", async () => {
     const root = await tempRoot();
     const { store, lease } = durable(root, 2, 1);

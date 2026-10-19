@@ -52,6 +52,14 @@ export class BridgeError extends Error {
   }
 }
 
+/** @internal Shared fail-closed proof for a fully settled, exact not-sent generation. */
+export function isFullySettledNotSentGeneration(state: SessionState | null | undefined, generation: number): boolean {
+  return state?.generation === generation && !state.activeInputId && !state.activeCosTurnId &&
+    !state.providerTranslation && !state.cancelTargetTurnId && state.cancelIntent === "none" &&
+    !state.inputDispatchState && !state.dispatchInputId && !state.admissionLeaseId &&
+    !state.pendingInteractionMode && !state.modeTransitionInputId && state.bindingState !== "create_pending";
+}
+
 export interface AcpSessionDraft {
   readonly sessionId: string;
   readonly cwd: string;
@@ -1392,16 +1400,12 @@ export class AcpBridgeRuntime {
           } catch (settleError) {
             const settled = await this.readPersisted(session.sessionId);
             if (settleError instanceof BridgeError && settleError.code === "session_broken" &&
-                settled?.generation === generation && !settled.activeInputId && !settled.activeCosTurnId &&
-                !settled.providerTranslation && !settled.cancelTargetTurnId && settled.cancelIntent === "none" &&
-                !settled.inputDispatchState && !settled.dispatchInputId && !settled.admissionLeaseId &&
-                !settled.pendingInteractionMode && !settled.modeTransitionInputId &&
-                settled.bindingState !== "create_pending") {
+                isFullySettledNotSentGeneration(settled, generation)) {
               throw new BridgeError("cancelled", "Provider input was cancelled before dispatch");
             }
             throw settleError;
           }
-        } else if (latest?.generation === generation && !latest.providerTranslation && !latest.activeInputId &&
+        } else if (isFullySettledNotSentGeneration(latest, generation) &&
             error instanceof BridgeError && (error.code === "session_broken" || error.code === "cancelled")) {
           throw new BridgeError("cancelled", "Provider input was cancelled before dispatch");
         }
@@ -1515,7 +1519,7 @@ export class AcpBridgeRuntime {
           throw new BridgeError("session_broken", "Pending cancellation generation changed during reconciliation");
         }
         if (latest.activeInputId !== activeInputId) {
-          if (!latest.providerTranslation && !latest.activeInputId && latest.cancelIntent === "none") return;
+          if (isFullySettledNotSentGeneration(latest, generation)) return;
           throw new BridgeError("session_broken", "Pending cancellation target changed during reconciliation");
         }
         if (latest.inputDispatchState === "prepared") {
@@ -1539,8 +1543,7 @@ export class AcpBridgeRuntime {
             // remains a hard failure.
             const settled = await this.readPersisted(sessionId);
             if (!(error instanceof BridgeError) || error.code !== "session_broken" ||
-                settled?.generation !== generation || settled.activeInputId || settled.providerTranslation ||
-                settled.cancelIntent !== "none") {
+                !isFullySettledNotSentGeneration(settled, generation)) {
               throw error;
             }
           }

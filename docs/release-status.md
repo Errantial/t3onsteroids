@@ -45,4 +45,9 @@ For live qualification, the preferred lane while the active CoS installation rem
 
 ## Dependency audit disposition
 
-The bridge uses Vitest `5.0.5`, vite-node `6.0.0`, typescript-eslint `8.71.2`, ESLint / @eslint/js `9.39.5`, TypeScript `5.9.3`, and runtime `@agentclientprotocol/sdk@1.9.0`. Step-6 evidence records a clean `npm ci`, `npm run verify`, `npm audit --json` with zero bridge-package vulnerabilities, and `git diff --check` for the exact `bridgeImplementationCommit` named in that evidence. If implementation inputs advance afterward, the Step-6 qualification must be refreshed rather than treated as portable by implication. This bridge audit is separate from the inherited CoS application dependency advisories recorded in Step-1 evidence.
+
+## Post-v1 concurrency lane (separate from the pinned v1 release tuple)
+
+The durable multi-chat scheduler is implemented and committed at `b8640281c52b932bc7f8cd3d6f5048164a7beb0a` on `feat/post-v1-concurrency`. The post-v1 offline bridge verification currently passes 25 test files / 253 tests, including the exact-generation cancellation-reconciliation guard. This does **not** qualify higher live concurrency or alter the pinned v1 contract.
+
+Current live status: `supportedConcurrency=1`, `releaseQualified=false`. The isolated candidate executable and extension build identities match their recorded values, but the isolated Chrome profile is logged out, the candidate is waiting for the browser extension, and controller discovery files are absent. A redacted `SETUP_INVALID` preflight is recorded at `.local-evidence/post-v1-concurrency/live-runs/20261019T232918Z-preflight-not-ready/manifest.json`; no live test prompts were sent. Qualify two chats first, then four with the fifth-stream probe. Do not raise the advertised concurrency ceiling or change the v1 release state without the corresponding evidence.

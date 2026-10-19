@@ -11,7 +11,7 @@ import {
   requiredOption,
   writeEvidence,
 } from "./step7-live-smoke-lib.mjs";
-import { directNoToolPrompt } from "./step7-performance-live-lib.mjs";
+import { analyzeProviderTurn, directNoToolPrompt } from "./step7-performance-live-lib.mjs";
 
 function moduleSpecifier(value) {
   return value.startsWith("file:") ? value : pathToFileURL(resolve(value)).href;
@@ -111,6 +111,7 @@ const sessionId = sent.sessionId ?? inputId;
 const abort = new AbortController();
 const timeout = setTimeout(() => abort.abort(new Error("step7 live SSE smoke timeout")), timeoutMs);
 const seqs = [];
+const observedEvents = [];
 const turnEndIds = new Set();
 let turnDrainedObserved = false;
 let drainTurnId = null;
@@ -119,7 +120,7 @@ let toolLikeCount = 0;
 try {
   for await (const event of client.streamEvents(sessionId, { signal: abort.signal })) {
     seqs.push(event.seq);
-    if (/tool|page_tool/.test(event.kind)) toolLikeCount += 1;
+    observedEvents.push(event);
     if (event.kind === "turn_end" && event.turnId) turnEndIds.add(event.turnId);
     if (event.kind === "turn_drained" && event.inputId === inputId) {
       turnDrainedObserved = true;
@@ -134,6 +135,7 @@ try {
 }
 
 if (drop.performed && streamRequests.length >= 2) drop.reconnectFrom = streamRequests[1];
+toolLikeCount = analyzeProviderTurn(observedEvents, inputId).toolLikeCount;
 const finalText = finalAssistantSeq == null ? null : await client.fullAssistantContent(sessionId, finalAssistantSeq);
 const afterDiscovery = await discoverCosController(profile);
 const browserAfter = await controllerMetadata(afterDiscovery);

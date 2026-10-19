@@ -25,6 +25,13 @@ function isToolLike(event) {
   return event?.kind === "tool_call" || event?.kind === "page_tool" || event?.kind === "agent_message";
 }
 
+function isDirectNoToolCompletionMarker(event) {
+  return event?.kind === "page_tool"
+    && event?.source === "extension"
+    && event?.turnId == null
+    && event?.label === "Completed direct response without using tools";
+}
+
 export function directNoToolPrompt(expectedText) {
   if (typeof expectedText !== "string" || expectedText.length === 0) {
     throw new TypeError("expectedText must be a non-empty string");
@@ -62,7 +69,9 @@ export function analyzeDirectTurn(events, { inputId, expectedText, endToEndMs })
     event?.kind === "assistant_message" && event?.final === true && eventOrder(event) >= start,
   );
   const finalText = final ? assistantText(final) : null;
-  const toolLikeCount = events.filter((event) => eventOrder(event) >= start && isToolLike(event)).length;
+  const toolLikeCount = events.filter((event) =>
+    eventOrder(event) >= start && isToolLike(event) && !isDirectNoToolCompletionMarker(event),
+  ).length;
   return {
     inputDelivered: user?.inputDelivery === "confirmed",
     turnEndObserved: Boolean(turnEnd),

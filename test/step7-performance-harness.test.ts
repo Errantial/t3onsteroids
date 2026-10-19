@@ -75,6 +75,22 @@ describe("Step 7 live performance harness", () => {
     expect(analysis.toolLikeCount).toBe(1);
   });
 
+  it("ignores the exact extension-owned no-tool completion marker after turn_end", () => {
+    const inputId = "11111111-1111-4111-8111-111111111111";
+    const analysis = analyzeDirectTurn([
+      { position: 1, kind: "user_message", inputId, inputDelivery: "confirmed" },
+      { position: 2, kind: "assistant_message", final: true, message: { text: "ok" } },
+      { position: 3, kind: "turn_end", turnId: "turn-a" },
+      {
+        position: 4,
+        kind: "page_tool",
+        source: "extension",
+        label: "Completed direct response without using tools",
+      },
+    ], { inputId, expectedText: "ok", endToEndMs: 10 });
+    expect(analysis.toolLikeCount).toBe(0);
+  });
+
   it("extracts provider drain timing and the exact final content locator", () => {
     const inputId = "22222222-2222-4222-8222-222222222222";
     expect(analyzeProviderTurn([

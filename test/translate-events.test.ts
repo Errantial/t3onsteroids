@@ -159,6 +159,64 @@ describe("provider turn event translation", () => {
     expect(translator.state()).toMatchObject({ finalAssistantSeq: 4, finalAssistantEmittedSeq: 4, terminal: "end_turn" });
   });
 
+  it("reads only the authoritative final after revision-heavy >4k output, in bounded post-drain ranges", async () => {
+    let turn = activeTurn();
+    const chunkSize = 1024;
+    const full = `authoritative-final:${"0123456789abcdef".repeat(512)}`;
+    const requested: { seq: number; offset: number; limit: number }[] = [];
+    const deps = dependencies({
+      getTurn: () => turn,
+      content: async (seq, offset, limit) => {
+        requested.push({ seq, offset, limit });
+        const text = full.slice(offset, offset + limit);
+        return {
+          sessionId,
+          seq,
+          field: "assistantText",
+          offset,
+          text,
+          totalLength: full.length,
+          complete: offset + text.length === full.length,
+        };
+      },
+    });
+    const translator = new ProviderTurnTranslator({ sessionId, inputId, generation: 1, chunkSize }, deps);
+
+    for (let seq = 1; seq <= 8; seq += 1) {
+      const text = `revision-${seq}:${"r".repeat(seq * 257)}`;
+      await expect(translator.consume(event(seq, "assistant_message", {
+        final: false,
+        messageId: `revision-${seq}`,
+        message: { text, truncated: false, chars: text.length },
+      }))).resolves.toEqual([]);
+    }
+    await expect(translator.consume(finalEvent(9, "Final A compact snapshot"))).resolves.toEqual([]);
+    await expect(translator.consume(event(10, "turn_end", { outcome: "completed" }))).resolves.toEqual([]);
+    await expect(translator.consume(event(11, "assistant_message", {
+      final: true,
+      messageId: "assistant-11",
+      message: { text: full.slice(0, 4_096), truncated: true, chars: full.length },
+    }))).resolves.toEqual([]);
+    expect(full.length).toBeGreaterThan(4_096);
+    expect(deps.assistantContentChunk).not.toHaveBeenCalled();
+
+    turn = activeTurn({ state: "drained", drainedSeq: 12, finalAssistantSeq: 11 });
+    await expect(translator.consume(drainEvent(12, 11))).resolves.toEqual([
+      { kind: "assistant_final_ready", seq: 11, turnId },
+    ]);
+    expect(deps.assistantContentChunk).not.toHaveBeenCalled();
+
+    const { chunks, terminal } = await collectFinal(translator);
+    expect(chunks.map((chunk) => chunk.text).join("")).toBe(full);
+    expect(terminal).toEqual({ kind: "terminal", seq: 12, turnId, inputId, stopReason: "end_turn" });
+    expect(requested).toEqual(Array.from({ length: Math.ceil(full.length / chunkSize) }, (_, index) => ({
+      seq: 11,
+      offset: index * chunkSize,
+      limit: chunkSize,
+    })));
+    expect(requested.every((request) => request.seq === 11 && request.limit <= chunkSize)).toBe(true);
+  });
+
   it("persists acknowledged assistant range progress and resumes without duplicating accepted chunks", async () => {
     const full = "abcdefghij";
     const offsets: number[] = [];
@@ -249,6 +307,53 @@ describe("provider turn event translation", () => {
     await expect(translator.consume(drainEvent(4, null))).resolves.toEqual([
       { kind: "terminal", seq: 4, turnId, inputId, stopReason: "end_turn" },
     ]);
+  });
+
+  it("surfaces provider errors as structured activity without settling the turn", async () => {
+    let turn = activeTurn();
+    const deps = dependencies({ getTurn: () => turn });
+    const translator = new ProviderTurnTranslator({ sessionId, inputId, generation: 1, state: boundState() }, deps);
+
+    await expect(translator.consume(event(1, "chat_error", {
+      message: { text: "Temporary provider transport error", truncated: false, chars: 34 },
+      recoverable: true,
+      blocking: false,
+    }))).resolves.toEqual([{
+      kind: "provider_error",
+      seq: 1,
+      text: "Temporary provider transport error",
+      recoverable: true,
+      blocking: false,
+    }]);
+    expect(translator.state()).toMatchObject({ sessionId, inputId, generation: 1, turnId, cursor: 1 });
+    expect(translator.state()).not.toHaveProperty("terminal");
+    expect(deps.requirePolicy).not.toHaveBeenCalled();
+
+    await expect(translator.consume(event(2, "turn_end", { outcome: "completed" }))).resolves.toEqual([]);
+    turn = activeTurn({ state: "drained", drainedSeq: 3, finalAssistantSeq: null });
+    await expect(translator.consume(drainEvent(3, null))).resolves.toEqual([
+      { kind: "terminal", seq: 3, turnId, inputId, stopReason: "end_turn" },
+    ]);
+  });
+
+  it("keeps the same session and provider turn identity across a compaction handoff", async () => {
+    let turn = activeTurn();
+    const deps = dependencies({ getTurn: () => turn });
+    const translator = new ProviderTurnTranslator({ sessionId, inputId, generation: 1, state: boundState() }, deps);
+
+    await expect(translator.consume(event(1, "handoff", {
+      handoffId: "handoff-manual-1",
+      chars: 12_345,
+      reason: "manual",
+      continuation: "continuation-1",
+    }))).resolves.toEqual([{ kind: "activity", seq: 1, category: "handoff" }]);
+    expect(translator.state()).toMatchObject({ sessionId, inputId, generation: 1, turnId, cursor: 1 });
+
+    await expect(translator.consume(event(2, "turn_end", { outcome: "completed" }))).resolves.toEqual([]);
+    turn = activeTurn({ state: "drained", drainedSeq: 3, finalAssistantSeq: null });
+    const [terminal] = await translator.consume(drainEvent(3, null));
+    expect(terminal).toEqual({ kind: "terminal", seq: 3, turnId, inputId, stopReason: "end_turn" });
+    expect(translator.state()).toMatchObject({ sessionId, inputId, generation: 1, turnId, cursor: 3, drainSeq: 3 });
   });
 
   it("deduplicates replayed sequence rows and refuses malformed drain identities", async () => {

@@ -11,6 +11,7 @@ import {
   controllerMetadata,
   createNewEvidenceRoot,
   evaluateRestartEvidence,
+  isRestartCheckpointLifecycleUpdate,
   parseOptions,
   readJson,
   requiredOption,
@@ -166,7 +167,8 @@ async function providerRestartConnection({ acp, bridgeCli, projectPath, profile,
           if (collectingSecond) secondAssistant += params.update.content.text;
           else firstAssistant += params.update.content.text;
         }
-        if (params.update?.sessionUpdate === "tool_call" || params.update?.sessionUpdate === "tool_call_update") {
+        if ((params.update?.sessionUpdate === "tool_call" || params.update?.sessionUpdate === "tool_call_update")
+          && !isRestartCheckpointLifecycleUpdate(params.update)) {
           if (collectingSecond) secondToolLikeCount += 1;
           else firstToolLikeCount += 1;
         }

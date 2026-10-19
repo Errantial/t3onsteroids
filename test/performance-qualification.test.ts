@@ -1,3 +1,8 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { median, nearestRankPercentile, qualifyStep7Performance } from "../src/performance-qualification.js";
@@ -96,5 +101,36 @@ describe("Step 7 performance qualification", () => {
       ...base,
       slowConsumer: { ...base.slowConsumer, maxQueueDepth: 1 },
     }).checks.queueBound).toBe(false);
+  });
+
+  it("loads the built evaluator module through the CLI on Windows path semantics", () => {
+    const root = mkdtempSync(join(tmpdir(), "step7-evaluator-"));
+    const inputPath = join(root, "input.json");
+    try {
+      const bridged = Array.from({ length: 10 }, () => ({ preSendMs: 1, drainMs: 1, postDrainMs: 1, endToEndMs: 2 }));
+      const direct = Array.from({ length: 10 }, () => ({ endToEndMs: 1 }));
+      writeFileSync(inputPath, JSON.stringify({
+        bridged,
+        direct,
+        slowConsumer: {
+          rssHighWaterBytes: 64 * 1024 * 1024,
+          maxQueueDepth: 0,
+          queueCapacity: null,
+          sseReconnectCount: 0,
+          backoffCount: 0,
+          controllerReadCount: 1,
+          controllerActionCount: 1,
+          drainedWithinMs: 1,
+        },
+      }));
+      const result = spawnSync(process.execPath, [resolve("scripts/evaluate-step7-performance.mjs"), inputPath], {
+        cwd: resolve("."),
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ pass: true, bridgedCount: 10, directCount: 10 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   evaluateRestartEvidence,
   evaluateSseReconnectEvidence,
+  isRestartCheckpointLifecycleUpdate,
   parseOptions,
   summarizeStatus,
 } from "../scripts/step7-live-smoke-lib.mjs";
@@ -78,6 +79,29 @@ describe("Step 7 live-smoke harness evaluation", () => {
       tokenChanged: false,
       metrics: { controllerActionCount: 9, backoffCount: 8, sseReconnectCount: 3 },
     }).pass).toBe(false);
+  });
+
+  it("ignores only the exact extension restart-checkpoint page-tool projection", () => {
+    expect(isRestartCheckpointLifecycleUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "cos-event:11",
+      title: "Executed workflow restart checkpoint",
+      kind: "other",
+      status: "completed",
+    })).toBe(true);
+    expect(isRestartCheckpointLifecycleUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "cos-event:12",
+      title: "Clicked Save",
+      kind: "other",
+      status: "completed",
+    })).toBe(false);
+    expect(isRestartCheckpointLifecycleUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "request-tool-1",
+      title: "Executed workflow restart checkpoint",
+      status: "completed",
+    })).toBe(false);
   });
 
   it("parses only explicit option pairs and summarizes browser status without retaining unrelated fields", () => {

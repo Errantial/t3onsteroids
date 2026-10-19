@@ -55,6 +55,18 @@ export function summarizeStatus(status) {
   };
 }
 
+export function isRestartCheckpointLifecycleUpdate(update) {
+  const row = asObject(update);
+  // This exact shape is the ACP projection of CoS's extension-owned provider-restart checkpoint.
+  // Keep ordinary page tools and every request/tool update in the restart smoke's no-tool count.
+  return row.sessionUpdate === "tool_call"
+    && row.kind === "other"
+    && row.status === "completed"
+    && typeof row.toolCallId === "string"
+    && /^cos-event:\d+$/.test(row.toolCallId)
+    && row.title === "Executed workflow restart checkpoint";
+}
+
 export async function controllerMetadata(discovery) {
   const headers = { Authorization: `Bearer ${discovery.token}`, Accept: "application/json" };
   const [statusResponse, inputsResponse] = await Promise.all([

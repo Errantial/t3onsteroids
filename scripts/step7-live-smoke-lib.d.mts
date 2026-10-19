@@ -5,6 +5,7 @@ export function writeEvidence(path: string, value: unknown): Promise<void>;
 export function readJson(path: string): Promise<unknown>;
 export function browserHealthy(snapshot: unknown): boolean;
 export function summarizeStatus(status: unknown): { connectionState: string | null; bridgePaired: boolean; bridgePresent: boolean };
+export function isRestartCheckpointLifecycleUpdate(update: unknown): boolean;
 export function controllerMetadata(discovery: { baseUrl: string; token: string }): Promise<{ connectionState: string | null; bridgePaired: boolean; bridgePresent: boolean; inputCount: number }>;
 export function sessionInputCount(discovery: { baseUrl: string; token: string }, sessionId: string): Promise<number>;
 export function aggregateBridgeMetrics(...snapshots: unknown[]): Record<string, number>;

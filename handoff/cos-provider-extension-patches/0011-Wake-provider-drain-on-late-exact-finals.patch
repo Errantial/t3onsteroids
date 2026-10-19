@@ -1,0 +1,190 @@
+From 71e573b5c388fdf56a988e5e610bf6d85a1eea8a Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sun, 18 Oct 2026 07:20:28 -0600
+Subject: [PATCH 11/17] Wake provider drain on late exact finals
+
+---
+ extension/content.js        | 39 +++++++++++++++++++-
+ test/content-script.test.ts | 73 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 110 insertions(+), 2 deletions(-)
+
+diff --git a/extension/content.js b/extension/content.js
+index 29e7807d..59458c4e 100644
+--- a/extension/content.js
++++ b/extension/content.js
+@@ -415,6 +415,11 @@
+   let providerDrainPending = null;
+   const providerDrainFences = new Map();
+   let providerDrainWork = null;
++  // A transcript/Fiber wake can arrive while the current drain proof is still crossing an
++  // async boundary. Do not lose that edge merely because one proof episode is already active:
++  // replay one fresh proof immediately after it releases. This is event-driven, not a timer or
++  // polling loop, and coalesces any number of concurrent wakes into one retry.
++  let providerDrainRetryPending = false;
+   const providerDrainTurnIds = turn => new Set([
+     turn?.endMessageId,
+     ...(turn?.calls || []).map(item => item?.messageId),
+@@ -1947,6 +1952,7 @@
+     providerDrainPending = null;
+     providerDrainFences.clear();
+     providerDrainWork = null;
++    providerDrainRetryPending = false;
+     pendingResumes.clear();
+     resumedOrder = 0;
+     streamGone = null;
+@@ -2738,6 +2744,7 @@
+         terminalMessageId: result.outcome === 'completed' ? nativeEnd?.endMessageId || null : null,
+         invalidated: false
+       };
++      providerDrainRetryPending = false;
+       void maybePublishProviderDrainReady();
+     }
+     // Same moment, the other reader: the goal loop wants this turn's answer while `ended`
+@@ -4552,6 +4559,7 @@
+   }
+ 
+   async function refreshFiber(settled = null, presentationOnly = false) {
++    const providerTerminalProbe = Boolean(settled?.terminalProbe);
+     // A bound chat can briefly lose its /c/<id> route during React/router churn, and a real
+     // navigation to a fresh composer has the exact same pathname until ChatGPT assigns the
+     // new conversation id. While that identity is unresolved, fail closed: emitting Fiber
+@@ -5200,6 +5208,22 @@
+     // therefore be the last producer after that flush has already finished. Transfer its
+     // canonical revisions now instead of waiting for visibilitychange or the next timer.
+     void flush();
++    // A normal page-model refresh can be the first operation that learns the exact final after
++    // turn_end. That refresh may itself have started just before finishGeneration installed the
++    // provider barrier, so inspect the *current* pending turn here rather than capturing one at
++    // refresh start. Internal terminal-probe refreshes are excluded so a failed proof cannot
++    // schedule itself into an unbounded retry pump.
++    const pendingDrain = providerDrainPending;
++    if (
++      !providerTerminalProbe &&
++      pendingDrain &&
++      !pendingDrain.invalidated &&
++      pendingDrain.epoch === epoch &&
++      pendingDrain.conversationId === conversationId &&
++      (!settled?.localTurnId || settled.localTurnId === pendingDrain.turnId)
++    ) {
++      void maybePublishProviderDrainReady();
++    }
+     return true;
+   }
+ 
+@@ -12819,8 +12843,12 @@
+ 
+   async function maybePublishProviderDrainReady() {
+     const pending = providerDrainPending;
+-    if (!pending || pending.invalidated || providerDrainWork || !alive || pending.epoch !== epoch || pending.conversationId !== conversationId ||
++    if (!pending || pending.invalidated || !alive || pending.epoch !== epoch || pending.conversationId !== conversationId ||
+         CLF_DOM.conversationId() !== pending.conversationId || generating || pendingTools !== 0) return false;
++    if (providerDrainWork) {
++      providerDrainRetryPending = true;
++      return false;
++    }
+     const current = () => alive && providerDrainPending === pending && !pending.invalidated && pending.epoch === epoch &&
+       conversationId === pending.conversationId && CLF_DOM.conversationId() === pending.conversationId &&
+       fiberSettled?.localTurnId === pending.turnId && !generating && pendingTools === 0;
+@@ -12907,7 +12935,14 @@
+       if (current()) observe();
+       return false;
+     })();
+-    const tracked = work.finally(() => { if (providerDrainWork === tracked) providerDrainWork = null; });
++    const tracked = work.finally(() => {
++      if (providerDrainWork !== tracked) return;
++      providerDrainWork = null;
++      const retry = providerDrainRetryPending && providerDrainPending === pending && !pending.invalidated && alive &&
++        pending.epoch === epoch && pending.conversationId === conversationId && CLF_DOM.conversationId() === pending.conversationId;
++      providerDrainRetryPending = false;
++      if (retry) void maybePublishProviderDrainReady();
++    });
+     providerDrainWork = tracked;
+     return tracked;
+   }
+diff --git a/test/content-script.test.ts b/test/content-script.test.ts
+index c5715715..3d8982d6 100644
+--- a/test/content-script.test.ts
++++ b/test/content-script.test.ts
+@@ -4787,6 +4787,79 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+     }
+   });
+ 
++  it('publishes provider drain when a post-turn Fiber refresh learns the final after stale revalidation', async () => {
++    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
++    const drainToken = 'provider-drain-raced-wake-token';
++    const phases: string[] = [];
++    let probeSeen = false;
++    let postProbeScans = 0;
++    let finalAvailable = false;
++    live = await harness(`https://chatgpt.com/c/${conversationId}`, {
++      provider_turn_drain_ready: message => {
++        phases.push(message.phase);
++        if (message.phase === 'probe') {
++          probeSeen = true;
++          return { ok: true, data: { ok: true, applicable: true, drainToken, state: 'closing' } };
++        }
++        return { ok: true, data: { ok: true, applicable: true, drainToken, state: 'drained' } };
++      }
++    }, () => undefined, true);
++
++    startGenerating(live.document);
++    const section = assistantTurn(live.document, 'provider-raced-wake-page-turn', []);
++    live.hook.observe();
++    await settle();
++    prose(live.document, section, 'provider-raced-wake-final', 'Authoritative final.');
++    const descriptor = {
++      turnId: 'provider-raced-wake-page-turn', conversationId, endMessageId: 'provider-raced-wake-final', calls: [], activities: [],
++      messages: [{ messageId: 'provider-raced-wake-final', stable: true, rawText: 'Authoritative final.',
++        renderedHtml: '<p>Authoritative final.</p>' }]
++    };
++    const window = live.window as any;
++    const instantTimer = window.setTimeout;
++    window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
++    const onAsk = (event: any) => {
++      if (event.data?.source !== 'clf-fiber-ask') return;
++      // Keep Fiber genuinely unavailable through the DOM-completed turn boundary. The provider
++      // probe is the first moment after turn_end at which the page model may answer, matching
++      // the live sample where the exact assistant final was journaled after turn_end.
++      if (!probeSeen && !finalAvailable) return;
++      const token = event.data.nonce;
++      section.setAttribute('data-clf-fiber-turn', `${token}:0`);
++      const turn = finalAvailable ? descriptor : { ...descriptor, endMessageId: null };
++      if (probeSeen && !finalAvailable) postProbeScans += 1;
++      window.dispatchEvent(new window.MessageEvent('message', {
++        data: { source: 'clf-fiber-reply', nonce: token, scanToken: token, v: fiberVersion, scanOk: true, rows: [],
++          turns: [{ ...turn, index: 0 }] }, source: window
++      }));
++    };
++    window.addEventListener('message', onAsk);
++    try {
++      // End from the rendered completed answer while Fiber still has no exact terminal id.
++      // This deliberately creates providerDrainPending.terminalMessageId = null, matching the
++      // live sample whose assistant_message arrived after turn_end.
++      await settleTurn(live);
++      await live.hook.flush();
++      await vi.waitFor(() => expect(postProbeScans).toBe(3), { timeout: 500, interval: 5 });
++      expect(phases.length).toBeGreaterThanOrEqual(1);
++      expect(phases.every(phase => phase === 'probe')).toBe(true);
++      expect(phases).not.toContain('commit');
++      finalAvailable = true;
++      // Model the live boundary directly: after turn_end and the stale post-probe reads, a
++      // normal settled page-model refresh is the first operation that sees the exact final.
++      // That fresh evidence must wake the provider barrier immediately rather than wait for the
++      // background observation cadence.
++      const localTurnId = emitted(live.sent, 'turn_end').at(-1)!.event.turnId as string;
++      await live.hook.refreshFiber({ pageTurnId: 'provider-raced-wake-page-turn', localTurnId, pageTurn: section });
++      await vi.waitFor(() => expect(phases).toContain('commit'), { timeout: 500, interval: 5 });
++      expect(phases[0]).toBe('probe');
++      expect(postProbeScans).toBe(3);
++    } finally {
++      window.removeEventListener('message', onAsk);
++      window.setTimeout = instantTimer;
++    }
++  });
++
+   it('never commits provider drain while an exact-turn request owner remains unresolved, even after settle timeout', async () => {
+     const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+     const drainToken = 'provider-owner-drain-token';
+-- 
+2.53.0.windows.1
+

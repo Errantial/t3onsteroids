@@ -1,0 +1,166 @@
+From d5f27e7486c977351401ab1801fb01112aa2919b Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sun, 18 Oct 2026 17:04:46 -0600
+Subject: [PATCH 17/17] Order provider drain probe after turn end
+
+---
+ extension/background.js | 16 +++++++
+ test/extension.test.ts  | 92 ++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 106 insertions(+), 2 deletions(-)
+
+diff --git a/extension/background.js b/extension/background.js
+index 78473804..0d5c2c65 100644
+--- a/extension/background.js
++++ b/extension/background.js
+@@ -960,6 +960,12 @@ function journalCountForConversation(conversationId) {
+   return journal.reduce((count, entry) => count + (entry.conversationId === conversationId ? 1 : 0), 0);
+ }
+ 
++/** A provider probe is meaningful only after main has recorded this exact browser terminal. */
++function providerTurnEndPending(conversationId, turnId) {
++  return journal.some(entry => entry?.conversationId === conversationId &&
++    entry?.event?.kind === 'turn_end' && entry.event.turnId === turnId);
++}
++
+ /** Goal joins its own batches; another conversation's slow request is not its read barrier. */
+ async function deliverConversationJournal(conversationId) {
+   const preference = { conversationId };
+@@ -4453,6 +4459,16 @@ const HANDLERS = {
+     await noteTabConversation(source, conversationId);
+     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+     if (phase === 'probe') {
++      // `events()` acknowledges page custody after journal durability, not necessarily after an
++      // already-running journal worker has delivered this turn_end to main. Probing before that
++      // exact terminal arrives can observe provider_turn_not_closing and push the next attempt
++      // onto the content script's 1-second observation cadence. Join only when this turn's own
++      // terminal is still pending; ordinary probes with an already-delivered end keep the fast
++      // path, and commit retains its stronger full-conversation high-water drain below.
++      if (providerTurnEndPending(conversationId, turnId) && !(await deliverConversationJournal(conversationId))) {
++        return { ok: false, status: 503, error: 'transcript_not_delivered', retryable: true };
++      }
++      if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+       const result = await call('/provider/turn-drain-ready', {
+         method: 'POST',
+         body: JSON.stringify({ conversationId, turnId, phase: 'probe' })
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index cfe28f55..4dbdf1f1 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -4656,7 +4656,7 @@ describe('extension observation journal', () => {
+     expect(journalOf(session)).toEqual([]);
+   });
+ 
+-  it('probes provider closing before fencing and drains its conversation journal before commit', async () => {
++  it('delivers an exact pending provider turn_end before probe and still drains later journal rows before commit', async () => {
+     const conversationId = '24242424-3333-4444-8555-666666666666';
+     const drainToken = 'provider-drain-token-0001';
+     const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+@@ -4689,9 +4689,26 @@ describe('extension observation journal', () => {
+     expect(journalOf(session)).toHaveLength(1);
+ 
+     order.length = 0;
++    const blockedProbe = await worker.send({ type: 'provider_turn_drain_ready', phase: 'probe', conversationId, turnId: 'provider-turn' }, 64);
++    expect(blockedProbe).toMatchObject({ ok: false, status: 503, error: 'transcript_not_delivered', retryable: true });
++    expect(order).toEqual(['/events']);
++    expect(journalOf(session)).toHaveLength(1);
++
++    order.length = 0;
++    acceptEvents = true;
+     const probe = await worker.send({ type: 'provider_turn_drain_ready', phase: 'probe', conversationId, turnId: 'provider-turn' }, 64);
+     expect(probe).toMatchObject({ ok: true, data: { applicable: true, drainToken } });
+-    expect(order).toEqual(['/provider/turn-drain-ready:probe']);
++    expect(order).toEqual(['/events', '/provider/turn-drain-ready:probe']);
++    expect(journalOf(session)).toEqual([]);
++
++    // Probe only needs the terminal that makes main closing. A later provider-visible row still
++    // belongs to the existing post-fence commit high-water and must cross before commit.
++    acceptEvents = false;
++    await worker.send({
++      type: 'events', conversationId, entries: [{ conversationId, event: {
++        kind: 'assistant_message', time: Date.now(), messageId: 'provider-final-revision', text: 'Final revision', final: true
++      } }]
++    }, 64);
+     expect(journalOf(session)).toHaveLength(1);
+ 
+     order.length = 0;
+@@ -4703,6 +4720,77 @@ describe('extension observation journal', () => {
+     expect(journalOf(session)).toEqual([]);
+   });
+ 
++  it('joins an exact provider turn_end already being delivered while another journal worker is active', async () => {
++    const conversationId = '27272727-3333-4444-8555-666666666666';
++    const otherConversationId = '28282828-3333-4444-8555-666666666666';
++    const drainToken = 'provider-existing-worker-token';
++    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
++    const session = new FakeStorageArea();
++    const order: string[] = [];
++    let releaseOther!: () => void;
++    let releaseProvider!: () => void;
++    const otherHeld = new Promise<void>(resolve => { releaseOther = resolve; });
++    const providerHeld = new Promise<void>(resolve => { releaseProvider = resolve; });
++    let otherStarted!: () => void;
++    let providerStarted!: () => void;
++    const sawOther = new Promise<void>(resolve => { otherStarted = resolve; });
++    const sawProvider = new Promise<void>(resolve => { providerStarted = resolve; });
++    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
++      const url = new URL(input);
++      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
++      if (url.pathname === '/events') {
++        const body = JSON.parse(String(init.body || '{}'));
++        order.push(`/events:${body.conversationId}`);
++        if (body.conversationId === otherConversationId) {
++          otherStarted();
++          await otherHeld;
++        } else if (body.conversationId === conversationId) {
++          providerStarted();
++          await providerHeld;
++        }
++        return response(200, { sessionId: 'session', stored: 1 });
++      }
++      if (url.pathname === '/provider/turn-drain-ready') {
++        const body = JSON.parse(String(init.body || '{}'));
++        order.push(`/provider/turn-drain-ready:${body.phase}`);
++        return response(200, { ok: true, applicable: true, drainToken, state: 'closing' });
++      }
++      return response(404, {});
++    });
++    const worker = loadWorker({ local, session, fetch });
++
++    // Keep one journal worker occupied so the provider events() call takes drain()'s
++    // already-running branch. That branch starts the provider worker but does not await it.
++    const otherSend = worker.send({
++      type: 'events', conversationId: otherConversationId, entries: [{ conversationId: otherConversationId, event: {
++        kind: 'progress', time: Date.now(), text: 'unrelated in-flight journal row'
++      } }]
++    }, 70);
++    await sawOther;
++
++    const providerSend = worker.send({
++      type: 'events', conversationId, entries: [{ conversationId, event: {
++        kind: 'turn_end', time: Date.now(), turnId: 'provider-raced-turn', outcome: 'completed'
++      } }]
++    }, 71);
++    await sawProvider;
++    await providerSend;
++    expect(journalOf(session).some(entry => entry?.conversationId === conversationId && entry?.event?.kind === 'turn_end')).toBe(true);
++
++    const probe = worker.send({ type: 'provider_turn_drain_ready', phase: 'probe', conversationId,
++      turnId: 'provider-raced-turn' }, 71);
++    await new Promise(resolve => setTimeout(resolve, 0));
++    expect(order).not.toContain('/provider/turn-drain-ready:probe');
++
++    releaseProvider();
++    const probed = await probe;
++    expect(probed).toMatchObject({ ok: true, data: { applicable: true, drainToken } });
++    expect(order.indexOf(`/events:${conversationId}`)).toBeLessThan(order.indexOf('/provider/turn-drain-ready:probe'));
++
++    releaseOther();
++    await otherSend;
++  });
++
+   it('refuses provider commit from the probed document after that browser document is superseded', async () => {
+     const conversationId = '25252525-3333-4444-8555-666666666666';
+     const drainToken = 'provider-stale-document-token';
+-- 
+2.53.0.windows.1
+

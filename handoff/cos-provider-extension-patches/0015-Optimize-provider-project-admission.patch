@@ -1,0 +1,278 @@
+From daba70deef5f86fb4d3b45383a74486c3dc6e379 Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sun, 18 Oct 2026 14:40:10 -0600
+Subject: [PATCH 15/17] Optimize provider project admission
+
+---
+ src/main/control-actions.ts      | 16 ++++++++++++---
+ src/main/session/input.ts        | 21 ++++++++++++++-----
+ src/main/session/start-input.ts  |  6 +++---
+ src/main/session/store.ts        |  5 ++++-
+ test/control-api-actions.test.ts | 35 ++++++++++++++++++++++++++++++++
+ test/opening-input.test.ts       | 22 ++++++++++++++++++++
+ 6 files changed, 93 insertions(+), 12 deletions(-)
+
+diff --git a/src/main/control-actions.ts b/src/main/control-actions.ts
+index d3b33fa5..2d8cf8c0 100644
+--- a/src/main/control-actions.ts
++++ b/src/main/control-actions.ts
+@@ -8,7 +8,7 @@ import { projectInput, projectLive, RequestError } from './control-reads.js';
+ import { logInfo } from './logger.js';
+ import { deliveryProof, listInputs, sessionInputPolicy } from './session/input.js';
+ import type { InputArgs, InputEntry } from './session/input.js';
+-import { getProject } from './projects.js';
++import { getProject, projectWorkspace } from './projects.js';
+ import { readSession } from './session/read-model.js';
+ import { cancelDesktopInput, sendDesktopInput } from './session/start-input.js';
+ 
+@@ -113,6 +113,7 @@ async function controllable(sessionId: string | null): Promise<void> {
+ async function send(rawBody: unknown): Promise<ActionReply> {
+   const body = parse(sendBody, rawBody);
+   const text = body.text.trim();
++  let projectAdmission: { projectId: string; workspace: { virtual: string; real: string } } | undefined;
+ 
+   // A repeated id names the row that already exists. It is answered here because the outbox
+   // compares the whole request, `dueAt` included, and a retry a moment later would not match.
+@@ -128,7 +129,16 @@ async function send(rawBody: unknown): Promise<ActionReply> {
+   }
+ 
+   if (body.sessionId === undefined) {
+-    if (body.projectId !== undefined && !(await getProject(body.projectId))) throw new RequestError(404, 'project_not_found');
++    if (body.projectId !== undefined) {
++      if (body.providerPolicy?.backgroundWork === 'disabled') {
++        try {
++          projectAdmission = { projectId: body.projectId, workspace: await projectWorkspace(body.projectId) };
++        } catch (error) {
++          if (error instanceof Error && error.message === 'Project not found') throw new RequestError(404, 'project_not_found');
++          throw error;
++        }
++      } else if (!(await getProject(body.projectId))) throw new RequestError(404, 'project_not_found');
++    }
+   } else {
+     const session = await readSession(body.sessionId);
+     if (!session) throw new RequestError(404, 'session_not_found');
+@@ -160,7 +170,7 @@ async function send(rawBody: unknown): Promise<ActionReply> {
+   if (!actionsAllowed()) throw new RequestError(403, 'actions_disabled');
+   let row: InputEntry;
+   try {
+-    row = await sendDesktopInput(input);
++    row = await sendDesktopInput(input, projectAdmission);
+   } catch (error) {
+     throw refusal(error) ?? error;
+   }
+diff --git a/src/main/session/input.ts b/src/main/session/input.ts
+index 6ec568fa..81d5058c 100644
+--- a/src/main/session/input.ts
++++ b/src/main/session/input.ts
+@@ -30,6 +30,11 @@ import { SKILL_ID_PATTERN } from '../../shared/skills.js';
+ import { autoSelectManagedSkills } from '../skill-routing.js';
+ import { asksForImage } from './image-request.js';
+ 
++export interface FreshProviderProjectAdmission {
++  projectId: string;
++  workspace: { virtual: string; real: string };
++}
++
+ export const inputArgs = z.object({
+   projectId: z.string().uuid().nullable().optional(),
+   /** Accepted only for a new controller-created chat and persisted before its first send. */
+@@ -721,9 +726,10 @@ async function finishInputCurrent(entry: InputEntry): Promise<boolean> {
+     (entry.finishOwner.userRequested === true || automaticFinishEnabled(session.conversationId));
+ }
+ /** The accepted outbox identity repairs a partially materialized session after restart. */
+-async function materializeOpening(entry: InputEntry): Promise<void> {
++async function materializeOpening(entry: InputEntry, projectAdmission?: FreshProviderProjectAdmission): Promise<void> {
+   if (!entry.opening || !entry.sessionId) return;
+   const existing = await getSession(entry.sessionId);
++  const admittedProject = projectAdmission?.projectId === entry.projectId ? projectAdmission : undefined;
+   const recoveredExactOwner = !!existing && entry.requestedSessionId === null && !!entry.conversationId &&
+     existing.conversationId === entry.conversationId &&
+     existing.origin?.kind !== 'worker' && existing.origin?.kind !== 'helper';
+@@ -732,6 +738,7 @@ async function materializeOpening(entry: InputEntry): Promise<void> {
+   }
+   const session = recoveredExactOwner ? existing : await createSession({ reservedId: entry.sessionId,
+     title: userTitle(entry.text, entry.text), titleSource: 'fallback', providerPolicy: entry.providerPolicy,
++    ...(!existing && admittedProject ? { projectId: admittedProject.projectId } : {}),
+     ...(entry.providerPolicy ? { currentProviderTurn: { inputId: entry.id, state: 'admitted' as const } } : {}),
+     origin: { kind: 'desktop', fromSessionId: null, agentId: null, task: '' } });
+   if (session.conversationId && session.conversationId !== entry.conversationId)
+@@ -768,9 +775,13 @@ export function fileRotationInput(sessionId: string, turnId: string): Promise<In
+   });
+ }
+ 
+-export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwner']): Promise<InputEntry> {
++export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwner'], projectAdmission?: FreshProviderProjectAdmission): Promise<InputEntry> {
+   return serial(async () => {
+     const input = inputArgs.parse(raw);
++    if (projectAdmission && (input.sessionId !== null || input.providerPolicy?.backgroundWork !== 'disabled' ||
++        input.projectId !== projectAdmission.projectId)) {
++      throw new Error('Fresh provider project admission does not match the input');
++    }
+     if (input.stages !== undefined && JSON.stringify([input.text, ...input.stages]).length > 12000)
+       throw new Error('Keep the complete plan below 12,000 characters');
+     const current = await load();
+@@ -842,7 +853,7 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
+       ...(injectionOwner ? { toolTurnId: injectionOwner.turnId } : {}), ...(transportIntent ? { transportIntent } : {}),
+       ...(requestedMode !== input.mode ? { requestedMode } : {}), ...(finishOwner ? { finishOwner } : {}), state: 'queued', owner: null, createdAt: Date.now(), conversationId: null };
+     if (input.projectId) {
+-      await projectWorkspace(input.projectId);
++      if (!projectAdmission) await projectWorkspace(input.projectId);
+       if (input.sessionId) {
+         const session = await getSession(input.sessionId);
+         if (session?.projectId !== input.projectId) throw new Error('Message project does not match the session');
+@@ -853,7 +864,7 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
+       !finishOwner && !input.stages?.length;
+     if (getConfig().ui.autoSelectSkills === true && authoredOrdinary && invokedSkills(input.text).length === 0) {
+       const folder = input.sessionId ? await getSessionProject(input.sessionId)
+-        : input.projectId ? await projectWorkspace(input.projectId) : null;
++        : projectAdmission?.workspace ?? (input.projectId ? await projectWorkspace(input.projectId) : null);
+       entry.autoSkills = await autoSelectManagedSkills(input.text, { projectPath: folder?.real ?? null });
+     }
+     if (retryOpening) { entry.opening = true; entry.requestedSessionId = input.sessionId; }
+@@ -884,7 +895,7 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
+     if (entry.mode === 'finish') next = materializeStages(next, entry);
+     await commit(next);
+     try {
+-      await materializeOpening(entry);
++      await materializeOpening(entry, projectAdmission);
+       if (entry.sessionId) await admitProviderInput(entry.sessionId, entry.id);
+     }
+     catch (error) {
+diff --git a/src/main/session/start-input.ts b/src/main/session/start-input.ts
+index 366c168f..2f2c3d94 100644
+--- a/src/main/session/start-input.ts
++++ b/src/main/session/start-input.ts
+@@ -3,7 +3,7 @@ import { connect, getStatus, onStatusChange } from '../connection.js';
+ import { startBridge } from '../bridge.js';
+ import { wakeBrowserUrl, resetBrowserStartupForTests } from '../browser-startup.js';
+ import { getConfig } from '../config.js';
+-import { enqueueInput, cancelInput, listInputs, noteInputStartupError, type InputArgs, type InputEntry } from './input.js';
++import { enqueueInput, cancelInput, listInputs, noteInputStartupError, type FreshProviderProjectAdmission, type InputArgs, type InputEntry } from './input.js';
+ 
+ function wakeBrowser(entry: InputEntry, retry = false): Promise<void> {
+   const marker = `cos-input=${encodeURIComponent(entry.id)}`;
+@@ -73,12 +73,12 @@ async function startAcceptedInput(entry: InputEntry, controller: AbortController
+     if (starting.get(entry.id) === controller) starting.delete(entry.id);
+   }
+ }
+-export async function sendDesktopInput(input: InputArgs): Promise<InputEntry> {
++export async function sendDesktopInput(input: InputArgs, projectAdmission?: FreshProviderProjectAdmission): Promise<InputEntry> {
+   if (stopped) throw new Error('The app is shutting down');
+   if (input.mode === 'finish' || starting.has(input.id)) return enqueueInput(input);
+   const controller = new AbortController(); starting.set(input.id, controller);
+   try {
+-    const entry = await enqueueInput(input);
++    const entry = await enqueueInput(input, undefined, projectAdmission);
+     if (controller.signal.aborted) { await cancelInput(input.id); controller.signal.throwIfAborted(); }
+     if (entry.state !== 'queued' || entry.transportIntent === 'tool' || entry.attachmentDelivery === 'tool') {
+       starting.delete(input.id); return entry;
+diff --git a/src/main/session/store.ts b/src/main/session/store.ts
+index 3129bd35..9ec9d577 100644
+--- a/src/main/session/store.ts
++++ b/src/main/session/store.ts
+@@ -848,6 +848,8 @@ async function flushSessionEntry(entry: OpenSession): Promise<void> {
+ export async function createSession(options: {
+   /** Reserved by an accepted opening outbox row; never supplied by model tools. */
+   reservedId?: string;
++  /** Already validated by the opening outbox before its WAL commit. Used only for a brand-new reserved owner. */
++  projectId?: string;
+   title?: string;
+   titleSource?: SessionSummary['titleSource'];
+   conversationId?: string | null;
+@@ -872,12 +874,13 @@ export async function createSession(options: {
+   }
+   const summary = emptySummary(id, options.title?.trim() || 'ChatGPT session', options.conversationId ?? null);
+   summary.origin = options.origin ?? null;
++  if (options.projectId) summary.projectId = options.projectId;
+   if (options.providerPolicy) summary.providerPolicy = { ...options.providerPolicy };
+   if (options.currentProviderTurn) summary.currentProviderTurn = { ...options.currentProviderTurn };
+   if (options.titleSource) summary.titleSource = options.titleSource;
+   if (options.origin?.fromSessionId) {
+     const source = await getSession(options.origin.fromSessionId);
+-    if (source?.projectId) summary.projectId = source.projectId;
++    if (source?.projectId && !summary.projectId) summary.projectId = source.projectId;
+   }
+   // Invalidate before exposing the in-flight live entry. A cached miss must never hide a
+   // session that this process has started creating, even while its first durable write awaits.
+diff --git a/test/control-api-actions.test.ts b/test/control-api-actions.test.ts
+index 3eee6af6..10855bbc 100644
+--- a/test/control-api-actions.test.ts
++++ b/test/control-api-actions.test.ts
+@@ -821,6 +821,41 @@ describe('starting a new chat', () => {
+     expect((await getSession(id))?.projectId).toBe(project.id);
+   });
+ 
++  it('validates a fresh provider project once and publishes that binding in the initial reserved-session metadata', async () => {
++    const { defaultConfig, saveConfig } = await import('../src/main/config.js');
++    const { validateNewRoot } = await import('../src/main/sandbox.js');
++    const projects = await import('../src/main/projects.js');
++    const { getSession } = await import('../src/main/session/store.js');
++    const folder = path.join(dir, 'provider-project-root');
++    await fs.mkdir(folder, { recursive: true });
++    const approved = await validateNewRoot(folder, []);
++    await saveConfig({ ...defaultConfig(), roots: [{ name: 'provider-approved', path: approved }] });
++    const project = await projects.addProject(approved);
++    const resolve = vi.spyOn(projects, 'projectWorkspace');
++    const id = randomUUID();
++
++    const started = await post('/v1/inputs', {
++      id,
++      projectId: project.id,
++      text: 'Provider work in this project',
++      providerPolicy: { backgroundWork: 'disabled' }
++    });
++
++    expect(started.status).toBe(202);
++    expect(resolve).toHaveBeenCalledTimes(1);
++    expect(resolve).toHaveBeenCalledWith(project.id);
++    expect(await getSession(id)).toMatchObject({
++      id,
++      projectId: project.id,
++      providerPolicy: { backgroundWork: 'disabled' },
++      currentProviderTurn: { inputId: id, state: 'admitted' }
++    });
++    const sessionDir = path.join(dir, 'sessions', id);
++    const initialMeta = JSON.parse(await fs.readFile(path.join(sessionDir, 'meta.json'), 'utf8'));
++    expect(initialMeta.projectId).toBe(project.id);
++    await expect(fs.stat(path.join(sessionDir, 'meta.backup.json'))).rejects.toMatchObject({ code: 'ENOENT' });
++  });
++
+   it('needs the actions switch like every other send', async () => {
+     gate.actions = false;
+     const reply = await post('/v1/inputs', { id: randomUUID(), text: 'Start' });
+diff --git a/test/opening-input.test.ts b/test/opening-input.test.ts
+index be293f4b..99aea716 100644
+--- a/test/opening-input.test.ts
++++ b/test/opening-input.test.ts
+@@ -81,6 +81,28 @@ it('materializes an accepted opening WAL after a crash before session creation w
+   expect(await readDurable<InputEntry[]>('session-input')).toHaveLength(1);
+ });
+ 
++it('revalidates a project while recovering an opening WAL that has no reserved session yet', async () => {
++  const requestedRoot = path.join(directory, 'provider-recovery-root');
++  await fs.mkdir(requestedRoot, { recursive: true });
++  const approved = await validateNewRoot(requestedRoot, []);
++  await saveConfig({ ...defaultConfig(), roots: [{ name: 'provider-recovery', path: approved }] });
++  const project = await addProject(approved);
++  const request = args({ projectId: project.id, providerPolicy: { backgroundWork: 'disabled' } });
++  const row: InputEntry = { ...request, sessionId: request.id, opening: true, state: 'queued', owner: null, createdAt: Date.now(), conversationId: null };
++  await writeDurableNow('session-input', [row]);
++
++  // Simulate a crash after the WAL commit, followed by revocation of the approved root before
++  // restart. The pre-crash admission context is intentionally not durable authority.
++  await saveConfig(defaultConfig());
++  resetInputForTests();
++  expect(await getSession(request.id)).toBeNull();
++
++  const [restored] = await listInputs();
++  expect(restored).toMatchObject({ id: request.id, projectId: project.id, sessionId: request.id });
++  expect(restored?.error).toMatch(/^Local chat setup failed:/);
++  expect((await getSession(request.id))?.projectId).toBeUndefined();
++});
++
+ it('migrates real legacy ordinary openings to durable owners without changing custody or payload', async () => {
+   const requestedRoot = path.join(directory, 'approved');
+   await fs.mkdir(requestedRoot, { recursive: true });
+-- 
+2.53.0.windows.1
+

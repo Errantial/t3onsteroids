@@ -1,0 +1,42 @@
+From 7ae8bb05392ab5c8cc7fc79f9a0a491d4ada5ebd Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sat, 17 Oct 2026 10:45:40 -0600
+Subject: [PATCH 04/17] Repair stale browser pairing on startup
+
+---
+ extension/background.js | 6 +++++-
+ test/extension.test.ts  | 1 +
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/extension/background.js b/extension/background.js
+index 756e0b96..faea56ee 100644
+--- a/extension/background.js
++++ b/extension/background.js
+@@ -2941,7 +2941,11 @@ async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
+  * recorders back, since they had nothing to report to until now.
+  */
+ async function ensurePaired() {
+-  if (token !== null || disconnected) return false;
++  if (disconnected) return false;
++  if (token !== null) {
++    await discover(true);
++    if (token !== null) return false;
++  }
+   const result = await provision();
+   if (!result || !result.ok) return false;
+   // Attach the wake channel now rather than on the next 30-second maintenance pass.
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index 51078de3..7cc53163 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -3537,6 +3537,7 @@ describe('extension command delivery', () => {
+     });
+     const worker = loadWorker({ local, session, fetch });
+ 
++    await vi.waitFor(() => expect(local.data.token).toBe('new-port-token'), { timeout: 5_000 });
+     const result = await worker.send({ type: 'redeem', id: 'cmd-1', client: 'page-1' });
+     expect(result.ok).toBe(true);
+     expect(local.data.port).toBe(8766);
+-- 
+2.53.0.windows.1
+

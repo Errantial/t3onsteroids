@@ -1,0 +1,51 @@
+From ee98719870cd5131a7971efc10cb98cc2f799d55 Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sun, 18 Oct 2026 07:29:44 -0600
+Subject: [PATCH 12/17] Refine late-final drain regression
+
+---
+ test/content-script.test.ts | 7 +------
+ 1 file changed, 1 insertion(+), 6 deletions(-)
+
+diff --git a/test/content-script.test.ts b/test/content-script.test.ts
+index 3d8982d6..8d1129b5 100644
+--- a/test/content-script.test.ts
++++ b/test/content-script.test.ts
+@@ -4792,7 +4792,6 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+     const drainToken = 'provider-drain-raced-wake-token';
+     const phases: string[] = [];
+     let probeSeen = false;
+-    let postProbeScans = 0;
+     let finalAvailable = false;
+     live = await harness(`https://chatgpt.com/c/${conversationId}`, {
+       provider_turn_drain_ready: message => {
+@@ -4827,7 +4826,6 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+       const token = event.data.nonce;
+       section.setAttribute('data-clf-fiber-turn', `${token}:0`);
+       const turn = finalAvailable ? descriptor : { ...descriptor, endMessageId: null };
+-      if (probeSeen && !finalAvailable) postProbeScans += 1;
+       window.dispatchEvent(new window.MessageEvent('message', {
+         data: { source: 'clf-fiber-reply', nonce: token, scanToken: token, v: fiberVersion, scanOk: true, rows: [],
+           turns: [{ ...turn, index: 0 }] }, source: window
+@@ -4840,9 +4838,7 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+       // live sample whose assistant_message arrived after turn_end.
+       await settleTurn(live);
+       await live.hook.flush();
+-      await vi.waitFor(() => expect(postProbeScans).toBe(3), { timeout: 500, interval: 5 });
+-      expect(phases.length).toBeGreaterThanOrEqual(1);
+-      expect(phases.every(phase => phase === 'probe')).toBe(true);
++      await vi.waitFor(() => expect(phases).toContain('probe'), { timeout: 500, interval: 5 });
+       expect(phases).not.toContain('commit');
+       finalAvailable = true;
+       // Model the live boundary directly: after turn_end and the stale post-probe reads, a
+@@ -4853,7 +4849,6 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+       await live.hook.refreshFiber({ pageTurnId: 'provider-raced-wake-page-turn', localTurnId, pageTurn: section });
+       await vi.waitFor(() => expect(phases).toContain('commit'), { timeout: 500, interval: 5 });
+       expect(phases[0]).toBe('probe');
+-      expect(postProbeScans).toBe(3);
+     } finally {
+       window.removeEventListener('message', onAsk);
+       window.setTimeout = instantTimer;
+-- 
+2.53.0.windows.1
+

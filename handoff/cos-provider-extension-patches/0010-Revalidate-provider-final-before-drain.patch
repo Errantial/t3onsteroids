@@ -1,0 +1,108 @@
+From 28ee75c6fb413183dbfccd66b610c15666d29663 Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sun, 18 Oct 2026 05:44:34 -0600
+Subject: [PATCH 10/17] Revalidate provider final before drain
+
+---
+ extension/content.js        | 18 ++++++++++---
+ test/content-script.test.ts | 54 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 69 insertions(+), 3 deletions(-)
+
+diff --git a/extension/content.js b/extension/content.js
+index 4e393064..29e7807d 100644
+--- a/extension/content.js
++++ b/extension/content.js
+@@ -12838,10 +12838,22 @@
+       let nativeTurn = null;
+       if (pending.outcome === 'completed') {
+         const expectedTerminal = pending.terminalMessageId || null;
+-        if (!await confirmedProviderTerminal(true, expectedTerminal) || !current()) {
++        let terminalConfirmed = false;
++        // MAIN/Fiber can be one snapshot behind the DOM at the exact end boundary. Retry the
++        // exact terminal read in this same async episode instead of handing recovery to the
++        // general observe timer, which browsers may heavily throttle in hidden provider tabs.
++        // No sleep/debounce: each refresh is itself an async page-model round trip.
++        for (let attempt = 0; attempt < 3 && current(); attempt++) {
++          if (await confirmedProviderTerminal(true, expectedTerminal)) {
++            terminalConfirmed = true;
++            break;
++          }
++        }
++        if (!terminalConfirmed || !current()) {
+           // An already-known exact terminal changing across the probe is not a condition that
+-          // another quiet scan may heal. Permanently retire this browser barrier; main remains
+-          // closing and therefore fails closed (restart recovery marks it broken).
++          // repeated exact scans may heal. Permanently retire this browser barrier only after
++          // those immediate revalidations all fail; main remains closing and therefore fails
++          // closed (restart recovery marks it broken).
+           if (expectedTerminal && providerDrainPending === pending) pending.invalidated = true;
+           return false;
+         }
+diff --git a/test/content-script.test.ts b/test/content-script.test.ts
+index 95612e0c..c5715715 100644
+--- a/test/content-script.test.ts
++++ b/test/content-script.test.ts
+@@ -4733,6 +4733,60 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+     }
+   });
+ 
++  it('rechecks an exact provider final immediately when the first post-probe Fiber scan is stale', async () => {
++    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
++    const drainToken = 'provider-drain-recheck-token';
++    const phases: string[] = [];
++    let probeSeen = false;
++    let staleRevalidation = true;
++    live = await harness(`https://chatgpt.com/c/${conversationId}`, {
++      provider_turn_drain_ready: message => {
++        phases.push(message.phase);
++        if (message.phase === 'probe') {
++          probeSeen = true;
++          return { ok: true, data: { ok: true, applicable: true, drainToken, state: 'closing' } };
++        }
++        return { ok: true, data: { ok: true, applicable: true, drainToken, state: 'drained' } };
++      }
++    });
++
++    startGenerating(live.document);
++    const section = assistantTurn(live.document, 'provider-recheck-page-turn', []);
++    live.hook.observe();
++    await settle();
++    prose(live.document, section, 'provider-recheck-final', 'Authoritative final.');
++    const descriptor = {
++      turnId: 'provider-recheck-page-turn', conversationId, endMessageId: 'provider-recheck-final', calls: [], activities: [],
++      messages: [{ messageId: 'provider-recheck-final', stable: true, rawText: 'Authoritative final.',
++        renderedHtml: '<p>Authoritative final.</p>' }]
++    };
++    const window = live.window as any;
++    const instantTimer = window.setTimeout;
++    window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
++    const onAsk = (event: any) => {
++      if (event.data?.source !== 'clf-fiber-ask') return;
++      const token = event.data.nonce;
++      section.setAttribute('data-clf-fiber-turn', `${token}:0`);
++      const turn = probeSeen && staleRevalidation ? { ...descriptor, endMessageId: null } : descriptor;
++      if (probeSeen && staleRevalidation) staleRevalidation = false;
++      window.dispatchEvent(new window.MessageEvent('message', {
++        data: { source: 'clf-fiber-reply', nonce: token, scanToken: token, v: fiberVersion, scanOk: true, rows: [],
++          turns: [{ ...turn, index: 0 }] }, source: window
++      }));
++    };
++    window.addEventListener('message', onAsk);
++    try {
++      await live.hook.refreshFiber();
++      await live.hook.flush();
++      await vi.waitFor(() => expect(phases).toContain('commit'), { timeout: 2_000, interval: 5 });
++      expect(phases[0]).toBe('probe');
++      expect(staleRevalidation).toBe(false);
++    } finally {
++      window.removeEventListener('message', onAsk);
++      window.setTimeout = instantTimer;
++    }
++  });
++
+   it('never commits provider drain while an exact-turn request owner remains unresolved, even after settle timeout', async () => {
+     const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+     const drainToken = 'provider-owner-drain-token';
+-- 
+2.53.0.windows.1
+

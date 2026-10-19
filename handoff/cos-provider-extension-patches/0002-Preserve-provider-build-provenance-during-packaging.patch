@@ -1,0 +1,57 @@
+From 06e1a92352d3e60d64ddcbf5e3c9d7d09d023a82 Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sat, 17 Oct 2026 10:04:50 -0600
+Subject: [PATCH 02/17] Preserve provider build provenance during packaging
+
+---
+ electron.vite.config.ts |  2 ++
+ scripts/package.mjs     | 12 +++++++++++-
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/electron.vite.config.ts b/electron.vite.config.ts
+index d8e99ee7..0671b461 100644
+--- a/electron.vite.config.ts
++++ b/electron.vite.config.ts
+@@ -14,6 +14,8 @@ export function providerExtensionBuildIdFrom(head: string, status: string): stri
+ }
+ 
+ function detectProviderExtensionBuildId(): string {
++  const packaged = process.env.COS_PROVIDER_EXTENSION_SOURCE_COMMIT?.trim().toLowerCase() ?? '';
++  if (/^[0-9a-f]{40}$/.test(packaged)) return packaged;
+   try {
+     const options = { cwd: __dirname, encoding: 'utf8' as const };
+     const head = execFileSync('git', ['rev-parse', 'HEAD'], options);
+diff --git a/scripts/package.mjs b/scripts/package.mjs
+index 87c2b39d..1654ada5 100644
+--- a/scripts/package.mjs
++++ b/scripts/package.mjs
+@@ -23,7 +23,17 @@ function run(command, commandArgs, env = process.env) {
+   if (result.status !== 0) process.exit(result.status ?? 1);
+ }
+ 
++function cleanSourceCommit() {
++  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' });
++  const status = spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=normal'], { cwd: root, encoding: 'utf8' });
++  const commit = head.status === 0 ? head.stdout.trim().toLowerCase() : '';
++  if (status.status !== 0 || !/^[0-9a-f]{40}$/.test(commit) || status.stdout.trim() !== '') {
++    throw new Error('Packaging a provider extension requires a clean Git source tree with an exact commit.');
++  }
++  return commit;
++}
+ const node = process.execPath;
++const sourceCommit = cleanSourceCommit();
+ // electron-builder can download its own runtime into its cache, but our package also copies
+ // Electron's LICENSE files from node_modules/electron/dist. A fresh npm install may leave that
+ // package payload lazy until Electron itself is resolved, so make the local runtime materialize
+@@ -34,7 +44,7 @@ run(node, ['scripts/make-icon.mjs']);
+ // Before the bundle is built, so the stamp that ships is the stamp of what ships. The app and the
+ // extension both read this one file to tell which extension build a browser is running.
+ run(node, ['scripts/write-extension-stamp.mjs']);
+-run(node, [path.join('node_modules', 'electron-vite', 'bin', 'electron-vite.js'), 'build']);
++run(node, [path.join('node_modules', 'electron-vite', 'bin', 'electron-vite.js'), 'build'], { ...process.env, COS_PROVIDER_EXTENSION_SOURCE_COMMIT: sourceCommit });
+ 
+ for (const arch of arches) {
+   const targetArgs = ['--platform', platform, '--arch', arch];
+-- 
+2.53.0.windows.1
+

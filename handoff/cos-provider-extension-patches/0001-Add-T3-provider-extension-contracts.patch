@@ -1,0 +1,3488 @@
+From 6999154515d81b25bae8ecc13730ab8d7fe86908 Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sat, 17 Oct 2026 09:56:20 -0600
+Subject: [PATCH 01/17] Add T3 provider extension contracts
+
+---
+ electron.vite.config.ts                 |  24 +-
+ extension/background.js                 |  32 ++
+ extension/content.js                    | 166 ++++++++-
+ src/main/agent-admission.ts             |  16 +-
+ src/main/bridge.ts                      |  36 ++
+ src/main/control-actions.ts             |   9 +-
+ src/main/control-api.ts                 |  37 +-
+ src/main/control-reads.ts               | 128 ++++++-
+ src/main/goal.ts                        |  30 +-
+ src/main/mcp/call-context.ts            |   2 +
+ src/main/mcp/kernel.ts                  |  36 +-
+ src/main/projects.ts                    |  28 +-
+ src/main/session/continuation.ts        |   1 +
+ src/main/session/input-history.ts       |   3 +-
+ src/main/session/input.ts               |  36 +-
+ src/main/session/recorder.ts            |  94 ++++-
+ src/main/session/store.ts               | 448 ++++++++++++++++++++++--
+ src/renderer/chat.ts                    |   4 +
+ src/shared/control-api.ts               |  43 +++
+ src/shared/session.ts                   |  27 ++
+ test/content-script.test.ts             | 213 +++++++++++
+ test/continuation.test.ts               |  43 +++
+ test/control-api-actions.test.ts        |  34 ++
+ test/control-api-reads.test.ts          |  79 ++++-
+ test/control-api.test.ts                |   2 +-
+ test/exec-hints.test.ts                 |   2 +-
+ test/extension.test.ts                  | 132 +++++++
+ test/goal.test.ts                       |  18 +
+ test/input-delivery-integration.test.ts |   6 +-
+ test/kernel-desktop-identity.test.ts    |   4 +-
+ test/kernel-identity-recovery.test.ts   |   4 +-
+ test/kernel-provider-turn.test.ts       | 205 +++++++++++
+ test/kernel-run-inbox.test.ts           |   4 +-
+ test/opening-input.test.ts              |  20 ++
+ test/projects.test.ts                   |  12 +-
+ test/provider-build-id.test.ts          |  17 +
+ test/provider-turn-drain.test.ts        | 319 +++++++++++++++++
+ test/renderer-state.test.ts             |   4 +-
+ test/session-input.test.ts              |   2 +
+ test/update.test.ts                     |   5 +-
+ 40 files changed, 2238 insertions(+), 87 deletions(-)
+ create mode 100644 test/kernel-provider-turn.test.ts
+ create mode 100644 test/provider-build-id.test.ts
+ create mode 100644 test/provider-turn-drain.test.ts
+
+diff --git a/electron.vite.config.ts b/electron.vite.config.ts
+index 8f802f6e..d8e99ee7 100644
+--- a/electron.vite.config.ts
++++ b/electron.vite.config.ts
+@@ -1,3 +1,4 @@
++import { execFileSync } from 'node:child_process';
+ import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
+ import { resolve } from 'node:path';
+ 
+@@ -6,10 +7,31 @@ export const rendererAssetsInlineLimit = (file: string): boolean | undefined =>
+ 
+ const nixNodeModules = process.env.npmDeps ? resolve(process.env.npmDeps, 'node_modules') : null;
+ 
++/** A production provider build may advertise only the exact commit of a clean source tree. */
++export function providerExtensionBuildIdFrom(head: string, status: string): string {
++  const commit = head.trim().toLowerCase();
++  return /^[0-9a-f]{40}$/.test(commit) && status.trim() === '' ? commit : 'development';
++}
++
++function detectProviderExtensionBuildId(): string {
++  try {
++    const options = { cwd: __dirname, encoding: 'utf8' as const };
++    const head = execFileSync('git', ['rev-parse', 'HEAD'], options);
++    const status = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=normal'], options);
++    return providerExtensionBuildIdFrom(head, status);
++  } catch {
++    return 'development';
++  }
++}
++
++const providerExtensionBuildId = detectProviderExtensionBuildId();
++
+ export default defineConfig({
+   main: {
+     // Keep node_modules external so the MCP SDK ships as real files in the asar
+-    // rather than being inlined by the bundler.
++    // rather than being inlined by the bundler. The provider build identity is compiled into
++    // the main bundle so a normal desktop launch cannot accidentally depend on shell env vars.
++    define: { 'process.env.COS_PROVIDER_EXTENSION_BUILD_ID': JSON.stringify(providerExtensionBuildId) },
+     plugins: [externalizeDepsPlugin()],
+     build: {
+       rollupOptions: { input: resolve(__dirname, 'src/main/index.ts') }
+diff --git a/extension/background.js b/extension/background.js
+index a2579952..4999994a 100644
+--- a/extension/background.js
++++ b/extension/background.js
+@@ -4402,6 +4402,37 @@ const HANDLERS = {
+     });
+     return await current() ? result : { ok: false, error: 'stale_document' };
+   },
++  /** Two-phase provider high-water. Probe only confirms the exact closing generation. Content
++   * installs its turn fence and transfers page custody before commit drains this journal. */
++  async provider_turn_drain_ready(message, _sender, source) {
++    await load();
++    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
++    const conversationId = cleanConversationId(message.conversationId);
++    const turnId = typeof message.turnId === 'string' && message.turnId.length > 0 && message.turnId.length <= 256 ? message.turnId : null;
++    const phase = message.phase === 'probe' || message.phase === 'commit' ? message.phase : null;
++    if (!conversationId || !turnId || !phase) return { ok: false, status: 400, error: 'bad_provider_turn' };
++    await noteTabConversation(source, conversationId);
++    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
++    if (phase === 'probe') {
++      const result = await call('/provider/turn-drain-ready', {
++        method: 'POST',
++        body: JSON.stringify({ conversationId, turnId, phase: 'probe' })
++      });
++      return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
++    }
++    const drainToken = typeof message.drainToken === 'string' && message.drainToken.length >= 8 && message.drainToken.length <= 128
++      ? message.drainToken : null;
++    if (!drainToken) return { ok: false, status: 400, error: 'bad_provider_drain_token' };
++    if (!(await deliverConversationJournal(conversationId))) {
++      return { ok: false, status: 503, error: 'transcript_not_delivered', retryable: true };
++    }
++    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
++    const result = await call('/provider/turn-drain-ready', {
++      method: 'POST',
++      body: JSON.stringify({ conversationId, turnId, phase: 'commit', drainToken })
++    });
++    return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
++  },
+   /** Repair both sides of the reader protocol in this exact browser document. */
+   async repair_fiber(_message, _sender, source) {
+     await load();
+@@ -4864,6 +4895,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+     'bind',
+     'activity',
+     'activity_detail',
++    'provider_turn_drain_ready',
+     'correlate',
+     'closed',
+     'compact',
+diff --git a/extension/content.js b/extension/content.js
+index 21ac9348..eb611313 100644
+--- a/extension/content.js
++++ b/extension/content.js
+@@ -409,6 +409,33 @@
+   const nativeImageCaptureActiveTasks = new Set();
+ 
+   let generating = false;
++  // Provider drain uses a fresh page terminal plus the service-worker journal as a true
++  // high-water, never a quiet-time guess. The fence exists only between that fresh proof and
++  // the worker's journal-to-zero acknowledgement; new authored work tears it down immediately.
++  let providerDrainPending = null;
++  const providerDrainFences = new Map();
++  let providerDrainWork = null;
++  const providerDrainTurnIds = turn => new Set([
++    turn?.endMessageId,
++    ...(turn?.calls || []).map(item => item?.messageId),
++    ...(turn?.messages || []).map(item => item?.messageId),
++    ...(turn?.activities || []).map(item => item?.messageId),
++    ...(turn?.images || []).map(item => item?.messageId),
++    ...(turn?.thoughtNotifications || []).map(item => item?.messageId)
++  ].filter(Boolean));
++  const providerDrainFenceFor = (turn, localOwner = null) => {
++    if (!turn || providerDrainFences.size === 0) return null;
++    const ids = providerDrainTurnIds(turn);
++    for (const fence of providerDrainFences.values()) {
++      if (fence.conversationId !== conversationId || fence.epoch !== epoch) continue;
++      if (localOwner && localOwner === fence.turnId) return fence;
++      if (fence.terminalMessageId && turn.endMessageId === fence.terminalMessageId) return fence;
++      const node = fence.pageTurnNode?.deref?.() || null;
++      if (node && stampedFiberTurn({ node }, [...fiberTurns.values()], fiberScanToken) === turn) return fence;
++      if (fence.messageIds?.size && [...ids].some(id => fence.messageIds.has(id))) return fence;
++    }
++    return null;
++  };
+   /**
+    * When the stop button was first found missing while a turn was open. 0 while it is there.
+    *
+@@ -1445,6 +1472,10 @@
+    */
+   function emit(observation) {
+     if (temporaryPlannerPage()) return;
++    if (observation.turnId && providerDrainFences.has(observation.turnId)) {
++      const fence = providerDrainFences.get(observation.turnId);
++      if (fence.conversationId === conversationId && fence.epoch === epoch) return;
++    }
+     const bounded = { ...observation };
+     // One browser observation must fit the bridge's bounded HTTP body even when JavaScript
+     // character counts badly understate UTF-8 (emoji/CJK). Share one byte budget between
+@@ -1913,6 +1944,9 @@
+   }
+ 
+   function resetConversation() {
++    providerDrainPending = null;
++    providerDrainFences.clear();
++    providerDrainWork = null;
+     pendingResumes.clear();
+     resumedOrder = 0;
+     streamGone = null;
+@@ -2691,6 +2725,21 @@
+     }
+     if (endedTurnId) emit({ kind: 'turn_end', turnId: endedTurnId, ...result,
+       ...(imageEnd ? { providerMessageId: nativeEnd.endMessageId } : {}) });
++    if (endedTurnId && result.outcome !== 'unknown') {
++      providerDrainPending = {
++        conversationId,
++        turnId: endedTurnId,
++        outcome: result.outcome,
++        epoch,
++        // If the terminal identity was already exact when turn_end was emitted, the post-probe
++        // scan must confirm this same native final. A changed id is Retry/Regenerate, not a late
++        // hydration of the provider turn we are sealing. Null deliberately allows the first
++        // exact final to arrive after turn_end.
++        terminalMessageId: result.outcome === 'completed' ? nativeEnd?.endMessageId || null : null,
++        invalidated: false
++      };
++      void maybePublishProviderDrainReady();
++    }
+     // Same moment, the other reader: the goal loop wants this turn's answer while `ended`
+     // still names its section. It decides for itself whether the turn is one to answer —
+     // and waits for it to hold still first. See noteGoalTurn.
+@@ -3277,6 +3326,7 @@
+     // the lifecycle. They still re-check the exact conversation and every readiness predicate.
+     notifyCommandReadiness();
+     void flush();
++    void maybePublishProviderDrainReady();
+   }
+ 
+   const turnIdOf = (section) => CLF_DOM.turnIdOf(section);
+@@ -4765,6 +4815,19 @@
+         fiberTerminalMessageId = null;
+       }
+     }
++    const settledOwners = new Map();
++    const ownerClaims = new Map();
++    if (activeLocalTurnId) ownerClaims.set(activeLocalTurnId, 1);
++    for (let index = 0; index < answer.turns.length; index++) {
++      if (index === activeTurnIndex) continue;
++      const owner = settledTurnOwner(answer.turns[index]);
++      if (!owner) continue;
++      settledOwners.set(answer.turns[index], owner);
++      ownerClaims.set(owner, (ownerClaims.get(owner) || 0) + 1);
++    }
++    for (const [turn, owner] of settledOwners) {
++      if ((ownerClaims.get(owner) || 0) > 1) settledOwners.delete(turn);
++    }
+     for (let index = 0; index < answer.turns.length; index++) {
+       const turn = answer.turns[index];
+       // Every connector result row's ids, ours or not, once per request id. The app learns only
+@@ -4797,7 +4860,8 @@
+         callsReported.set(call.messageId, signature);
+         return true;
+       });
+-      if (fresh.length > 0) {
++      const providerLocalOwner = index === activeTurnIndex ? activeLocalTurnId : settledOwners.get(turn) || null;
++      if (fresh.length > 0 && !providerDrainFenceFor(turn, providerLocalOwner)) {
+         // Same rule as the turn's messages below: an adopted document's first view of the turn is
+         // history, not new work. After a reload every existing call is new to this document, and
+         // counting them made each repair look overtaken by progress, so Goal pickups reloaded the
+@@ -4865,24 +4929,12 @@
+     // merges two responses into one group and paints both of them into the first section.
+     // An unresolved live binding is not evidence that the live turn owns nothing; it is
+     // exactly the case where a settled claim on that id cannot be proven.
+-    const settledOwners = new Map();
+-    const ownerClaims = new Map();
+-    if (activeLocalTurnId) ownerClaims.set(activeLocalTurnId, 1);
+-    for (let index = 0; index < answer.turns.length; index++) {
+-      if (index === activeTurnIndex) continue;
+-      const owner = settledTurnOwner(answer.turns[index]);
+-      if (!owner) continue;
+-      settledOwners.set(answer.turns[index], owner);
+-      ownerClaims.set(owner, (ownerClaims.get(owner) || 0) + 1);
+-    }
+-    for (const [turn, owner] of settledOwners) {
+-      if ((ownerClaims.get(owner) || 0) > 1) settledOwners.delete(turn);
+-    }
+     for (let index = 0; index < answer.turns.length; index++) {
+       const turn = answer.turns[index];
+       // The live generation owns the turn it is writing; a settled one is claimed only by
+       // ChatGPT's own request id. See settledTurnOwner().
+       const localOwner = index === activeTurnIndex ? activeLocalTurnId : settledOwners.get(turn) || null;
++      if (providerDrainFenceFor(turn, localOwner)) continue;
+       // An adopted document's first complete view is a history baseline. Seeing
+       // already-written rows after reload is not newly authored work. Subsequent
+       // changes use this same retained Fiber snapshot; a witnessed local Send
+@@ -12753,8 +12805,8 @@
+     }).catch(() => undefined).finally(() => { decision.partialPublishing = false; });
+   }
+   /** Fresh exact terminal proof, shared by stuck-composer recovery and idle-tab retirement. */
+-  async function confirmedProviderTerminal(recordedFinal = false) {
+-    const terminal = fiberTerminalMessageId || (recordedFinal ? fiberTurnFor(currentAssistantTurn())?.endMessageId : null);
++  async function confirmedProviderTerminal(recordedFinal = false, expectedTerminal = null) {
++    const terminal = expectedTerminal || fiberTerminalMessageId || (recordedFinal ? fiberTurnFor(currentAssistantTurn())?.endMessageId : null);
+     const pageTurn = currentAssistantTurn();
+     const observedEpoch = epoch;
+     const observedConversation = conversationId;
+@@ -12765,6 +12817,88 @@
+       (recordedFinal || fiberTerminalMessageId === terminal) && fiberTurnFor(currentAssistantTurn())?.endMessageId === terminal);
+   }
+ 
++  async function maybePublishProviderDrainReady() {
++    const pending = providerDrainPending;
++    if (!pending || pending.invalidated || providerDrainWork || !alive || pending.epoch !== epoch || pending.conversationId !== conversationId ||
++        CLF_DOM.conversationId() !== pending.conversationId || generating || pendingTools !== 0) return false;
++    const current = () => alive && providerDrainPending === pending && !pending.invalidated && pending.epoch === epoch &&
++      conversationId === pending.conversationId && CLF_DOM.conversationId() === pending.conversationId &&
++      fiberSettled?.localTurnId === pending.turnId && !generating && pendingTools === 0;
++    const work = (async () => {
++      // First give turn_end to the worker/app. The probe is authority only when main has durably
++      // entered closing for this exact provider turn; ordinary CoS chats return not-applicable.
++      if (!await flush() || !current()) return false;
++      const probe = await ask({ type: 'provider_turn_drain_ready', phase: 'probe', conversationId: pending.conversationId, turnId: pending.turnId }, current);
++      const probeData = probe?.data || probe || {};
++      if (probe?.ok === true && probeData.applicable === false) { providerDrainPending = null; return true; }
++      const drainToken = probe?.ok === true && probeData.applicable === true && typeof probeData.drainToken === 'string'
++        ? probeData.drainToken : null;
++      if (!drainToken || !current()) return false;
++
++      let nativeTurn = null;
++      if (pending.outcome === 'completed') {
++        const expectedTerminal = pending.terminalMessageId || null;
++        if (!await confirmedProviderTerminal(true, expectedTerminal) || !current()) {
++          // An already-known exact terminal changing across the probe is not a condition that
++          // another quiet scan may heal. Permanently retire this browser barrier; main remains
++          // closing and therefore fails closed (restart recovery marks it broken).
++          if (expectedTerminal && providerDrainPending === pending) pending.invalidated = true;
++          return false;
++        }
++        nativeTurn = fiberTurnFor(currentAssistantTurn());
++        if (!nativeTurn?.endMessageId) return false;
++        if (expectedTerminal && nativeTurn.endMessageId !== expectedTerminal) {
++          pending.invalidated = true;
++          return false;
++        }
++      } else {
++        // Stop/cancel/error turns may have no final assistant message, but must still retain the
++        // exact settled page-turn owner. Silence alone is never terminal authority.
++        const settled = fiberSettled?.localTurnId === pending.turnId ? fiberSettled : null;
++        if (!settled?.pageTurn) return false;
++        if (!await refreshFiber(settled) || !current()) return false;
++        nativeTurn = stampedFiberTurn(settled.pageTurn, [...fiberTurns.values()], fiberScanToken) || fiberTurnFor(settled.pageTurn);
++        if (!nativeTurn) return false;
++      }
++
++      const calls = [...(nativeTurn.calls || [])];
++      if (calls.some(call => !call?.requestId)) return false;
++      await confirmLiveRequestOwners(calls, pending.conversationId, current);
++      if (!current() || calls.some(call => requestOwnersConfirmed.get(call.requestId) !== pending.conversationId)) return false;
++
++      const terminalMessageId = nativeTurn.endMessageId || null;
++      const settledPageTurn = fiberSettled?.localTurnId === pending.turnId ? fiberSettled.pageTurn : null;
++      const pageTurnNode = settledPageTurn?.node || settledPageTurn?.nodes?.[0] || null;
++      const fence = {
++        conversationId: pending.conversationId,
++        turnId: pending.turnId,
++        epoch: pending.epoch,
++        terminalMessageId,
++        drainToken,
++        messageIds: providerDrainTurnIds(nativeTurn),
++        pageTurnNode: pageTurnNode && typeof WeakRef === 'function' ? new WeakRef(pageTurnNode) : null
++      };
++      providerDrainFences.set(pending.turnId, fence);
++      // From this point the exact old Fiber turn can update local dedupe bookkeeping but cannot
++      // enqueue another provider-visible row. Transfer every pre-fence row to worker custody.
++      if (!await flush() || !current() || providerDrainFences.get(pending.turnId) !== fence) return false;
++      const commit = await ask({ type: 'provider_turn_drain_ready', phase: 'commit', conversationId: pending.conversationId,
++        turnId: pending.turnId, drainToken }, current);
++      const commitData = commit?.data || commit || {};
++      if (commit?.ok === true && (commitData.applicable === false ||
++          (commitData.applicable === true && commitData.drainToken === drainToken))) {
++        providerDrainPending = null;
++        return true;
++      }
++      // Commit is allowed to be uncertain: keep the exact turn fence and retry the same token.
++      // Clearing it after a lost response could publish a row after main already sealed the marker.
++      if (current()) observe();
++      return false;
++    })();
++    providerDrainWork = work.finally(() => { if (providerDrainWork === work) providerDrainWork = null; });
++    return providerDrainWork;
++  }
++
+   /** Both final-driven Goal/Loop and unfinished Continue settle the same native control. */
+   async function stopAutomationGeneration(safe) {
+     if (!safe()) return false;
+diff --git a/src/main/agent-admission.ts b/src/main/agent-admission.ts
+index 7b9c0a30..edcf7188 100644
+--- a/src/main/agent-admission.ts
++++ b/src/main/agent-admission.ts
+@@ -3,7 +3,7 @@ import { getConfig } from './config.js';
+ import { noteAgentContextTokens, persistCriticalSwarmNow, stageSpawn, markStagedWorkerWorktree, swarmStateForCaller, type Caller, type SpawnInput } from './agents.js';
+ import { logWarn } from './logger.js';
+ import { setWorkspaceFor } from './workspace.js';
+-import { findSessionByConversation } from './session/store.js';
++import { findSessionByConversation, getSession } from './session/store.js';
+ import { isGitRepository } from './toolchain.js';
+ import { allocWorkerWorkspace, validateWorkerWorkspaceLease, WorkerWorktreeError, type WorkerWorktreeLease, type WorkerWorkspace } from './worktrees/index.js';
+ 
+@@ -88,6 +88,20 @@ export async function spawnAgentWorkers(
+   canIsolate: () => boolean,
+   admission?: { validate(): Promise<void>; assertCurrent(): void; workspace?: WorkerWorkspace | null }
+ ) {
++  let providerSession = null;
++  if (input.caller.sessionId) {
++    providerSession = await getSession(input.caller.sessionId);
++    if (!providerSession) throw new Error('PROVIDER_BACKGROUND_POLICY_UNAVAILABLE: exact caller session could not be loaded.');
++  } else if (input.caller.conversationId) {
++    try {
++      providerSession = await findSessionByConversation(input.caller.conversationId, { requireUnique: true });
++    } catch {
++      throw new Error('PROVIDER_BACKGROUND_POLICY_UNAVAILABLE: caller session identity is ambiguous.');
++    }
++  }
++  if (providerSession?.providerPolicy?.backgroundWork === 'disabled') {
++    throw new Error('PROVIDER_BACKGROUND_WORK_DISABLED: this session forbids worker/background execution.');
++  }
+   admission?.assertCurrent();
+   const staged = stageSpawn(input);
+   // Newly staged admissions alone may own Git branches. A repeated spawn may show
+diff --git a/src/main/bridge.ts b/src/main/bridge.ts
+index a2a71d50..2232db71 100644
+--- a/src/main/bridge.ts
++++ b/src/main/bridge.ts
+@@ -116,6 +116,7 @@ import {
+   recordNote,
+   recordProgress,
+   restoreRecordedConversation,
++  tryDrainProviderTurn,
+   setCallAttributionListener,
+   type ChatObservation,
+   type PageCallEvidence
+@@ -128,6 +129,8 @@ import {
+   conversationWasSuperseded,
+   findSessionByConversation,
+   getSession,
++  markProviderBrowserDrained,
++  providerTurnDrainToken,
+   readSessionPlan,
+   listUsageSessions,
+   readRecentEvents,
+@@ -2916,6 +2919,39 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
+       complete: conflicts.length === 0 && confirmed.length === requestIds.length
+     }, origin);
+   }
++  if (route === '/provider/turn-drain-ready' && req.method === 'POST') {
++    let body: Record<string, unknown>;
++    try { body = (await readBody(req)) as Record<string, unknown>; }
++    catch (err) {
++      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
++      return json(res, 400, { error: 'bad_request' }, origin);
++    }
++    const id = conversationId(body['conversationId']);
++    const turnId = typeof body['turnId'] === 'string' && body['turnId'].length > 0 && body['turnId'].length <= 256 ? body['turnId'] : null;
++    const phase = body['phase'] === 'probe' || body['phase'] === 'commit' ? body['phase'] : null;
++    if (!id || !turnId || !phase) return json(res, 400, { error: 'bad_provider_turn' }, origin);
++    let session;
++    try {
++      session = await findSessionByConversation(id, { requireUnique: true });
++    } catch {
++      return json(res, 409, { error: 'provider_session_unavailable', retryable: true }, origin);
++    }
++    if (!session || session.providerPolicy?.backgroundWork !== 'disabled') return json(res, 200, { ok: true, applicable: false }, origin);
++    if (phase === 'probe') {
++      const drainToken = await providerTurnDrainToken(session.id, id, turnId);
++      if (!drainToken) return json(res, 409, { error: 'provider_turn_not_closing', retryable: true }, origin);
++      const current = await getSession(session.id);
++      return json(res, 200, { ok: true, applicable: true, drainToken, state: current?.currentProviderTurn?.state ?? 'broken' }, origin);
++    }
++    const drainToken = typeof body['drainToken'] === 'string' && body['drainToken'].length >= 8 && body['drainToken'].length <= 128
++      ? body['drainToken'] : null;
++    if (!drainToken) return json(res, 400, { error: 'bad_provider_drain_token' }, origin);
++    if (!await markProviderBrowserDrained(session.id, id, turnId, drainToken)) return json(res, 409, { error: 'provider_turn_mismatch' }, origin);
++    await tryDrainProviderTurn(session.id, id);
++    const current = await getSession(session.id);
++    return json(res, 200, { ok: true, applicable: true, drainToken, state: current?.currentProviderTurn?.state ?? 'broken' }, origin);
++  }
++
+   if (route === '/events' && req.method === 'POST') {
+     let body: Record<string, unknown>;
+     try {
+diff --git a/src/main/control-actions.ts b/src/main/control-actions.ts
+index dd102caf..d3b33fa5 100644
+--- a/src/main/control-actions.ts
++++ b/src/main/control-actions.ts
+@@ -48,12 +48,15 @@ const sendBody = z
+     sessionId: z.string().regex(/^[0-9a-z-]{8,64}$/).optional(),
+     // The project a new chat starts in. An existing chat keeps the one it has.
+     projectId: lowerUuid.optional(),
++    // Provider policy is a first-session creation contract, never a mutable session setting.
++    providerPolicy: z.object({ backgroundWork: z.literal('disabled') }).strict().optional(),
+     text: z.string().max(MAX_TEXT).refine((value) => value.trim().length > 0, 'text is empty'),
+     // Consent to a send that would stop the answer ChatGPT is writing right now.
+     interrupt: z.boolean().optional()
+   })
+   .strict()
+-  .refine((body) => body.sessionId === undefined || body.projectId === undefined, { path: ['projectId'], message: 'a project belongs to a new chat' });
++  .refine((body) => body.sessionId === undefined || body.projectId === undefined, { path: ['projectId'], message: 'a project belongs to a new chat' })
++  .refine((body) => body.sessionId === undefined || body.providerPolicy === undefined, { path: ['providerPolicy'], message: 'provider policy belongs to a new chat' });
+ 
+ const cancelBody = z.object({}).strict();
+ 
+@@ -116,7 +119,8 @@ async function send(rawBody: unknown): Promise<ActionReply> {
+   const existing = await find(body.id);
+   if (existing) {
+     // A new chat's first message is filed under its own id.
+-    if (existing.purpose === 'decision' || existing.sessionId !== (body.sessionId ?? body.id) || existing.text !== text) {
++    if (existing.purpose === 'decision' || existing.sessionId !== (body.sessionId ?? body.id) || existing.text !== text ||
++        (existing.providerPolicy?.backgroundWork ?? null) !== (body.providerPolicy?.backgroundWork ?? null)) {
+       throw new RequestError(409, 'id_conflict', 'this id belongs to a different message');
+     }
+     const replay: ControlApiSendResult = { input: projectInput(existing), replayed: true };
+@@ -144,6 +148,7 @@ async function send(rawBody: unknown): Promise<ActionReply> {
+     // The outbox opens a chat for a message without a session, exactly as the composer's New chat does.
+     sessionId: body.sessionId ?? null,
+     ...(body.projectId !== undefined ? { projectId: body.projectId } : {}),
++    ...(body.providerPolicy !== undefined ? { providerPolicy: body.providerPolicy } : {}),
+     text,
+     mode: 'auto',
+     dueAt: Date.now(),
+diff --git a/src/main/control-api.ts b/src/main/control-api.ts
+index 48c19ead..8e9bc0a0 100644
+--- a/src/main/control-api.ts
++++ b/src/main/control-api.ts
+@@ -5,6 +5,8 @@ import type { AddressInfo } from 'node:net';
+ import path from 'node:path';
+ import {
+   CONTROL_API_ACTION_ROUTES,
++  CONTROL_API_APP,
++  CONTROL_API_PROVIDER_FEATURES,
+   CONTROL_API_PROTOCOL,
+   CONTROL_API_ROUTES,
+   type ControlApiEndpoint,
+@@ -15,7 +17,7 @@ import type { PluginSnapshot } from '../shared/plugins.js';
+ import type { BridgeStatus, ConnectionStatus, UpdateStatus } from '../shared/types.js';
+ import { bridgeStatus } from './bridge.js';
+ import { actionsAllowed, isActionPath, serveAction } from './control-actions.js';
+-import { RequestError, serveRead } from './control-reads.js';
++import { RequestError, serveRead, serveReadEffect } from './control-reads.js';
+ import { getStatus } from './connection.js';
+ import { logInfo, logWarn, redact } from './logger.js';
+ import { inFlightMcpRequests, inFlightToolCalls, runningToolCalls, settlingToolCalls } from './mcp/call-context.js';
+@@ -360,6 +362,28 @@ async function handleAction(req: http.IncomingMessage, res: http.ServerResponse,
+   }
+ }
+ 
++async function handleReadEffect(req: http.IncomingMessage, res: http.ServerResponse, route: string, url: URL): Promise<void> {
++  if (url.search !== '') return reply(res, 400, { error: 'invalid_query', detail: 'this route takes no query string' });
++  const raw = await readBody(req, res);
++  if (raw === null) return;
++  let body: unknown;
++  if (raw.length > 0) {
++    try {
++      body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
++    } catch {
++      return reply(res, 400, { error: 'invalid_json' });
++    }
++  }
++  try {
++    const answer = await withReadDeadline(() => serveReadEffect(route, body));
++    if (answer === undefined) return reply(res, 404, { error: 'not_found' });
++    return reply(res, 200, answer);
++  } catch (error) {
++    if (error instanceof RequestError) return reply(res, error.status, { error: error.code, ...(error.detail ? { detail: error.detail } : {}) });
++    throw error;
++  }
++}
++
+ async function handle(req: http.IncomingMessage, res: http.ServerResponse, token: string, instance: http.Server): Promise<void> {
+   // Never answer a browser, not even with an error body it could learn from.
+   if (req.headers.origin !== undefined) return reply(res, 403, { error: 'origin_forbidden' });
+@@ -391,8 +415,14 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, token
+   }
+   // Charged only after authentication, so another local process cannot spend the budget.
+   if (rateLimited()) return reply(res, 429, { error: 'rate_limited' });
++  // Project resolution is a bounded authenticated read-effect POST. It intentionally bypasses
++  // Allow actions and the mutation queue: it reveals only the exact already-approved match.
++  if (route === '/v1/projects/resolve' && req.method !== 'POST') {
++    return reply(res, 405, { error: 'method_not_allowed' }, { allow: 'POST' });
++  }
++  if (req.method === 'POST' && route === '/v1/projects/resolve') return handleReadEffect(req, res, route, url);
+   if (req.method !== 'GET') {
+-    const allow = route === '/v1/inputs' ? 'GET, POST' : isActionPath(route) ? 'POST' : 'GET';
++    const allow = route === '/v1/inputs' ? 'GET, POST' : route === '/v1/projects/resolve' || isActionPath(route) ? 'POST' : 'GET';
+     return reply(res, 405, { error: 'method_not_allowed' }, { allow });
+   }
+   if (Number(req.headers['content-length'] ?? 0) > 0 || req.headers['transfer-encoding'] !== undefined) {
+@@ -417,8 +447,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, token
+     const body: ControlApiHealth = {
+       ok: true,
+       protocol: CONTROL_API_PROTOCOL,
++      app: CONTROL_API_APP,
+       routes: [...CONTROL_API_ROUTES],
+       actions: { enabled: actionsAllowed(), routes: [...CONTROL_API_ACTION_ROUTES] },
++      features: { ...CONTROL_API_PROVIDER_FEATURES },
++      providerExtension: { apiVersion: 1, buildId: process.env.COS_PROVIDER_EXTENSION_BUILD_ID ?? 'development' },
+       pid: process.pid,
+       appVersion: APP_VERSION,
+       startedAt: new Date(Date.now() - uptime * 1000).toISOString(),
+diff --git a/src/main/control-reads.ts b/src/main/control-reads.ts
+index 8d264cdb..6c57885b 100644
+--- a/src/main/control-reads.ts
++++ b/src/main/control-reads.ts
+@@ -1,12 +1,14 @@
+ import { z } from 'zod';
+ import type {
+   ControlApiAgents,
++  ControlApiAssistantContent,
+   ControlApiEvent,
+   ControlApiEvents,
+   ControlApiInput,
+   ControlApiInputs,
+   ControlApiLive,
+   ControlApiLog,
++  ControlApiResolvedProject,
+   ControlApiSession,
+   ControlApiSessionDetail,
+   ControlApiSessionList,
+@@ -25,6 +27,8 @@ import { redactSecretText } from './redaction.js';
+ import { deliveryProof, listInputs } from './session/input.js';
+ import type { InputEntry } from './session/input.js';
+ import { readSession, readSessionEvents, readSessionList, sessionListCursorSchema } from './session/read-model.js';
++import { readOverflowText } from './session/store.js';
++import { resolveExactProjectPath } from './projects.js';
+ 
+ /**
+  * The read routes of the local control API: sessions, their events, the input outbox, agents
+@@ -119,6 +123,16 @@ function parseQuery<T extends z.ZodRawShape>(params: URLSearchParams, shape: T):
+   return parsed.data;
+ }
+ 
++function parseBody<T extends z.ZodTypeAny>(schema: T, value: unknown): z.infer<T> {
++  const parsed = schema.safeParse(value ?? {});
++  if (!parsed.success) {
++    const issue = parsed.error.issues[0];
++    const where = issue?.path.length ? issue.path.join('.') : 'body';
++    throw new RequestError(400, 'invalid_body', issue?.code === 'unrecognized_keys' ? 'unknown field' : where + ' is not valid');
++  }
++  return parsed.data;
++}
++
+ function csv<V extends string>(allowed: readonly V[]) {
+   return z
+     .string()
+@@ -129,7 +143,7 @@ function csv<V extends string>(allowed: readonly V[]) {
+ /** Each table is exhaustive by type: a new value cannot appear in an owner without a decision here. */
+ const EVENT_KINDS: Record<SessionEventKind, true> = {
+   session_start: true, user_message: true, assistant_message: true, native_image: true, progress: true,
+-  page_tool: true, turn_start: true, turn_end: true, chat_error: true, tool_call: true, note: true,
++  page_tool: true, turn_start: true, turn_end: true, turn_drained: true, chat_error: true, tool_call: true, note: true,
+   agent_message: true, handoff: true
+ };
+ /** `decision` rows are the planner's internal work and are never listed. */
+@@ -148,6 +162,14 @@ export function projectSession(summary: SessionSummary): ControlApiSession {
+     title: line(summary.title, TITLE_CAP),
+     conversationId: summary.conversationId,
+     projectId: summary.projectId ?? null,
++    ...(summary.providerPolicy?.backgroundWork === 'disabled'
++      ? { providerPolicy: { backgroundWork: 'disabled' as const, enforced: true as const } }
++      : {}),
++    ...(summary.currentProviderTurn
++      ? { providerTurn: { inputId: summary.currentProviderTurn.inputId, state: summary.currentProviderTurn.state,
++          turnId: summary.currentProviderTurn.turnId ?? null, drainedSeq: summary.currentProviderTurn.drainedSeq ?? null,
++          finalAssistantSeq: summary.currentProviderTurn.finalAssistantSeq ?? null } }
++      : {}),
+     startedAt: summary.startedAt,
+     updatedAt: summary.updatedAt,
+     endedAt: summary.endedAt,
+@@ -321,6 +343,8 @@ export function projectEvent(event: SessionEvent): ControlApiEvent {
+       return { ...base, detail: event.detail && line(event.detail, SUMMARY_CAP) };
+     case 'turn_end':
+       return { ...base, outcome: event.outcome, detail: event.detail && line(event.detail, SUMMARY_CAP), reason: event.reason };
++    case 'turn_drained':
++      return { ...base, inputId: event.inputId, highWaterSeq: event.highWaterSeq, finalAssistantSeq: event.finalAssistantSeq };
+     case 'chat_error':
+       return { ...base, message: stored(event.message), recoverable: event.recoverable, blocking: event.blocking, retryAt: event.retryAt, reason: event.reason };
+     case 'tool_call': {
+@@ -419,6 +443,102 @@ export function streamEvents(id: string, from: number, kinds: SessionEventKind[]
+   });
+ }
+ 
++// ------------------------------------------------------ provider extension reads
++
++const resolveProjectBody = z.object({ path: z.string().min(1).max(32768) }).strict();
++const ASSISTANT_CONTENT_ROUTE = /^\/v1\/sessions\/([0-9a-z-]{8,64})\/events\/(\d{1,8})\/assistant-content$/;
++// Ranged readers must not re-read and re-redact the entire final once per chunk. Cache only the
++// controller-redacted immutable event body, bounded to two maximum overflow messages (16M UTF-16
++// code units). This makes one sequential ranged retrieval O(final-size) while keeping memory
++// independent of revision count and never retaining the unredacted spilled text here.
++const ASSISTANT_CONTENT_CACHE_CHARS = 16 * 1024 * 1024;
++const assistantContentCache = new Map<string, string>();
++let assistantContentCacheChars = 0;
++
++function cachedAssistantContent(key: string): string | null {
++  const value = assistantContentCache.get(key);
++  if (value === undefined) return null;
++  // Map insertion order is the LRU order.
++  assistantContentCache.delete(key);
++  assistantContentCache.set(key, value);
++  return value;
++}
++
++function rememberAssistantContent(key: string, value: string): void {
++  if (value.length > ASSISTANT_CONTENT_CACHE_CHARS) return;
++  const previous = assistantContentCache.get(key);
++  if (previous !== undefined) {
++    assistantContentCacheChars -= previous.length;
++    assistantContentCache.delete(key);
++  }
++  assistantContentCache.set(key, value);
++  assistantContentCacheChars += value.length;
++  while (assistantContentCacheChars > ASSISTANT_CONTENT_CACHE_CHARS && assistantContentCache.size > 1) {
++    const oldest = assistantContentCache.entries().next().value as [string, string] | undefined;
++    if (!oldest) break;
++    assistantContentCache.delete(oldest[0]);
++    assistantContentCacheChars -= oldest[1].length;
++  }
++}
++
++export async function serveReadEffect(route: string, rawBody: unknown): Promise<unknown | undefined> {
++  if (route !== '/v1/projects/resolve') return undefined;
++  const body = parseBody(resolveProjectBody, rawBody);
++  const project = await resolveExactProjectPath(body.path);
++  if (!project) throw new RequestError(404, 'project_unmapped');
++  const result: ControlApiResolvedProject = project;
++  return result;
++}
++
++function insideSurrogatePair(text: string, offset: number): boolean {
++  if (offset <= 0 || offset >= text.length) return false;
++  const before = text.charCodeAt(offset - 1);
++  const at = text.charCodeAt(offset);
++  return before >= 0xd800 && before <= 0xdbff && at >= 0xdc00 && at <= 0xdfff;
++}
++
++async function assistantContent(sessionId: string, seq: number, params: URLSearchParams): Promise<ControlApiAssistantContent> {
++  const query = parseQuery(params, { offset: integer(0, 100_000_000), limit: integer(2, 65_536) });
++  return heavy(async () => {
++    const page = await readSessionEvents(sessionId, { from: seq, limit: 1, kinds: ['assistant_message'] });
++    if (!page) throw new RequestError(404, 'session_not_found');
++    const event = page.events[0];
++    if (!event || event.seq !== seq || event.kind !== 'assistant_message') throw new RequestError(404, 'event_not_found');
++
++    const cacheKey = `${sessionId}\u0000${seq}`;
++    let full = cachedAssistantContent(cacheKey);
++    if (full === null) {
++      full = event.message.text;
++      if (event.message.truncated) {
++        if (!event.message.assetId) throw new RequestError(409, 'assistant_content_unavailable');
++        const overflow = await readOverflowText(sessionId, event.message.assetId);
++        if (overflow === null) throw new RequestError(409, 'assistant_content_unavailable');
++        full = overflow;
++      }
++      // Apply the controller transform to the complete body before range selection. This keeps a
++      // credential that crosses a requested chunk boundary from being partially exposed. Cache
++      // only this transformed body so subsequent chunks never retain or re-read raw secret text.
++      full = redactSecretText(full);
++      rememberAssistantContent(cacheKey, full);
++    }
++    if (query.offset > full.length || insideSurrogatePair(full, query.offset)) {
++      throw new RequestError(400, 'invalid_query', 'offset is not a valid UTF-16 boundary');
++    }
++    let end = Math.min(full.length, query.offset + query.limit);
++    if (insideSurrogatePair(full, end)) end -= 1;
++    const text = full.slice(query.offset, end);
++    return {
++      sessionId,
++      seq,
++      field: 'assistantText',
++      offset: query.offset,
++      text,
++      totalLength: full.length,
++      complete: end === full.length
++    };
++  });
++}
++
+ // ---------------------------------------------------------------- inputs
+ 
+ export function projectInput(entry: InputEntry): ControlApiInput {
+@@ -544,6 +664,12 @@ const SESSION_ROUTE = /^\/v1\/sessions\/([0-9a-z-]{8,64})(\/events)?$/;
+  * that ignore case, so only the exact spelling is a route.
+  */
+ export async function serveRead(route: string, params: URLSearchParams): Promise<unknown | undefined> {
++  const content = ASSISTANT_CONTENT_ROUTE.exec(route);
++  if (content) {
++    const seq = Number(content[2]);
++    if (!Number.isSafeInteger(seq) || seq < 1) throw new RequestError(400, 'invalid_query', 'seq is not valid');
++    return assistantContent(content[1]!, seq, params);
++  }
+   if (route === '/v1/sessions') return sessionList(params);
+   if (route === '/v1/inputs') return inputs(params);
+   if (route === '/v1/agents') {
+diff --git a/src/main/goal.ts b/src/main/goal.ts
+index fff57dce..91654d39 100644
+--- a/src/main/goal.ts
++++ b/src/main/goal.ts
+@@ -668,6 +668,7 @@ export async function acceptGoalReplyNow(input: {
+   handledOnly?: true;
+   current?: () => boolean;
+ }): Promise<void> {
++  if ((await getSession(input.sessionId))?.providerPolicy?.backgroundWork === 'disabled') return;
+   if (!input.handledOnly && await astraFinishOnly(input.sessionId, input.conversationId)) return;
+   if (input.silenceSourceTurnId &&
+       !await turnHasMcpCall(input.sessionId, input.conversationId, input.silenceSourceTurnId)) return;
+@@ -800,7 +801,8 @@ function saveGoalControl<T>(
+   conversationId: string,
+   state: string,
+   snapshot: () => unknown,
+-  stage: (targetConversationId: string) => { snapshot: unknown; publish: () => T } | { result: T }
++  stage: (targetConversationId: string) => { snapshot: unknown; publish: () => T } | { result: T },
++  admit?: (targetConversationId: string) => Promise<void>
+ ): Promise<T> {
+   const write: GoalControlWrite = { conversationId, invalidated: false, changed: false };
+   pending.add(write);
+@@ -810,6 +812,13 @@ function saveGoalControl<T>(
+       for (let revision = 0; revision < 8; revision++) {
+         if (write.invalidated) throw new Error('Goal controls changed while saving; this request was superseded.');
+         write.changed = false;
++        if (admit) {
++          await admit(write.conversationId);
++          if (write.invalidated) throw new Error('Goal controls changed while saving; this request was superseded.');
++          // Compact & Resume may retarget this pending write while the policy lookup is in flight.
++          // Recheck policy against the new exact conversation instead of publishing from stale authority.
++          if (write.changed) continue;
++        }
+         const next = stage(write.conversationId);
+         if ('result' in next) return next.result;
+         attempted = true;
+@@ -914,6 +923,13 @@ export function setGoalObjective(conversationId: string, text: string): string {
+  * acceptance. A later synchronous set/clear supersedes this request. Compact & Resume instead
+  * retargets this same save to the replacement conversation and repeats the barrier there.
+  */
++async function assertProviderBackgroundWorkAllowed(conversationId: string): Promise<void> {
++  let owner;
++  try { owner = await findSessionByConversation(conversationId, { requireUnique: true }); }
++  catch { throw new Error('provider_session_identity_unavailable'); }
++  if (owner?.providerPolicy?.backgroundWork === 'disabled') throw new Error('provider_background_work_disabled');
++}
++
+ export async function setGoalObjectiveNow(conversationId: string, text: string): Promise<string> {
+   const goal = text.trim();
+   return saveGoalControl(pendingGoalObjectives, conversationId, GOAL_OBJECTIVES_STATE, snapshotGoalObjectives, (targetConversationId) => {
+@@ -929,7 +945,7 @@ export async function setGoalObjectiveNow(conversationId: string, text: string):
+         return goal;
+       }
+     };
+-  });
++  }, goal ? assertProviderBackgroundWorkAllowed : undefined);
+ }
+ 
+ export function clearGoalObjective(conversationId: string): void {
+@@ -1165,7 +1181,8 @@ export async function setGoalSwitchNow(
+           return { enabled: next.enabled, mode: next.mode };
+         }
+       };
+-    });
++    },
++    on ? assertProviderBackgroundWorkAllowed : undefined);
+ }
+ 
+ /**
+@@ -1634,7 +1651,11 @@ export function startGoalDraft(input: StartGoalDraftInput): GoalDraftView {
+ export function beginGoalDraft(conversationId: string, token: string): boolean {
+   const draft = drafts.get(conversationId);
+   if (!draft || draft.token !== token || draft.acknowledged || draft.work) return false;
+-  draft.work = run(draft).catch((err: Error) => {
++  draft.work = (async () => {
++    const owner = await getSession(draft.sessionId);
++    if (owner?.providerPolicy?.backgroundWork === 'disabled') throw new Error('provider_background_work_disabled');
++    await run(draft);
++  })().catch((err: Error) => {
+     settle(draft, 'failed', `goal_failed: ${err.message}`);
+   });
+   return true;
+@@ -2053,6 +2074,7 @@ export async function draftFastFollowup(sessionId: string, signal: AbortSignal =
+   // Custom endpoints may be keyless; only OpenRouter fails here without one.
+   if (backend === 'api' && !key && endpoint.kind === 'openrouter') throw new Error('Configure the Goal API key for automatic finish follow-ups, or choose Notify me');
+   const session = await getSession(sessionId);
++  if (session?.providerPolicy?.backgroundWork === 'disabled') throw new Error('provider_background_work_disabled');
+   if (!session?.conversationId) throw new Error('This session has no current conversation');
+   if (mode === 'loop') {
+     const [start] = await readRecentEvents(sessionId, 1, { kinds: ['turn_start'] });
+diff --git a/src/main/mcp/call-context.ts b/src/main/mcp/call-context.ts
+index 8fc9b77e..ab4b7ce5 100644
+--- a/src/main/mcp/call-context.ts
++++ b/src/main/mcp/call-context.ts
+@@ -91,6 +91,8 @@ export interface CallContext {
+    * transport request id before browser proof names the durable chat.
+    */
+   allowUnattributed?: boolean;
++  /** Parent/this request crossed the provider turn admission fence before closing. */
++  providerEffectAdmitted?: boolean;
+   /** Who this call was proven to be, for the broker tools to route by. */
+   caller: CallCaller;
+   /**
+diff --git a/src/main/mcp/kernel.ts b/src/main/mcp/kernel.ts
+index fcb69aff..33fd0039 100644
+--- a/src/main/mcp/kernel.ts
++++ b/src/main/mcp/kernel.ts
+@@ -105,7 +105,8 @@ import {
+   freshCallOrigin,
+   recordAgentMessage,
+   recordProgress,
+-  recordToolCall
++  recordToolCall,
++  tryDrainProviderTurn
+ } from '../session/recorder.js';
+ import { requestCorrelation } from '../session/correlation.js';
+ import { summarizeRunningCall } from '../session/summarize.js';
+@@ -121,9 +122,11 @@ import {
+ import { DEFAULT_MAX_OUTPUT_TOKENS } from '../codex/unified-exec-constants.js';
+ import { unattributedRepairEta } from '../bridge.js';
+ import {
++  admitProviderEffect,
+   conversationAttachment,
+   findSessionByConversation,
+   getSession,
++  providerTurnFenceActive,
+   requestBelongsToActiveTurn,
+   requestTurnOwnershipCutoff
+ } from '../session/store.js';
+@@ -651,6 +654,7 @@ export async function dispatch(
+     transportKey,
+     agent: null,
+     allowUnattributed: getConfig().multiAgent.allowUnattributedCalls,
++    ...(parent?.providerEffectAdmitted === true ? { providerEffectAdmitted: true } : {}),
+     caller: parent
+       ? { ...parent.caller }
+       : { transportKey, requestId, conversationId: null, sessionId: null, setupProfileId },
+@@ -664,6 +668,8 @@ export async function dispatch(
+     const result = await trackMcpRequest(() =>
+       trackInFlight(context, () => dispatchTracked(context, name, args, transportKey, requestId, surface, run, !!parent))
+     );
++    await tryDrainProviderTurn(context.caller.sessionId, context.caller.conversationId)
++      .catch(error => logWarn(`Provider turn drain remains pending: ${error instanceof Error ? error.message : String(error)}`));
+     // In-process callers have no socket; resolving their outer invocation publishes it.
+     if (!parent && !inboundPublication()) context.publication!.completedAt = Date.now();
+     if (!result.isError) confirmUse?.();
+@@ -805,6 +811,28 @@ async function dispatchTracked(
+       await awaitFreshCallOrigin(name, startedAt, identityWindow(REQUEST_ID_GRACE_MS), { requestId })
+     );
+   }
++  let providerIdentityFence = false;
++  if (!nested && !context.caller.conversationId) {
++    providerIdentityFence = await providerTurnFenceActive().catch(() => true);
++    if (providerIdentityFence && requestId) {
++      setCallerConversation(
++        context,
++        await awaitFreshCallOrigin(name, startedAt, identityWindow(REQUEST_ID_GRACE_MS), { requestId })
++      );
++    }
++  }
++  const providerIdentityRefusal = !nested && providerIdentityFence && !context.caller.conversationId
++    ? 'PROVIDER_CALLER_IDENTITY_REQUIRED: a provider-owned turn is active and this call could not be attributed to an exact ChatGPT conversation. No local tool was run.'
++    : null;
++  const providerAdmission = nested && context.providerEffectAdmitted === true
++    ? 'admitted' as const
++    : providerIdentityRefusal || !context.caller.conversationId
++      ? 'ordinary' as const
++      : await admitProviderEffect(context.caller.conversationId, context.caller.sessionId ?? null).catch(() => 'refused' as const);
++  if (providerAdmission === 'admitted') context.providerEffectAdmitted = true;
++  const providerTurnRefusal = providerIdentityRefusal ?? (providerAdmission === 'refused'
++    ? 'PROVIDER_TURN_CLOSING: this provider-owned turn is closing, drained, or otherwise unavailable. No local tool was run.'
++    : null);
+   const supersededConversation = context.caller.conversationId
+     ? (await conversationAttachment(context.caller.conversationId, context.caller.sessionId ?? null)) === 'superseded'
+     : false;
+@@ -813,10 +841,10 @@ async function dispatchTracked(
+   // are timing-sensitive enough that needless awaits can change which terminal frame a poll sees.
+   // Connection provenance is an admission fence, not just a handler error: a refused call
+   // must not revive its worker or consume/receive input owned by the other connection.
+-  const conversationPolicyRefusal = (strictChatAllowlistEnabled()
++  const conversationPolicyRefusal = providerTurnRefusal ?? ((strictChatAllowlistEnabled()
+     ? await conversationAccessRefusal(context.caller.conversationId)
+     : isChatBlocked(context.caller.conversationId) ? BLOCKED_CHAT_REFUSAL : null) ??
+-    workerConnectionProfileRefusal(context.caller);
++    workerConnectionProfileRefusal(context.caller));
+   let silentFinishAuthorized = false;
+   // Two things about liveness, both before the agent is resolved so that the answer this
+   // call gets is the state this call itself established.
+@@ -1160,7 +1188,7 @@ async function dispatchTracked(
+   // are measured separately because a row cannot contain the time of its own later commit.
+   const durationMs = recorderStartedAt - startedAt;
+   markTiming('delivery');
+-  const recording = recordToolCall({
++  const recording = providerTurnRefusal ? Promise.resolve(null) : recordToolCall({
+     nested,
+     tool: name,
+     args: surface === 'plugins' ? pluginManager.redact(args) : args,
+diff --git a/src/main/projects.ts b/src/main/projects.ts
+index 8d42829f..46263967 100644
+--- a/src/main/projects.ts
++++ b/src/main/projects.ts
+@@ -4,7 +4,7 @@ import { z } from 'zod';
+ import { rawPromises as fs } from './rawfs.js';
+ import { readDurable, writeDurableNow } from './durable.js';
+ import { getConfig } from './config.js';
+-import { nativePathIdentity, resolvePath } from './sandbox.js';
++import { nativePathIdentity, resolvePath, SandboxError } from './sandbox.js';
+ import { bindSessionProject, findSessionByConversation, getSession } from './session/store.js';
+ import { CHATGPT_PROJECT_ID, PROJECT_COLORS, type ChatgptProjectLink, type LocalProject, type ProjectColor } from '../shared/projects.js';
+ 
+@@ -113,6 +113,32 @@ async function resolveProject(project: LocalProject): Promise<{ virtual: string;
+   if (!samePath(resolved.real, project.path) || !(await fs.stat(resolved.real)).isDirectory()) throw new Error('Project folder changed or is unavailable');
+   return { virtual: resolved.virtual, real: resolved.real };
+ }
++
++/**
++ * Resolves one caller-supplied native/virtual path to an existing active project only when it is
++ * exactly that project's canonical root. This deliberately exposes no catalog fallback: a
++ * subdirectory, stale/reparse-changed project, unapproved path or ambiguous catalog entry is not
++ * a match.
++ */
++export async function resolveExactProjectPath(input: string): Promise<{ projectId: string; name: string; canonicalPath: string } | null> {
++  let requested: { real: string };
++  try {
++    requested = await resolvePath(getConfig().roots, input);
++  } catch (error) {
++    if (error instanceof SandboxError) return null;
++    throw error;
++  }
++  const candidates = (await listProjects()).filter(project => !project.ungrouped && samePath(project.path, requested.real));
++  if (candidates.length !== 1) return null;
++  const project = candidates[0]!;
++  try {
++    const current = await resolveProject(project);
++    if (!samePath(current.real, requested.real)) return null;
++    return { projectId: project.id, name: project.name, canonicalPath: current.real };
++  } catch {
++    return null;
++  }
++}
+ /** Null means no project. A broken explicit binding is an error, never permission to guess cwd. */
+ export async function getSessionProject(sessionId: string): Promise<{ virtual: string; real: string } | null> {
+   const session = await getSession(sessionId);
+diff --git a/src/main/session/continuation.ts b/src/main/session/continuation.ts
+index 770b6b38..13697360 100644
+--- a/src/main/session/continuation.ts
++++ b/src/main/session/continuation.ts
+@@ -801,6 +801,7 @@ export async function openContinuationNow(
+     if (again) return view(again);
+     const entry = makeContinuation(sessionId, fromConversationId, automatic, normalizeProjectId(project));
+     const source = await getSession(sessionId);
++    if (automatic && source?.providerPolicy?.backgroundWork === 'disabled') throw new Error('automatic_compaction_disabled');
+     entry.sourceTurnId = source?.activeTurnId ?? null;
+     if (source?.conversationId === fromConversationId && source.selectedModel?.conversationId === fromConversationId) {
+       entry.requestedModel = requestedModel(source.selectedModel);
+diff --git a/src/main/session/input-history.ts b/src/main/session/input-history.ts
+index 6fa1d4c5..03cf7290 100644
+--- a/src/main/session/input-history.ts
++++ b/src/main/session/input-history.ts
+@@ -1,7 +1,7 @@
+ import type { InputEntry } from './input.js';
+ import { estimateTokens } from '../../shared/session.js';
+ import { browserInputModel } from '../../shared/input.js';
+-import { getSession, observeSessionModel, readAsset, readEvents, upsertMessageEvent, writeAsset } from './store.js';
++import { activateProviderTurn, getSession, observeSessionModel, readAsset, readEvents, upsertMessageEvent, writeAsset } from './store.js';
+ import { validateInputImages } from './input-images.js';
+ import sharp from 'sharp';
+ import { positionOf } from '../../shared/chronology.js';
+@@ -43,6 +43,7 @@ export async function recordDeliveredInput(entry: Readonly<InputEntry>, anchorCo
+   // Delivery and its chronology do not depend on optional preview storage. This
+   // stable row survives a quota failure; retry only enriches the same origin.
+   const committed = await upsertMessageEvent(sessionId, message);
++  await activateProviderTurn(sessionId, entry.id).catch(() => false);
+   anchorCommitted?.(positionOf(committed.event));
+   // Offered → confirmed revises this row in place; count and time cannot reveal it.
+   notifyChanged(sessionId);
+diff --git a/src/main/session/input.ts b/src/main/session/input.ts
+index f3b5288d..eeb55ca2 100644
+--- a/src/main/session/input.ts
++++ b/src/main/session/input.ts
+@@ -10,7 +10,7 @@ import { getConfig } from '../config.js';
+ import { randomUUID } from 'node:crypto';
+ import { userTitle } from './title.js';
+ import { readDurable, writeDurableNow, writeDurableSoon } from '../durable.js';
+-import { getSession, findSessionByConversation, createSession, deleteSession, rebindSession, conversationWasSuperseded, readRecentEvents, listUsageSessions, turnHasMcpCall, questionHasMcpCall, sessionDirectoryMissing, readCompletedFinal, readLatestUserMessage } from './store.js';
++import { admitProviderInput, getSession, findSessionByConversation, createSession, deleteSession, markProviderInputNotSent, rebindSession, conversationWasSuperseded, readRecentEvents, listUsageSessions, turnHasMcpCall, questionHasMcpCall, sessionDirectoryMissing, readCompletedFinal, readLatestUserMessage } from './store.js';
+ import { assignSessionProject, getProject, projectWorkspace, getSessionProject } from '../projects.js';
+ import { isChatBlocked } from './blocked-chats.js';
+ import { wakeBrowserWork } from '../browser-wake.js';
+@@ -32,6 +32,8 @@ import { asksForImage } from './image-request.js';
+ 
+ export const inputArgs = z.object({
+   projectId: z.string().uuid().nullable().optional(),
++  /** Accepted only for a new controller-created chat and persisted before its first send. */
++  providerPolicy: z.object({ backgroundWork: z.literal('disabled') }).strict().optional(),
+   automation: z.enum(['off', 'goal', 'loop']).optional(),
+   loopAfterTurn: z.boolean().optional(),
+   objective: z.string().trim().max(16000).optional(),
+@@ -700,6 +702,7 @@ async function finishInputCurrent(entry: InputEntry): Promise<boolean> {
+   // Periodic generation was retired; persisted rows cannot regain delivery authority.
+   if (!entry.finishOwner || entry.finishOwner.periodic || !entry.sessionId) return false;
+   const session = await getSession(entry.sessionId), config = getConfig();
++  if (session?.providerPolicy?.backgroundWork === 'disabled') return false;
+   return !!session?.conversationId && session.conversationId === entry.conversationId &&
+     session.activeTurnId === entry.finishOwner.turnId && session.finishTurn?.turnId === entry.finishOwner.turnId &&
+     !session.finishTurn.released && config.ui.finishTool === true && !isChatBlocked(session.conversationId) &&
+@@ -716,8 +719,12 @@ async function materializeOpening(entry: InputEntry): Promise<void> {
+   const recoveredExactOwner = !!existing && entry.requestedSessionId === null && !!entry.conversationId &&
+     existing.conversationId === entry.conversationId &&
+     existing.origin?.kind !== 'worker' && existing.origin?.kind !== 'helper';
++  if (existing && (existing.providerPolicy?.backgroundWork ?? null) !== (entry.providerPolicy?.backgroundWork ?? null)) {
++    throw new Error('Reserved opening session has different provider policy');
++  }
+   const session = recoveredExactOwner ? existing : await createSession({ reservedId: entry.sessionId,
+-    title: userTitle(entry.text, entry.text), titleSource: 'fallback',
++    title: userTitle(entry.text, entry.text), titleSource: 'fallback', providerPolicy: entry.providerPolicy,
++    ...(entry.providerPolicy ? { currentProviderTurn: { inputId: entry.id, state: 'admitted' as const } } : {}),
+     origin: { kind: 'desktop', fromSessionId: null, agentId: null, task: '' } });
+   if (session.conversationId && session.conversationId !== entry.conversationId)
+     throw new Error('Reserved opening session belongs to another ChatGPT conversation');
+@@ -739,6 +746,7 @@ export function fileRotationInput(sessionId: string, turnId: string): Promise<In
+     const current = await load();
+     if (current.some(row => row.sessionId === sessionId && !terminal(row))) return null;
+     const session = await getSession(sessionId);
++    if (session?.providerPolicy?.backgroundWork === 'disabled') return null;
+     if (!session?.conversationId || session.activeTurnId !== turnId || isChatBlocked(session.conversationId)) return null;
+     const policy = await sessionInputPolicy(sessionId);
+     if (policy.directTurn?.id !== turnId) return null;
+@@ -761,10 +769,18 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
+     const prior = current.find((entry) => entry.id === input.id);
+     if (prior) {
+       if (JSON.stringify(inputArgs.parse({ ...prior, sessionId: prior.opening ? prior.requestedSessionId ?? null : prior.sessionId, mode: prior.requestedMode ?? prior.mode })) !== JSON.stringify(input)) throw new Error('Message id already belongs to different input');
+-      if (!terminal(prior)) await materializeOpening(prior);
++      if (!terminal(prior)) {
++        await materializeOpening(prior);
++        if (prior.sessionId) await admitProviderInput(prior.sessionId, prior.id);
++      }
+       return { ...prior };
+     }
+     const requestedSession = input.sessionId ? await getSession(input.sessionId) : null;
++    if (requestedSession?.providerPolicy?.backgroundWork === 'disabled') {
++      const currentProviderTurn = requestedSession.currentProviderTurn;
++      if (currentProviderTurn?.state === 'broken') throw new Error('provider_turn_broken');
++      if (currentProviderTurn && !['drained', 'not_sent'].includes(currentProviderTurn.state)) throw new Error('provider_turn_busy');
++    }
+     // Explicit injection has its own recipient and can never spend a browser completion.
+     const activity = requestedSession && input.delivery !== 'tool' && input.attachmentDelivery !== 'tool'
+       ? deliveryHooks?.activity?.(requestedSession) : null;
+@@ -859,7 +875,10 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
+     // checkpoint atomically; no composer text or first-send receipt owns its life.
+     if (entry.mode === 'finish') next = materializeStages(next, entry);
+     await commit(next);
+-    try { await materializeOpening(entry); }
++    try {
++      await materializeOpening(entry);
++      if (entry.sessionId) await admitProviderInput(entry.sessionId, entry.id);
++    }
+     catch (error) {
+       const failed = { ...entry, error: ('Local chat setup failed: ' + (error as Error).message).slice(0, 200) };
+       await commit(next.map(row => row.id === entry.id ? failed : row));
+@@ -1003,7 +1022,11 @@ export function cancelInput(id: string): Promise<boolean> {
+         : found.state === 'queued' ? undefined : entry.error } : entry));
+     decisionWaiters.get(id)?.reject(new Error('goal_browser_cancelled'));
+     decisionWaiters.delete(id);
+-    await removeWithdrawnOpening(entries!.find(row => row.id === found.id)!, entries!);
++    const cancelled = entries!.find(row => row.id === found.id)!;
++    if (cancelled.sessionId && neverAuthorized(cancelled) && cancelled.deliveredAt === undefined && !cancelled.messageId) {
++      await markProviderInputNotSent(cancelled.sessionId, cancelled.id).catch(() => undefined);
++    }
++    await removeWithdrawnOpening(cancelled, entries!);
+     return true;
+   });
+ }
+@@ -1373,6 +1396,8 @@ export function fileRecoveryInput(sessionId: string, conversationId: string, tur
+   };
+   return serial(async () => {
+     const current = await load();
++    const providerSession = await getSession(sessionId);
++    if (providerSession?.providerPolicy?.backgroundWork === 'disabled') return refused('provider background work is disabled for this session');
+     // Never overtake authored input, retry an ambiguous send, or reuse a spent source.
+     if (current.some(row => row.sessionId === sessionId && !terminal(row))) return refused('an earlier message of this session is still awaiting delivery');
+     const question = await readLatestUserMessage(sessionId, turnId);
+@@ -1442,6 +1467,7 @@ export function fileSilenceInput(sessionId: string, conversationId: string, turn
+     const current = await load();
+     const session = await getSession(sessionId);
+     if (!currentOwner() || !session || session.conversationId !== conversationId || isChatBlocked(conversationId) ||
++        session.providerPolicy?.backgroundWork === 'disabled' ||
+         session.origin?.kind === 'worker' || session.origin?.kind === 'helper' || inFlightToolCalls(conversationId) > 0) return false;
+     const [boundary] = await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end'] });
+     // The producer's exact MCP grant and elapsed silence window own this pickup;
+diff --git a/src/main/session/recorder.ts b/src/main/session/recorder.ts
+index 01c36289..8488d2af 100644
+--- a/src/main/session/recorder.ts
++++ b/src/main/session/recorder.ts
+@@ -36,7 +36,7 @@ import { continuedRequestTurn, overlappingRequestTurns, recordedRequestTurn, res
+ import { getConfig } from '../config.js';
+ import { logInfo, logWarn } from '../logger.js';
+ import { redactCredentialText } from '../redaction.js';
+-import { currentCall, emptyEvidence, runningToolCalls, type CallEvidence } from '../mcp/call-context.js';
++import { currentCall, emptyEvidence, runningToolCalls, settlingToolCalls, type CallEvidence } from '../mcp/call-context.js';
+ import {
+   MAX_MESSAGE_CHARS,
+   MAX_TOOL_ARGS_CHARS,
+@@ -44,6 +44,9 @@ import {
+   MAX_USER_MESSAGE_CHARS,
+   MAX_ASSET_BYTES,
+   appendEvent,
++  closeProviderTurn,
++  finalizeProviderTurnDrain,
++  markProviderTurnEndRecorded,
+   recordProcessCall,
+   completeProcessCall,
+   observeSessionModel,
+@@ -1183,6 +1186,20 @@ export interface ToolCallInput {
+ const requestRecordings = new Map<string, Promise<void>>();
+ const sessionRecordings = new Map<string, Promise<void>>();
+ const pendingRecordings = new Set<Promise<unknown>>();
++/** Child processes outlive their MCP launch response. Provider drain waits only the owning session's children. */
++const pendingProcessCompletions = new Map<string, Set<Promise<void>>>();
++
++function trackProcessCompletion(sessionId: string, conversationId: string | null, work: Promise<void>): void {
++  const held = pendingProcessCompletions.get(sessionId) ?? new Set<Promise<void>>();
++  held.add(work);
++  pendingProcessCompletions.set(sessionId, held);
++  void work.finally(() => {
++    held.delete(work);
++    if (held.size === 0) pendingProcessCompletions.delete(sessionId);
++    if (conversationId) void tryDrainProviderTurn(sessionId, conversationId)
++      .catch(error => logWarn(`Provider turn drain remains pending after process completion: ${error instanceof Error ? error.message : String(error)}`));
++  });
++}
+ 
+ function serializeRecording<T>(queues: Map<string, Promise<void>>, key: string, run: () => Promise<T>): Promise<T> {
+   const work = (queues.get(key) ?? Promise.resolve()).then(run);
+@@ -1456,15 +1473,13 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
+       ...(target.turnId ? { turnId: target.turnId } : {})
+     });
+     if (call.process && evidence.processCompletion) {
+-      // Bind once to the recorded call, never look up a reusable numeric process id.
+-      // A process that exited during recorder admission resolves this same promise.
+-      void evidence.processCompletion.then(completion => {
+-        const work = completeProcessCall(sessionId, call.callId, completion)
+-          .then(() => notifyChanged(sessionId))
+-          .catch(() => logWarn('session recorder could not store process completion'));
+-        pendingRecordings.add(work);
+-        void work.then(() => pendingRecordings.delete(work));
+-      });
++      // Bind once to the recorded call, never look up a reusable numeric process id. The child
++      // lifetime is part of provider drain even after this MCP launch response has returned.
++      const completionWork = evidence.processCompletion.then(async completion => {
++        await completeProcessCall(sessionId, call.callId, completion);
++        notifyChanged(sessionId);
++      }).catch(() => logWarn('session recorder could not store process completion'));
++      trackProcessCompletion(sessionId, target.conversationId, completionWork);
+     }
+     const reopenedTurnId = input.endsActivity === true ? null : await serializeObservations(target.conversationId ?? sessionId, () => reopenFalselyEndedTurn(
+       sessionId,
+@@ -2004,6 +2019,58 @@ export async function recordRequestEvidence(
+   return sessionId;
+ }
+ 
++async function settleAttributionRepairForProviderDrain(): Promise<void> {
++  for (;;) {
++    if (attributionRepairTimer) {
++      clearTimeout(attributionRepairTimer);
++      attributionRepairTimer = null;
++      startAttributionRepair();
++    } else if (attributionRepairRequested) {
++      startAttributionRepair();
++    }
++    const current = attributionRepairChain;
++    await current.catch(() => undefined);
++    if (!attributionRepairTimer && !attributionRepairRequested && current === attributionRepairChain) return;
++  }
++}
++
++export async function tryDrainProviderTurn(sessionId: string | null | undefined, conversationId: string | null | undefined): Promise<void> {
++  if (!conversationId || runningToolCalls(conversationId) > 0 || settlingToolCalls(conversationId) > 0) return;
++  let session = sessionId ? await getSession(sessionId) : await findSessionByConversation(conversationId, { requireUnique: true });
++  let turn = session?.currentProviderTurn;
++  if (session?.providerPolicy?.backgroundWork !== 'disabled' || session.conversationId !== conversationId ||
++      turn?.state !== 'closing' || turn.browserDrained !== true || !turn.turnId) return;
++  if ((pendingProcessCompletions.get(session.id)?.size ?? 0) > 0) return;
++
++  // The browser high-water has already fenced old-turn producers and delivered their journal.
++  // Finish any deterministic late-attribution work already scheduled by that evidence before
++  // sealing the provider marker; it may still move a request-owned row into this session.
++  await settleAttributionRepairForProviderDrain();
++  if (runningToolCalls(conversationId) > 0 || settlingToolCalls(conversationId) > 0 ||
++      (pendingProcessCompletions.get(session.id)?.size ?? 0) > 0) return;
++  session = await getSession(session.id);
++  turn = session?.currentProviderTurn;
++  if (session?.conversationId !== conversationId || turn?.state !== 'closing' || turn.browserDrained !== true || !turn.turnId) return;
++  await finalizeProviderTurnDrain(session.id, conversationId, turn.turnId);
++}
++
++async function appendTurnEndWithProviderFence(
++  sessionId: string,
++  event: Omit<Extract<SessionEvent, { kind: 'turn_end' }>, 'seq'>
++): Promise<SessionEvent> {
++  const terminal = event.turnId && ['completed', 'failed', 'stopped', 'interrupted'].includes(event.outcome);
++  const fenced = terminal
++    ? await closeProviderTurn(sessionId, event.turnId!, event.outcome as 'completed' | 'failed' | 'stopped' | 'interrupted')
++    : false;
++  const stored = await appendEvent(sessionId, event);
++  if (fenced && stored.kind === 'turn_end' && stored.turnId &&
++      ['completed', 'failed', 'stopped', 'interrupted'].includes(stored.outcome)) {
++    await markProviderTurnEndRecorded(sessionId, stored.turnId,
++      stored.outcome as 'completed' | 'failed' | 'stopped' | 'interrupted', stored.seq);
++  }
++  return stored;
++}
++
+ export function recordChatObservations(
+   conversationId: string,
+   observations: readonly ChatObservation[],
+@@ -2307,7 +2374,7 @@ async function recordChatObservationsNow(
+             uncertainEnd?.kind === 'turn_end' && uncertainEnd.reason === 'thinking_failed' &&
+             uncertainEnd.turnId === canonicalTurn && (written.event.finalContentSeq ?? written.event.seq) > uncertainEnd.seq &&
+             live && !live.turnId && runningToolCalls(conversationId) === 0) {
+-          await appendEvent(sessionId, { ...base, kind: 'turn_end', turnId: canonicalTurn, outcome: 'completed',
++          await appendTurnEndWithProviderFence(sessionId, { ...base, kind: 'turn_end', turnId: canonicalTurn, outcome: 'completed',
+             detail: 'the exact native final superseded the failed view' });
+           live.lastTurnOutcome = 'completed';
+           activity.endedTurnId = canonicalTurn;
+@@ -2450,7 +2517,7 @@ async function recordChatObservationsNow(
+           if (latest?.kind === 'turn_start' && latest.source === 'app' && latest.turnId === item.turnId &&
+               latest.time >= item.time) continue;
+         }
+-        await appendEvent(sessionId, {
++        await appendTurnEndWithProviderFence(sessionId, {
+           ...base,
+           kind: 'turn_end',
+           outcome: item.outcome ?? 'unknown',
+@@ -2505,7 +2572,7 @@ async function recordChatObservationsNow(
+   }
+   if (recoveredFinal && completion && live?.turnId === recoveredFinal.turnId && live.openTurns.has(recoveredFinal.turnId)) {
+     const { turnId, time } = recoveredFinal;
+-    await appendEvent(sessionId, {
++    await appendTurnEndWithProviderFence(sessionId, {
+       time, source: 'extension', kind: 'turn_end', turnId, outcome: 'completed',
+       detail: 'recovered from a final assistant message after the ChatGPT page reloaded',
+       ...(agent ? { agent } : {})
+@@ -2791,6 +2858,7 @@ export function resetRecorderForTests(): void {
+   requestRecordings.clear();
+   sessionRecordings.clear();
+   pendingRecordings.clear();
++  pendingProcessCompletions.clear();
+   lastActiveSessionId = null;
+   if (attributionRepairTimer) {
+     clearTimeout(attributionRepairTimer);
+diff --git a/src/main/session/store.ts b/src/main/session/store.ts
+index dac9b52e..3129bd35 100644
+--- a/src/main/session/store.ts
++++ b/src/main/session/store.ts
+@@ -38,7 +38,8 @@ import type {
+   SessionOrigin,
+   SessionSummary,
+   StoredText,
+-  ToolEditReview
++  ToolEditReview,
++  TurnOutcome
+ } from '../../shared/session.js';
+ import type { WorkerAssignmentSummary } from '../../shared/session.js';
+ import { continuationMarkerOf, DEFAULT_RECORDING_STORAGE_GIB, eventTokens, MAX_TOOL_RESULT_TOKENS, normalizedToolOutcome, RECORDING_STORAGE_LIMITS_GIB, storedTextTokens, workSequence } from '../../shared/session.js';
+@@ -339,6 +340,11 @@ const META_HISTORY_SEQ = '__historySeq';
+ const META_CANONICAL_PROJECTION = '__canonicalProjection';
+ const META_TOKEN_ESTIMATE = '__tokenEstimate';
+ type PersistedSummary = SessionSummary & { [META_HISTORY_SEQ]?: number; [META_CANONICAL_PROJECTION]?: number; [META_TOKEN_ESTIMATE]?: number };
++type ProviderState = {
++  schemaVersion: 1;
++  providerPolicy: { backgroundWork: 'disabled' };
++  currentProviderTurn?: NonNullable<SessionSummary['currentProviderTurn']>;
++};
+ interface MetaCheckpoint {
+   summary: SessionSummary;
+   /** Null means metadata written by a version that did not yet persist a history watermark. */
+@@ -435,6 +441,77 @@ async function writeFileDurably(file: string, contents: string): Promise<void> {
+  * Split out so a *staged* summary can be written before it is published into memory. That
+  * ordering is what makes the compaction rebind safe to fail: see rebindSession.
+  */
++function normalizeProviderState(raw: string): ProviderState | null {
++  try {
++    const value = JSON.parse(raw) as Record<string, unknown>;
++    if (!value || typeof value !== 'object' || Array.isArray(value) || value['schemaVersion'] !== 1) return null;
++    const keys = Object.keys(value);
++    if (keys.some(key => !['schemaVersion', 'providerPolicy', 'currentProviderTurn'].includes(key))) return null;
++    const policy = value['providerPolicy'];
++    if (!policy || typeof policy !== 'object' || Array.isArray(policy) ||
++        (policy as Record<string, unknown>)['backgroundWork'] !== 'disabled' || Object.keys(policy).length !== 1) return null;
++    const turn = value['currentProviderTurn'];
++    if (turn !== undefined) {
++      if (!turn || typeof turn !== 'object' || Array.isArray(turn)) return null;
++      const item = turn as Record<string, unknown>;
++      if (Object.keys(item).some(key => !['inputId', 'state', 'turnId', 'closingOutcome', 'terminalSeq', 'closingObservationBatch', 'drainToken', 'browserDrained', 'drainedSeq', 'finalAssistantSeq'].includes(key))) return null;
++      if (typeof item['inputId'] !== 'string' || item['inputId'].length < 8 || item['inputId'].length > 64) return null;
++      const state = String(item['state']);
++      if (!['admitted', 'active', 'closing', 'drained', 'not_sent', 'broken'].includes(state)) return null;
++      if (item['turnId'] !== undefined && (typeof item['turnId'] !== 'string' || item['turnId'].length < 1 || item['turnId'].length > 256)) return null;
++      if (item['closingOutcome'] !== undefined && !['completed', 'failed', 'stopped', 'interrupted'].includes(String(item['closingOutcome']))) return null;
++      for (const key of ['terminalSeq', 'closingObservationBatch', 'drainedSeq'] as const) {
++        if (item[key] !== undefined && (!Number.isSafeInteger(item[key]) || Number(item[key]) < 1)) return null;
++      }
++      if (item['drainToken'] !== undefined && (typeof item['drainToken'] !== 'string' || item['drainToken'].length < 8 || item['drainToken'].length > 128)) return null;
++      if (item['browserDrained'] !== undefined && item['browserDrained'] !== true) return null;
++      if (item['finalAssistantSeq'] !== undefined && item['finalAssistantSeq'] !== null &&
++          (!Number.isSafeInteger(item['finalAssistantSeq']) || Number(item['finalAssistantSeq']) < 1)) return null;
++      if (state === 'active' && item['turnId'] === undefined) return null;
++      if ((state === 'closing' || state === 'drained') &&
++          (item['turnId'] === undefined || item['closingOutcome'] === undefined || item['drainToken'] === undefined)) return null;
++      // closing is persisted before turn_end by design. A crash in that exact gap has no
++      // terminalSeq yet; it is a valid fail-closed recovery state and becomes broken on restart.
++      if (state === 'drained' && item['terminalSeq'] === undefined) return null;
++      if (state === 'drained' && (item['browserDrained'] !== true || item['drainedSeq'] === undefined || !Object.hasOwn(item, 'finalAssistantSeq'))) return null;
++      if (state === 'not_sent' && item['turnId'] !== undefined) return null;
++    }
++    return value as ProviderState;
++  } catch {
++    return null;
++  }
++}
++
++async function readProviderState(id: string): Promise<ProviderState | null> {
++  const file = path.join(sessionDir(id), 'provider-state.json');
++  try {
++    const state = normalizeProviderState(await fs.readFile(file, 'utf8'));
++    if (!state) throw new Error(`Session ${id} provider state is corrupt`);
++    return state;
++  } catch (error) {
++    const failure = error as NodeJS.ErrnoException;
++    if (failure.code === 'ENOENT' || failure.code === 'ENOTDIR') return null;
++    throw error;
++  }
++}
++
++async function writeProviderState(summary: SessionSummary): Promise<void> {
++  if (summary.providerPolicy?.backgroundWork !== 'disabled') return;
++  const target = path.join(sessionDir(summary.id), 'provider-state.json');
++  const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
++  const state: ProviderState = {
++    schemaVersion: 1,
++    providerPolicy: { backgroundWork: 'disabled' },
++    ...(summary.currentProviderTurn ? { currentProviderTurn: { ...summary.currentProviderTurn } } : {})
++  };
++  try {
++    await writeFileDurably(tmp, JSON.stringify(state, null, 2));
++    await fs.rename(tmp, target);
++  } finally {
++    await fs.rm(tmp, { force: true }).catch(() => undefined);
++  }
++}
++
+ async function writeSummary(summary: SessionSummary, historySeq: number): Promise<void> {
+   const dir = sessionDir(summary.id);
+   const target = path.join(dir, 'meta.json');
+@@ -486,6 +563,215 @@ function enqueueSessionOperation<T>(entry: OpenSession, label: string, operation
+   return work;
+ }
+ 
++async function publishProviderTurn(entry: OpenSession, turn: SessionSummary['currentProviderTurn']): Promise<void> {
++  const staged: SessionSummary = { ...entry.summary, currentProviderTurn: turn ? { ...turn } : undefined };
++  // The provider sidecar is the fail-closed owner for fields history cannot reconstruct. Write
++  // it first, then the ordinary projection, and publish neither in memory until both are durable.
++  await writeProviderState(staged);
++  await writeSummary(staged, entry.historySeq);
++  entry.summary = staged;
++  publishCachedSummary(staged, false);
++}
++
++const providerTurnTerminal = (state: NonNullable<SessionSummary['currentProviderTurn']>['state']): boolean =>
++  state === 'drained' || state === 'not_sent' || state === 'broken';
++
++/**
++ * Last-resort store seal for the provider turn whose high-water is already committed.
++ * Browser fencing and MCP admission should make this unreachable in normal operation. If a
++ * changed same-turn row nevertheless reaches the store, preserving the old high-water is more
++ * important than accepting the late observation: quarantine the provider session before any
++ * provider-visible sequence or canonical shard can change.
++ */
++function sealedProviderTurnMatches(entry: OpenSession, candidateTurnId: string | null | undefined): boolean {
++  const provider = entry.summary.currentProviderTurn;
++  if (!candidateTurnId || !provider?.turnId || !provider.drainedSeq ||
++      (provider.state !== 'drained' && provider.state !== 'broken')) return false;
++  return responseTurnId(entry.summary.timelineTurns, provider.turnId) ===
++    responseTurnId(entry.summary.timelineTurns, candidateTurnId);
++}
++
++async function rejectSealedProviderTurnMutation(
++  entry: OpenSession,
++  candidateTurnId: string | null | undefined,
++  kind: string
++): Promise<void> {
++  if (!sealedProviderTurnMatches(entry, candidateTurnId)) return;
++  const provider = entry.summary.currentProviderTurn!;
++  if (provider.state !== 'broken') await publishProviderTurn(entry, { ...provider, state: 'broken' });
++  throw new Error(`provider_turn_sealed:${kind}`);
++}
++
++/** The durable input WAL is already committed before callers reach this transition. */
++export async function admitProviderInput(sessionId: string, inputId: string): Promise<boolean> {
++  const entry = await ensureOpen(sessionId);
++  return enqueueSessionOperation(entry, 'provider input admission', async () => {
++    if (entry.summary.providerPolicy?.backgroundWork !== 'disabled') return false;
++    const current = entry.summary.currentProviderTurn;
++    if (current?.state === 'broken') throw new Error('provider_turn_broken');
++    if (current?.inputId === inputId) {
++      if (providerTurnTerminal(current.state)) throw new Error('Provider input id is already terminal');
++      return true;
++    }
++    if (current && !providerTurnTerminal(current.state)) throw new Error('provider_turn_busy');
++    await publishProviderTurn(entry, { inputId, state: 'admitted' });
++    return true;
++  });
++}
++
++async function activateProviderTurnInQueue(entry: OpenSession, expectedInputId?: string | null): Promise<boolean> {
++  if (entry.summary.providerPolicy?.backgroundWork !== 'disabled') return false;
++  const current = entry.summary.currentProviderTurn;
++  if (!current || current.state !== 'admitted' || current.turnId || (expectedInputId && current.inputId !== expectedInputId)) return false;
++  const turnId = entry.summary.activeTurnId;
++  if (!turnId) return false;
++  const turn = entry.summary.timelineTurns?.[turnId];
++  if (!turn || turn.endOrigin !== undefined || !turn.questionId) return false;
++  const user = [...entry.messages.values()].find((candidate): candidate is MessageEvent =>
++    candidate.kind === 'user_message' && candidate.inputId === current.inputId && candidate.inputDelivery === 'confirmed');
++  if (!user?.messageId || user.messageId !== turn.questionId) return false;
++  await publishProviderTurn(entry, { ...current, state: 'active', turnId });
++  return true;
++}
++
++export async function activateProviderTurn(sessionId: string, inputId: string | null): Promise<boolean> {
++  const entry = await ensureOpen(sessionId);
++  return enqueueSessionOperation(entry, 'provider turn activation', () => activateProviderTurnInQueue(entry, inputId));
++}
++
++export async function providerTurnDrainToken(sessionId: string, conversationId: string, turnId: string): Promise<string | null> {
++  const entry = await ensureOpen(sessionId);
++  return enqueueSessionOperation(entry, 'provider drain probe', async () => {
++    const current = entry.summary.currentProviderTurn;
++    if (entry.summary.providerPolicy?.backgroundWork !== 'disabled' || entry.summary.conversationId !== conversationId ||
++        !current || current.turnId !== turnId || !['closing', 'drained'].includes(current.state) ||
++        !current.closingOutcome || !current.terminalSeq) return null;
++    if (current.drainToken) return current.drainToken;
++    if (current.state !== 'closing') return null;
++    const drainToken = randomUUID();
++    await publishProviderTurn(entry, { ...current, drainToken });
++    return drainToken;
++  });
++}
++
++export async function markProviderBrowserDrained(
++  sessionId: string, conversationId: string, turnId: string, drainToken: string
++): Promise<boolean> {
++  const entry = await ensureOpen(sessionId);
++  return enqueueSessionOperation(entry, 'provider browser high-water', async () => {
++    const current = entry.summary.currentProviderTurn;
++    if (entry.summary.providerPolicy?.backgroundWork !== 'disabled' || entry.summary.conversationId !== conversationId ||
++        !current || current.turnId !== turnId || current.drainToken !== drainToken) return false;
++    if (current.state === 'drained') return current.browserDrained === true;
++    if (current.state !== 'closing') return false;
++    if (current.browserDrained === true) return true;
++    await publishProviderTurn(entry, { ...current, browserDrained: true });
++    return true;
++  });
++}
++
++/** Closing is durable before the recorder is allowed to expose the matching turn_end row. */
++export async function closeProviderTurn(
++  sessionId: string,
++  turnId: string,
++  outcome: Exclude<TurnOutcome, 'stalled' | 'unknown'>
++): Promise<boolean> {
++  const entry = await ensureOpen(sessionId);
++  return enqueueSessionOperation(entry, 'provider turn closing fence', async () => {
++    if (entry.summary.providerPolicy?.backgroundWork !== 'disabled') return false;
++    let current = entry.summary.currentProviderTurn;
++    if (!current || providerTurnTerminal(current.state)) return false;
++    // A terminal row may be in the same browser batch that first gave us exact delivery proof.
++    // Re-run the exact question/input join while the turn is still open, but never bind closing
++    // from "whatever turn just ended".
++    if (current.state === 'admitted') {
++      await activateProviderTurnInQueue(entry, current.inputId);
++      current = entry.summary.currentProviderTurn;
++    }
++    if (!current || !current.turnId || current.turnId !== turnId || !['active', 'closing'].includes(current.state)) return false;
++    if (current.state === 'closing') {
++      if (current.closingOutcome && current.closingOutcome !== outcome) {
++        await publishProviderTurn(entry, { ...current, state: 'broken' });
++        return false;
++      }
++      if (!current.closingOutcome || !current.drainToken) {
++        await publishProviderTurn(entry, { ...current, closingOutcome: outcome, drainToken: current.drainToken ?? randomUUID() });
++      }
++      return true;
++    }
++    await publishProviderTurn(entry, {
++      ...current,
++      state: 'closing',
++      closingOutcome: outcome,
++      drainToken: current.drainToken ?? randomUUID()
++    });
++    return true;
++  });
++}
++
++/** Records the exact durable turn_end that followed the closing fence; probe cannot precede it. */
++export async function markProviderTurnEndRecorded(
++  sessionId: string,
++  turnId: string,
++  outcome: Exclude<TurnOutcome, 'stalled' | 'unknown'>,
++  seq: number
++): Promise<boolean> {
++  if (!Number.isSafeInteger(seq) || seq < 1) return false;
++  const entry = await ensureOpen(sessionId);
++  return enqueueSessionOperation(entry, 'provider terminal receipt', async () => {
++    const current = entry.summary.currentProviderTurn;
++    if (entry.summary.providerPolicy?.backgroundWork !== 'disabled' || !current || current.state !== 'closing' ||
++        current.turnId !== turnId || current.closingOutcome !== outcome) return false;
++    const exact = entry.tail.find(event => event.seq === seq && event.kind === 'turn_end' &&
++      event.turnId === turnId && event.outcome === outcome);
++    if (!exact) {
++      await publishProviderTurn(entry, { ...current, state: 'broken' });
++      return false;
++    }
++    if (current.terminalSeq) return true;
++    await publishProviderTurn(entry, { ...current, terminalSeq: seq });
++    return true;
++  });
++}
++
++export async function markProviderInputNotSent(sessionId: string, inputId: string): Promise<void> {
++  const entry = await ensureOpen(sessionId);
++  await enqueueSessionOperation(entry, 'provider input not-sent', async () => {
++    if (entry.summary.providerPolicy?.backgroundWork !== 'disabled') return;
++    const current = entry.summary.currentProviderTurn;
++    if (!current || current.inputId !== inputId || current.state === 'drained' || current.state === 'broken') return;
++    if (current.state === 'active' || current.state === 'closing' || current.turnId) return;
++    await publishProviderTurn(entry, { ...current, state: 'not_sent' });
++  });
++}
++
++export type ProviderEffectAdmission = 'ordinary' | 'admitted' | 'refused';
++
++/**
++ * Serialized on the same session queue as closing. Whichever operation wins the queue defines
++ * admission: an allowed handler may finish after closing; a call that loses this race never runs.
++ */
++export async function admitProviderEffect(conversationId: string | null, sessionIdHint: string | null): Promise<ProviderEffectAdmission> {
++  if (!conversationId) return 'ordinary';
++  const summary = sessionIdHint ? await getSession(sessionIdHint)
++    : await findSessionByConversation(conversationId, { requireUnique: true });
++  if (!summary || summary.providerPolicy?.backgroundWork !== 'disabled') return 'ordinary';
++  if (summary.conversationId !== conversationId) return 'refused';
++  const entry = await ensureOpen(summary.id);
++  return enqueueSessionOperation(entry, 'provider effect admission', async () => {
++    if (entry.summary.conversationId !== conversationId || entry.summary.providerPolicy?.backgroundWork !== 'disabled') return 'refused';
++    const current = entry.summary.currentProviderTurn;
++    return current && (current.state === 'admitted' || current.state === 'active') ? 'admitted' : 'refused';
++  });
++}
++
++/** Unidentified calls fail closed while any provider turn could still own them. */
++export async function providerTurnFenceActive(): Promise<boolean> {
++  const sessions = await indexedSessions();
++  return sessions.some(session => session.providerPolicy?.backgroundWork === 'disabled' &&
++    !!session.currentProviderTurn && !providerTurnTerminal(session.currentProviderTurn.state));
++}
++
+ /**
+  * Serializes an external durable policy mutation against session ownership changes.
+  *
+@@ -566,6 +852,8 @@ export async function createSession(options: {
+   titleSource?: SessionSummary['titleSource'];
+   conversationId?: string | null;
+   origin?: SessionOrigin | null;
++  providerPolicy?: SessionSummary['providerPolicy'];
++  currentProviderTurn?: SessionSummary['currentProviderTurn'];
+ }): Promise<SessionSummary> {
+   const id = options.reservedId ?? `${new Date().toISOString().slice(0, 10)}-${randomUUID().slice(0, 8)}`;
+   assertSessionId(id);
+@@ -573,11 +861,19 @@ export async function createSession(options: {
+     const existing = await getSession(id);
+     if (existing) {
+       if (existing.origin?.kind !== 'desktop') throw new Error('Reserved opening session belongs to different work');
++      if ((existing.providerPolicy?.backgroundWork ?? null) !== (options.providerPolicy?.backgroundWork ?? null)) {
++        throw new Error('Reserved opening session has different provider policy');
++      }
++      if (options.currentProviderTurn && existing.currentProviderTurn?.inputId !== options.currentProviderTurn.inputId) {
++        throw new Error('Reserved opening session has different provider turn');
++      }
+       return existing;
+     }
+   }
+   const summary = emptySummary(id, options.title?.trim() || 'ChatGPT session', options.conversationId ?? null);
+   summary.origin = options.origin ?? null;
++  if (options.providerPolicy) summary.providerPolicy = { ...options.providerPolicy };
++  if (options.currentProviderTurn) summary.currentProviderTurn = { ...options.currentProviderTurn };
+   if (options.titleSource) summary.titleSource = options.titleSource;
+   if (options.origin?.fromSessionId) {
+     const source = await getSession(options.origin.fromSessionId);
+@@ -607,6 +903,7 @@ export async function createSession(options: {
+     await fs.writeFile(path.join(sessionDir(id), 'messages.json'), '{}', { flag: 'wx' }).catch(error => {
+       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+     });
++    await writeProviderState(entry.summary);
+     await writeMeta(entry);
+     publishAttachmentSummary(entry.summary);
+   } catch (error) {
+@@ -963,7 +1260,42 @@ async function readDurableSnapshot(id: string): Promise<DurableSessionSnapshot |
+     for (const event of messages.values()) messageSeq = Math.max(messageSeq, event.seq);
+     const journalSeq = await lastSeqOnDisk(id);
+     const historySeq = Math.max(journalSeq, messageSeq);
+-    const checkpoint = await readMetaCheckpoint(id, historySeq);
++    let checkpoint = await readMetaCheckpoint(id, historySeq);
++    const providerState = await readProviderState(id);
++    let providerRepaired = false;
++    if (providerState) {
++      if (!checkpoint && historySeq === 0) {
++        throw new Error(`Session ${id} provider metadata is unavailable; refusing to reconstruct policy-owned state`);
++      }
++      if (checkpoint) {
++        const current = checkpoint.summary;
++        const checkpointTurn = current.currentProviderTurn;
++        const durableTurn = providerState.currentProviderTurn;
++        const markerAdvancedSidecar = checkpointTurn?.state === 'drained' && durableTurn?.state === 'closing' &&
++          checkpointTurn.inputId === durableTurn.inputId && checkpointTurn.turnId === durableTurn.turnId &&
++          checkpointTurn.drainedSeq !== undefined && checkpointTurn.drainedSeq <= historySeq;
++        const samePolicy = current.providerPolicy?.backgroundWork === 'disabled';
++        const sameTurn = JSON.stringify(checkpointTurn ?? null) === JSON.stringify(durableTurn ?? null);
++        if (markerAdvancedSidecar) {
++          await writeProviderState(current);
++          providerRepaired = true;
++        } else if (!samePolicy || !sameTurn) {
++          checkpoint = { ...checkpoint, summary: { ...current, providerPolicy: { backgroundWork: 'disabled' },
++            ...(durableTurn ? { currentProviderTurn: { ...durableTurn } } : { currentProviderTurn: undefined }) } };
++          providerRepaired = true;
++        }
++      }
++    } else if (checkpoint?.summary.providerPolicy !== undefined || checkpoint?.summary.currentProviderTurn !== undefined) {
++      throw new Error(`Session ${id} provider state sidecar is missing; refusing to drop provider policy`);
++    }
++    // A closing fence can outlive the process that knew which effects it had admitted. If the
++    // checkpoint already covers the durable high-water and no turn_drained marker advanced it,
++    // silence is not recovery proof: quarantine the provider session before any new input.
++    if (providerState?.currentProviderTurn?.state === 'closing' && checkpoint?.historySeq === historySeq && checkpoint.summary.currentProviderTurn?.state === 'closing') {
++      checkpoint = { ...checkpoint, summary: { ...checkpoint.summary, currentProviderTurn: { ...checkpoint.summary.currentProviderTurn, state: 'broken' } } };
++      await writeProviderState(checkpoint.summary);
++      providerRepaired = true;
++    }
+     const titleRepaired = checkpoint ? refreshUserTitle(checkpoint.summary, messages.values()) : false;
+ 
+     // A pre-taxonomy checkpoint can have a current watermark but stale outcome classification.
+@@ -980,7 +1312,7 @@ async function readDurableSnapshot(id: string): Promise<DurableSessionSnapshot |
+     ) {
+       // A successful no-op migration is still a completed migration. Without this stamp,
+       // every launch rereads all old transcripts that happened to contain no aliases.
+-      const migrated = !checkpoint.canonicalProjectionCurrent || titleRepaired;
++      const migrated = !checkpoint.canonicalProjectionCurrent || titleRepaired || providerRepaired;
+       if (migrated) await writeSummary(checkpoint.summary, historySeq);
+       return { summary: checkpoint.summary, messages, historySeq, reconciled: migrated };
+     }
+@@ -1003,7 +1335,21 @@ async function readDurableSnapshot(id: string): Promise<DurableSessionSnapshot |
+     }
+     if (!checkpoint && historySeq === 0) return null;
+ 
+-    const summary = await rebuildSummaryFromHistory(id, messages, checkpoint?.summary ?? null, historySeq, checkpoint?.historySeq === historySeq, !!checkpoint && !checkpoint.tokenEstimateCurrent);
++    let summary = await rebuildSummaryFromHistory(id, messages, checkpoint?.summary ?? null, historySeq, checkpoint?.historySeq === historySeq, !!checkpoint && !checkpoint.tokenEstimateCurrent);
++    if (providerState) {
++      const rebuiltTurn = summary.currentProviderTurn;
++      const durableTurn = providerState.currentProviderTurn;
++      const markerAdvancedClosing = rebuiltTurn?.state === 'drained' && durableTurn?.state === 'closing' &&
++        rebuiltTurn.inputId === durableTurn.inputId && rebuiltTurn.turnId === durableTurn.turnId;
++      const unrecoverableClosing = durableTurn?.state === 'closing' && !markerAdvancedClosing;
++      const recoveredTurn = markerAdvancedClosing ? rebuiltTurn
++        : unrecoverableClosing ? { ...durableTurn, state: 'broken' as const }
++        : durableTurn;
++      summary = { ...summary, providerPolicy: { backgroundWork: 'disabled' },
++        ...(recoveredTurn ? { currentProviderTurn: { ...recoveredTurn } } : { currentProviderTurn: undefined }) };
++      if (markerAdvancedClosing || unrecoverableClosing) await writeProviderState(summary);
++      await writeSummary(summary, historySeq);
++    }
+     return { summary, messages, historySeq, reconciled: true };
+   })();
+   reconciling.set(id, work);
+@@ -1120,6 +1466,11 @@ function applyToSummary(summary: SessionSummary, event: SessionEvent): void {
+     summary.lastTurnOutcome = event.outcome;
+     summary.lastTurnEndAt = Math.max(summary.lastTurnEndAt ?? 0, event.time);
+   }
++  if (event.kind === 'turn_drained' && summary.currentProviderTurn?.inputId === event.inputId &&
++      (!summary.currentProviderTurn.turnId || summary.currentProviderTurn.turnId === event.turnId)) {
++    summary.currentProviderTurn = { ...summary.currentProviderTurn, state: 'drained', turnId: event.turnId,
++      browserDrained: true, drainedSeq: event.seq, finalAssistantSeq: event.finalAssistantSeq };
++  }
+   if (event.kind === 'turn_start') {
+     summary.activeTurnId = event.turnId ?? `seq-${event.seq}`;
+     if (summary.finishTurn?.turnId !== summary.activeTurnId) summary.finishTurn = {
+@@ -1178,7 +1529,7 @@ export function automaticCompactionAllowed(summary?: SessionSummary | null): boo
+   const config = getConfig();
+   const selected = summary?.selectedModel;
+   // The selected model owns this exemption; Infinite Astra with Sol still compacts.
+-  return config.compaction.auto &&
++  return summary?.providerPolicy?.backgroundWork !== 'disabled' && config.compaction.auto &&
+     !(selected?.conversationId === summary?.conversationId && isProModel(selected?.model, selected?.reasoningEffort));
+ }
+ 
+@@ -1237,15 +1588,9 @@ export async function refuseAutomaticCompactionNow(id: string, conversationId: s
+  * server both feed this store and their clocks are the same clock, but events can
+  * arrive out of order when the browser batches its observations.
+  */
+-export function appendEvent(sessionId: string, event: NewSessionEvent): Promise<SessionEvent> {
+-  return ensureOpen(sessionId).then((entry) => {
+-    // Sequence assignment, durable append and projection update are one serial operation.
+-    // The previous implementation incremented nextSeq and mutated the summary *before* the
+-    // append succeeded. A disk failure therefore created a permanent seq gap and could even
+-    // persist meta.json claiming events/tool calls/tokens that never existed in events.jsonl.
+-    // Keep the append-only journal authoritative: nothing in memory advances until the line
+-    // is on disk.
+-    const write = entry.queue.then(async () => {
++async function appendEventInQueue(entry: OpenSession, sessionId: string, event: NewSessionEvent): Promise<SessionEvent> {
++      const eventTurnId = 'turnId' in event && typeof event.turnId === 'string' ? event.turnId : null;
++      await rejectSealedProviderTurnMutation(entry, eventTurnId, event.kind);
+       let admitted = event;
+       if (event.kind === 'tool_call') {
+         const denied = deniedAssetIds(sessionId, event.call.assets);
+@@ -1293,16 +1638,66 @@ export function appendEvent(sessionId: string, event: NewSessionEvent): Promise<
+       }
+       applyToSummary(entry.summary, full);
+       entry.historySeq = full.seq;
++      if (full.kind === 'turn_start') await activateProviderTurnInQueue(entry);
+       scheduleMeta(entry);
+       return full;
+-    });
+-    entry.queue = write.then(
+-      () => undefined,
+-      (err: Error) => {
+-        logError(`session append failed: ${err.message}`);
++}
++
++export function appendEvent(sessionId: string, event: NewSessionEvent): Promise<SessionEvent> {
++  return ensureOpen(sessionId).then((entry) => enqueueSessionOperation(entry, 'append', () => appendEventInQueue(entry, sessionId, event)));
++}
++
++/**
++ * Appends the provider high-water marker under the session queue and then persists the drained
++ * state. If the process crashes after the marker append, history reconstruction can replay the
++ * marker and the next finalize attempt repairs the sidecar without inventing a second marker.
++ */
++export async function finalizeProviderTurnDrain(
++  sessionId: string,
++  conversationId: string,
++  turnId: string
++): Promise<Extract<SessionEvent, { kind: 'turn_drained' }> | null> {
++  const snapshot = await getSession(sessionId);
++  const snapshotTurn = snapshot?.currentProviderTurn;
++  const snapshotOutcome = snapshotTurn?.closingOutcome;
++  const snapshotTerminalSeq = snapshotTurn?.terminalSeq;
++  const completed = snapshotOutcome === 'completed' && snapshotTerminalSeq
++    ? await readCompletedFinal(sessionId, conversationId, turnId)
++    : null;
++  const entry = await ensureOpen(sessionId);
++  return enqueueSessionOperation(entry, 'provider turn drain', async () => {
++    const current = entry.summary.currentProviderTurn;
++    if (entry.summary.providerPolicy?.backgroundWork !== 'disabled' || entry.summary.conversationId !== conversationId ||
++        !current || current.turnId !== turnId) return null;
++
++    const existing = entry.tail.findLast((event): event is Extract<SessionEvent, { kind: 'turn_drained' }> =>
++      event.kind === 'turn_drained' && event.turnId === turnId && event.inputId === current.inputId);
++    if (existing) {
++      if (current.state !== 'drained' || current.browserDrained !== true || current.drainedSeq !== existing.seq ||
++          current.finalAssistantSeq !== existing.finalAssistantSeq) {
++        await publishProviderTurn(entry, { ...current, state: 'drained', browserDrained: true,
++          drainedSeq: existing.seq, finalAssistantSeq: existing.finalAssistantSeq });
+       }
+-    );
+-    return write;
++      return existing;
++    }
++    if (current.state !== 'closing' || current.browserDrained !== true || !current.closingOutcome || !current.terminalSeq ||
++        current.closingOutcome !== snapshotOutcome || current.terminalSeq !== snapshotTerminalSeq) return null;
++    if (current.closingOutcome === 'completed' && !completed) return null;
++
++    const canonical = completed ? entry.messages.get(`assistant_message\u0000${completed.messageId}`) : undefined;
++    const finalAssistantSeq = canonical?.kind === 'assistant_message' && canonical.final === true &&
++      (!canonical.turnId || canonical.turnId === turnId ||
++        responseTurnId(entry.summary.timelineTurns, canonical.turnId) === responseTurnId(entry.summary.timelineTurns, turnId))
++      ? canonical.seq : null;
++    if (current.closingOutcome === 'completed' && finalAssistantSeq === null) return null;
++    const seq = entry.nextSeq;
++    const marker = await appendEventInQueue(entry, sessionId, {
++      time: Date.now(), source: 'app', kind: 'turn_drained', turnId, inputId: current.inputId,
++      highWaterSeq: seq, finalAssistantSeq
++    });
++    if (marker.kind !== 'turn_drained' || marker.seq !== marker.highWaterSeq) throw new Error('Provider drain high-water mismatch');
++    await publishProviderTurn(entry, { ...current, state: 'drained', drainedSeq: marker.seq, finalAssistantSeq });
++    return marker;
+   });
+ }
+ 
+@@ -1452,6 +1847,7 @@ export function upsertMessageEvent(
+       ) {
+         return { event: previous, changed: false, contentChanged: false };
+       }
++      await rejectSealedProviderTurnMutation(entry, settledTurnId, nextEvent.kind);
+       const full = {
+         ...nextEvent,
+         // Cursor revisions publish richer markup/identity without manufacturing work.
+@@ -1512,6 +1908,7 @@ export function upsertMessageEvent(
+         if (full.agent && !entry.summary.agents.includes(full.agent)) entry.summary.agents.push(full.agent);
+       }
+       entry.historySeq = full.seq;
++      if (full.kind === 'user_message' && full.inputDelivery === 'confirmed') await activateProviderTurnInQueue(entry, full.inputId ?? null);
+       scheduleMeta(entry);
+       return { event: full, changed: true, contentChanged: !sameMessage };
+     });
+@@ -1600,6 +1997,7 @@ export function upsertNativeImageEvent(
+           previous.asset?.bytes === next.asset?.bytes;
+         if (unchanged) return { event: previous, changed: false, accepted: true };
+       }
++      await rejectSealedProviderTurnMutation(entry, previous?.turnId ?? next.turnId, 'native_image');
+       const full: NativeImageEvent = {
+         ...next,
+         origin: previous?.origin ?? previous?.seq ?? entry.nextSeq,
+@@ -1635,6 +2033,7 @@ export async function recordProcessCall(sessionId: string, event: Omit<Extract<S
+   await enqueueSessionOperation(entry, 'process call', async () => {
+     const key = messageKey({ ...event, seq: 0 })!;
+     if (entry.messages.has(key)) throw new Error('Process call identity already recorded');
++    await rejectSealedProviderTurnMutation(entry, event.turnId, 'tool_call');
+     const denied = deniedAssetIds(sessionId, event.call.assets);
+     const full = {
+       ...event,
+@@ -1664,6 +2063,7 @@ export async function completeProcessCall(sessionId: string, callId: string, com
+     const key = `tool_call\u0000${callId}`;
+     const previous = entry.messages.get(key);
+     if (previous?.kind !== 'tool_call' || !previous.call.process || previous.call.process.completedAt !== undefined) return;
++    await rejectSealedProviderTurnMutation(entry, previous.turnId, 'tool_call_completion');
+     const { exitCode } = completion;
+     const failed = exitCode !== null && exitCode !== 0 && completion.benignExit !== true;
+     const full: Extract<SessionEvent, { kind: 'tool_call' }> = {
+@@ -2493,6 +2893,11 @@ function normalizeSummary(id: string, raw: string): MetaCheckpoint | null {
+         : null;
+     const { [META_HISTORY_SEQ]: _historySeq, [META_CANONICAL_PROJECTION]: canonicalProjection, [META_TOKEN_ESTIMATE]: tokenEstimate, ...publicFields } = parsed;
+     const publicSummary = publicFields as SessionSummary;
++    if (publicSummary.providerPolicy !== undefined) {
++      const policy = publicSummary.providerPolicy as unknown;
++      if (!policy || typeof policy !== 'object' || Array.isArray(policy) ||
++          (policy as { backgroundWork?: unknown }).backgroundWork !== 'disabled' || Object.keys(policy).length !== 1) return null;
++    }
+     if (publicSummary.retiredChatAt !== undefined) {
+       const retired = publicSummary.retiredChatAt;
+       publicSummary.retiredChatAt = retired && typeof retired === 'object' && !Array.isArray(retired)
+@@ -4008,6 +4413,7 @@ async function retireSessionAssets(sessionId: string, images: ReadonlySet<string
+       }
+     }
+     for (const [key, retired] of rewritten) {
++      await rejectSealedProviderTurnMutation(entry, retired.turnId, `storage_cleanup:${retired.kind}`);
+       const full = { ...retired, origin: retired.origin ?? retired.seq, seq: entry.nextSeq } as CanonicalEvent;
+       await writeCanonicalMessage(sessionId, key, full);
+       entry.messages.set(key, full);
+diff --git a/src/renderer/chat.ts b/src/renderer/chat.ts
+index ca4b8dc3..32bdc330 100644
+--- a/src/renderer/chat.ts
++++ b/src/renderer/chat.ts
+@@ -3565,6 +3565,10 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
+     }
+     case 'turn_start':
+       return el('p', 'meta', () => event.detail ? t("Turn reopened — {0}", [event.detail]) : t("Turn started"));
++    case 'turn_drained':
++      // Provider high-water is control metadata, not a new user-visible transcript event. Reuse
++      // the existing localized completed-turn wording rather than exposing provider internals.
++      return el('p', 'meta', () => t("Turn {0}{1}", [t(TURN_OUTCOME_LABELS.completed), '']));
+     case 'turn_end': {
+       if (stoppedTurnEnd(event, context?.history ?? events)) {
+         const line = el('p', 'meta is-progress thinking-line turn-stopped');
+diff --git a/src/shared/control-api.ts b/src/shared/control-api.ts
+index 9f3246e3..2d36b1b2 100644
+--- a/src/shared/control-api.ts
++++ b/src/shared/control-api.ts
+@@ -7,6 +7,13 @@
+  * URLs, tunnel ids, plugin sources and config values) are deliberately absent, not masked.
+  */
+ export const CONTROL_API_PROTOCOL = 1;
++export const CONTROL_API_APP = 'chat-on-steroids';
++export const CONTROL_API_PROVIDER_FEATURES = {
++  'provider-project-resolve-v1': 1,
++  'provider-assistant-content-v1': 1,
++  'provider-session-policy-v1': 1,
++  'provider-turn-drain-v1': 1
++} as const;
+ 
+ /** Listed in every health reply, so a caller learns what this build serves without guessing. */
+ export const CONTROL_API_ROUTES = [
+@@ -16,6 +23,8 @@ export const CONTROL_API_ROUTES = [
+   '/v1/sessions/{id}',
+   '/v1/sessions/{id}/events',
+   '/v1/sessions/{id}/events/stream',
++  '/v1/sessions/{id}/events/{seq}/assistant-content',
++  '/v1/projects/resolve',
+   '/v1/inputs',
+   '/v1/agents',
+   '/v1/workers/{ownerId}',
+@@ -43,9 +52,12 @@ export interface ControlApiEndpoint {
+ export interface ControlApiHealth {
+   ok: true;
+   protocol: number;
++  app: typeof CONTROL_API_APP;
+   routes: string[];
+   /** Whether the action routes are being served right now, and which ones this build has. */
+   actions: { enabled: boolean; routes: string[] };
++  features: Record<keyof typeof CONTROL_API_PROVIDER_FEATURES, 1>;
++  providerExtension: { apiVersion: 1; buildId: string };
+   pid: number;
+   appVersion: string;
+   /** When this app process started. */
+@@ -104,11 +116,39 @@ export interface ControlApiText {
+   truncated: boolean;
+ }
+ 
++export interface ControlApiResolvedProject {
++  projectId: string;
++  name: string;
++  canonicalPath: string;
++}
++
++export interface ControlApiAssistantContent {
++  sessionId: string;
++  seq: number;
++  field: 'assistantText';
++  /** UTF-16 code-unit offset, matching JavaScript String#slice. */
++  offset: number;
++  text: string;
++  /** UTF-16 code-unit length after controller credential redaction. */
++  totalLength: number;
++  complete: boolean;
++}
++
+ export interface ControlApiSession {
+   id: string;
+   title: string;
+   conversationId: string | null;
+   projectId: string | null;
++  /** Safe provider-policy attestation. Absence means this is not a provider-policy session. */
++  providerPolicy?: { backgroundWork: 'disabled'; enforced: true };
++  /** Safe lifecycle projection; never exposes prompt or transcript content. */
++  providerTurn?: {
++    inputId: string;
++    state: 'admitted' | 'active' | 'closing' | 'drained' | 'not_sent' | 'broken';
++    turnId: string | null;
++    drainedSeq: number | null;
++    finalAssistantSeq: number | null;
++  };
+   startedAt: number;
+   updatedAt: number;
+   endedAt: number | null;
+@@ -247,6 +287,9 @@ export type ControlApiEvent = {
+   title?: string;
+   /** `turn_start`, `turn_end`, `chat_error`. */
+   outcome?: string;
++  /** `turn_drained`. */
++  highWaterSeq?: number;
++  finalAssistantSeq?: number | null;
+   detail?: string;
+   reason?: string;
+   recoverable?: boolean;
+diff --git a/src/shared/session.ts b/src/shared/session.ts
+index e17dcbc5..3c377162 100644
+--- a/src/shared/session.ts
++++ b/src/shared/session.ts
+@@ -492,6 +492,13 @@ export type SessionEvent =
+   | (BaseEvent & { kind: 'turn_end'; outcome: TurnOutcome; detail?: string; reason?: 'thinking_failed'; providerMessageId?: string;
+       /** The user sent a message into this running answer and ChatGPT carried the response on into the next turn (#1301). */
+       continued?: true })
++  /**
++   * Provider-only terminal high-water. It is appended after the exact turn is closing, all
++   * effects admitted before that fence have settled, and their recorder work is durable.
++   * `highWaterSeq` is deliberately the marker's own `seq`: no provider-visible event for this
++   * exact turn/input may be admitted after it.
++   */
++  | (BaseEvent & { kind: 'turn_drained'; turnId: string; inputId: string; highWaterSeq: number; finalAssistantSeq: number | null })
+   /**
+    * `retryAt` is the first time ChatGPT said a blocking history limit may be retried, kept for the
+    * timeline to show. The live hold follows each newer deadline; this one is never an authority.
+@@ -659,6 +666,26 @@ export interface SessionSummary {
+   selectedModel?: { conversationId: string; model: string; observedAt: number; reasoningEffort?: ReasoningEffort };
+   /** Explicit local project; durable across frontend conversation replacement. */
+   projectId?: string;
++  /** Provider-created session policy. Presence is immutable for the lifetime of this session. */
++  providerPolicy?: { backgroundWork: 'disabled' };
++  /** Durable owner for the one provider turn this v1 session may have in flight. */
++  currentProviderTurn?: {
++    inputId: string;
++    state: 'admitted' | 'active' | 'closing' | 'drained' | 'not_sent' | 'broken';
++    turnId?: string;
++    /** Exact native terminal class that established the closing fence. Unknown/stalled are never proof. */
++    closingOutcome?: Exclude<TurnOutcome, 'stalled' | 'unknown'>;
++    /** Durable sequence of the matching native turn_end row; probe is forbidden until this exists. */
++    terminalSeq?: number;
++    /** Browser transcript batches already admitted when the closing fence was established. */
++    closingObservationBatch?: number;
++    /** Opaque generation minted when this exact turn first enters closing. */
++    drainToken?: string;
++    /** The paired extension proved a fresh terminal and drained this conversation's journal to zero. */
++    browserDrained?: true;
++    drainedSeq?: number;
++    finalAssistantSeq?: number | null;
++  };
+   id: string;
+   title: string;
+   /**
+diff --git a/test/content-script.test.ts b/test/content-script.test.ts
+index 23d998c5..9ec1e9ba 100644
+--- a/test/content-script.test.ts
++++ b/test/content-script.test.ts
+@@ -4624,6 +4624,219 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+     ]);
+   });
+ 
++  it('fences the exact provider Fiber turn after two-phase drain without suppressing a newer turn', async () => {
++    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
++    const drainToken = 'provider-drain-content-token';
++    const phases: string[] = [];
++    live = await harness(`https://chatgpt.com/c/${conversationId}`, {
++      provider_turn_drain_ready: message => {
++        phases.push(message.phase);
++        return message.phase === 'probe'
++          ? { ok: true, data: { ok: true, applicable: true, drainToken, state: 'closing' } }
++          : { ok: true, data: { ok: true, applicable: true, drainToken, state: 'drained' } };
++      }
++    });
++
++    startGenerating(live.document);
++    const oldSection = assistantTurn(live.document, 'provider-page-turn', []);
++    live.hook.observe();
++    await settle();
++    const localTurn = emitted(live.sent, 'turn_start').at(-1)!.event.turnId as string;
++    let oldDescriptor: Record<string, any> = {
++      turnId: 'provider-page-turn', conversationId, endMessageId: 'provider-final-message', calls: [], activities: [],
++      messages: [{ messageId: 'provider-final-message', stable: true, rawText: 'Authoritative final.',
++        renderedHtml: '<p>Authoritative final.</p>' }]
++    };
++    prose(live.document, oldSection, 'provider-final-message', 'Authoritative final.');
++    let bindings: Array<{ section: HTMLElement; turn: Record<string, any> }> = [{ section: oldSection, turn: oldDescriptor }];
++    const window = live.window as any;
++    const instantTimer = window.setTimeout;
++    window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
++    const onAsk = (event: any) => {
++      if (event.data?.source !== 'clf-fiber-ask') return;
++      const token = event.data.nonce;
++      bindings.forEach(({ section }, index) => section.setAttribute('data-clf-fiber-turn', `${token}:${index}`));
++      window.dispatchEvent(new window.MessageEvent('message', {
++        data: { source: 'clf-fiber-reply', nonce: token, scanToken: token, v: fiberVersion, scanOk: true, rows: [],
++          turns: bindings.map(({ turn }, index) => ({ ...turn, index })) }, source: window
++      }));
++    };
++    window.addEventListener('message', onAsk);
++    try {
++      // One exact MAIN-world terminal scan both publishes the final and closes the local turn.
++      // The same responder stays installed for the stronger post-probe terminal revalidation.
++      await live.hook.refreshFiber();
++      await live.hook.flush();
++      await vi.waitFor(() => expect(phases).toEqual(['probe', 'commit']), { timeout: 10_000, interval: 5 });
++      expect(emitted(live.sent, 'turn_end').at(-1)?.event).toMatchObject({ turnId: localTurn, outcome: 'completed' });
++      const beforeLate = emitted(live.sent, 'assistant_message').filter(row => row.event.messageId === 'provider-final-message');
++      expect(beforeLate.at(-1)?.event).toMatchObject({ turnId: localTurn, text: 'Authoritative final.', final: true });
++
++      // The old native object changes after main has sealed its provider high-water. The exact
++      // Fiber-turn fence may update local reader bookkeeping, but it may not publish a revision.
++      oldDescriptor = { ...oldDescriptor, messages: [{ messageId: 'provider-final-message', stable: true,
++        rawText: 'Late old correction that must stay local.', renderedHtml: '<p>Late old correction that must stay local.</p>' }] };
++      bindings[0] = { section: oldSection, turn: oldDescriptor };
++      await live.hook.refreshFiber();
++      await live.hook.flush();
++      expect(emitted(live.sent, 'assistant_message').filter(row => row.event.messageId === 'provider-final-message')).toHaveLength(beforeLate.length);
++
++      // Lose the old terminal id entirely and add a brand-new call to the same exact Fiber
++      // section. The fence must follow the Fiber turn itself, not rely on observation.turnId or
++      // the final message id; otherwise this late request-owned row could cross the high-water.
++      const active = live!;
++      const lateToolRows = () => emitted(active.sent, 'tool_evidence').flatMap(row => row.event.calls || [])
++        .filter(call => call.messageId === 'provider-late-old-call');
++      oldDescriptor = { ...oldDescriptor, endMessageId: null, messages: [], calls: [{
++        messageId: 'provider-late-old-call', tool: 'api_tool', requestId: 'provider-late-old-request', answered: true
++      }] };
++      bindings[0] = { section: oldSection, turn: oldDescriptor };
++      await live.hook.refreshFiber();
++      await live.hook.flush();
++      expect(lateToolRows()).toHaveLength(0);
++
++      // A genuinely newer authored turn in the same conversation is not covered by the old
++      // terminal fence. Its streaming assistant row remains recordable.
++      stopGenerating(live.document);
++      startGenerating(live.document);
++      const nextSection = assistantTurn(live.document, 'provider-next-page-turn', []);
++      live.hook.observe();
++      await settle();
++      prose(live.document, nextSection, 'provider-next-message', 'New turn progress.');
++      bindings.push({ section: nextSection, turn: { turnId: 'provider-next-page-turn', conversationId, calls: [],
++        messages: [{ messageId: 'provider-next-message', stable: true, rawText: 'New turn progress.',
++          renderedHtml: '<p>New turn progress.</p>' }], activities: [] } });
++      await live.hook.refreshFiber();
++      await live.hook.flush();
++      expect(emitted(live.sent, 'assistant_message')).toContainEqual(expect.objectContaining({
++        event: expect.objectContaining({ messageId: 'provider-next-message', text: 'New turn progress.' })
++      }));
++    } finally {
++      window.removeEventListener('message', onAsk);
++      window.setTimeout = instantTimer;
++    }
++  });
++
++  it('never commits provider drain while an exact-turn request owner remains unresolved, even after settle timeout', async () => {
++    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
++    const drainToken = 'provider-owner-drain-token';
++    const phases: string[] = [];
++    live = await harness(`https://chatgpt.com/c/${conversationId}`, {
++      provider_turn_drain_ready: message => {
++        phases.push(message.phase);
++        return message.phase === 'probe'
++          ? { ok: true, data: { ok: true, applicable: true, drainToken, state: 'closing' } }
++          : { ok: true, data: { ok: true, applicable: true, drainToken, state: 'drained' } };
++      },
++      correlate: () => ({ ok: true, data: { conversationId, confirmed: [], conflicts: [], complete: false } })
++    });
++
++    startGenerating(live.document);
++    const section = assistantTurn(live.document, 'provider-unresolved-owner-turn', []);
++    live.hook.observe();
++    await settle();
++    prose(live.document, section, 'provider-unresolved-owner-final', 'Final waits for exact request ownership.');
++    const descriptor = {
++      turnId: 'provider-unresolved-owner-turn', conversationId, endMessageId: 'provider-unresolved-owner-final',
++      calls: [{ messageId: 'provider-unresolved-owner-call', tool: 'api_tool', requestId: 'provider-unresolved-owner-request', answered: true }],
++      messages: [{ messageId: 'provider-unresolved-owner-final', stable: true,
++        rawText: 'Final waits for exact request ownership.', renderedHtml: '<p>Final waits for exact request ownership.</p>' }],
++      activities: []
++    };
++    const window = live.window as any;
++    const instantTimer = window.setTimeout;
++    window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
++    const onAsk = (event: any) => {
++      if (event.data?.source !== 'clf-fiber-ask') return;
++      const token = event.data.nonce;
++      section.setAttribute('data-clf-fiber-turn', `${token}:0`);
++      window.dispatchEvent(new window.MessageEvent('message', {
++        data: { source: 'clf-fiber-reply', nonce: token, scanToken: token, v: fiberVersion, scanOk: true, rows: [],
++          turns: [{ ...descriptor, index: 0 }] }, source: window
++      }));
++    };
++    window.addEventListener('message', onAsk);
++    try {
++      await live.hook.refreshFiber();
++      await live.hook.flush();
++      await vi.waitFor(() => expect(phases).toContain('probe'), { timeout: 10_000, interval: 5 });
++      expect(phases).not.toContain('commit');
++      // The ordinary Fiber settle deadline is diagnostic/retry cadence only. Advancing far past
++      // it and rescanning cannot turn missing app ownership into provider high-water authority.
++      live.advance(120_000);
++      await live.hook.refreshFiber();
++      await live.hook.flush();
++      await settle();
++      expect(phases).not.toContain('commit');
++    } finally {
++      window.removeEventListener('message', onAsk);
++      window.setTimeout = instantTimer;
++    }
++  });
++
++  it('invalidates a probed provider barrier when Retry or Regenerate changes the exact terminal identity', async () => {
++    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
++    const drainToken = 'provider-regenerate-drain-token';
++    const phases: string[] = [];
++    let releaseProbe: ((value: unknown) => void) | null = null;
++    live = await harness(`https://chatgpt.com/c/${conversationId}`, {
++      provider_turn_drain_ready: message => {
++        phases.push(message.phase);
++        if (message.phase === 'probe') return new Promise(resolve => { releaseProbe = resolve; });
++        return { ok: true, data: { ok: true, applicable: true, drainToken, state: 'drained' } };
++      }
++    });
++
++    startGenerating(live.document);
++    const section = assistantTurn(live.document, 'provider-regenerate-page-turn', []);
++    live.hook.observe();
++    await settle();
++    let descriptor: Record<string, any> = {
++      turnId: 'provider-regenerate-page-turn', conversationId, endMessageId: 'provider-original-final', calls: [], activities: [],
++      messages: [{ messageId: 'provider-original-final', stable: true, rawText: 'Original final.', renderedHtml: '<p>Original final.</p>' }]
++    };
++    prose(live.document, section, 'provider-original-final', 'Original final.');
++    const window = live.window as any;
++    const instantTimer = window.setTimeout;
++    window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
++    const onAsk = (event: any) => {
++      if (event.data?.source !== 'clf-fiber-ask') return;
++      const token = event.data.nonce;
++      section.setAttribute('data-clf-fiber-turn', `${token}:0`);
++      window.dispatchEvent(new window.MessageEvent('message', {
++        data: { source: 'clf-fiber-reply', nonce: token, scanToken: token, v: fiberVersion, scanOk: true, rows: [],
++          turns: [{ ...descriptor, index: 0 }] }, source: window
++      }));
++    };
++    window.addEventListener('message', onAsk);
++    try {
++      await live.hook.refreshFiber();
++      await live.hook.flush();
++      await vi.waitFor(() => expect(releaseProbe).not.toBeNull(), { timeout: 10_000, interval: 5 });
++      expect(phases).toEqual(['probe']);
++
++      section.querySelector('[data-message-id="provider-original-final"]')?.remove();
++      prose(live.document, section, 'provider-regenerated-final', 'Regenerated final must not seal the old barrier.');
++      descriptor = { ...descriptor, endMessageId: 'provider-regenerated-final', messages: [{
++        messageId: 'provider-regenerated-final', stable: true, rawText: 'Regenerated final must not seal the old barrier.',
++        renderedHtml: '<p>Regenerated final must not seal the old barrier.</p>'
++      }] };
++      releaseProbe!({ ok: true, data: { ok: true, applicable: true, drainToken, state: 'closing' } });
++      await settle(120);
++      expect(phases).not.toContain('commit');
++
++      // The identity mismatch permanently invalidates this browser barrier. A later quiet scan
++      // cannot silently adopt the regenerated final under the already-probed provider turn.
++      await live.hook.refreshFiber();
++      await live.hook.flush();
++      await settle();
++      expect(phases).toEqual(['probe']);
++    } finally {
++      window.removeEventListener('message', onAsk);
++      window.setTimeout = instantTimer;
++    }
++  });
++
+   it.each([false, true])('records a textless image final only with exact terminal identity (%s)', async terminal => {
+     live = await harness();
+     startGenerating(live.document);
+diff --git a/test/continuation.test.ts b/test/continuation.test.ts
+index 77717289..00c51a49 100644
+--- a/test/continuation.test.ts
++++ b/test/continuation.test.ts
+@@ -151,6 +151,49 @@ async function readyContinuation(): Promise<{ sessionId: string; token: string }
+   return { sessionId: summary.id, token: opened.token };
+ }
+ 
++it('refuses automatic provider continuation while keeping manual Compact & Resume available with policy intact', async () => {
++  const summary = await createSession({ title: 'provider work', conversationId: CHAT_A, providerPolicy: { backgroundWork: 'disabled' } });
++  await expect(openContinuationNow(summary.id, CHAT_A, true)).rejects.toThrow('automatic_compaction_disabled');
++  expect(continuationForSession(summary.id)).toBeNull();
++  const manual = await openContinuationNow(summary.id, CHAT_A, false);
++  expect(manual).toMatchObject({ sessionId: summary.id, automatic: false, state: 'awaiting-summary' });
++  expect(await getSession(summary.id)).toMatchObject({ providerPolicy: { backgroundWork: 'disabled' } });
++  expect(await abortContinuationNow(manual.token, 'test cleanup')).toBe(true);
++});
++
++it('commits a manual provider continuation A to B and preserves its policy across restart', async () => {
++  const summary = await createSession({
++    title: 'provider manual resume',
++    conversationId: CHAT_A,
++    providerPolicy: { backgroundWork: 'disabled' }
++  });
++  const opened = await openContinuationNow(summary.id, CHAT_A, false);
++  expect(await attachSummary(opened.token, SAMPLE_BRIEF)).not.toBeNull();
++  expect(await claimContinuationNow(opened.token, 'provider-page-b')).not.toBeNull();
++
++  expect(await commitContinuation(opened.token, CHAT_B)).toBe(true);
++  expect(await getSession(summary.id)).toMatchObject({
++    id: summary.id,
++    conversationId: CHAT_B,
++    chatIds: [CHAT_A, CHAT_B],
++    providerPolicy: { backgroundWork: 'disabled' }
++  });
++  expect(await sessionForConversation(CHAT_B)).toBe(summary.id);
++
++  await store.flushSessions();
++  resetSessionStoreForTests();
++  initSessionStore(dir);
++
++  expect(await getSession(summary.id)).toMatchObject({
++    id: summary.id,
++    conversationId: CHAT_B,
++    chatIds: [CHAT_A, CHAT_B],
++    providerPolicy: { backgroundWork: 'disabled' }
++  });
++  expect(await sessionForConversation(CHAT_B)).toBe(summary.id);
++  await expect(openContinuationNow(summary.id, CHAT_B, true)).rejects.toThrow('automatic_compaction_disabled');
++});
++
+ describe('reopening from a saved summary (#1215)', () => {
+   /** A run that captured its brief and was then abandoned, as when chat B never opened. */
+   async function abandonedAfterCapture(): Promise<{ sessionId: string; token: string; handoffId: string }> {
+diff --git a/test/control-api-actions.test.ts b/test/control-api-actions.test.ts
+index 7a3611d1..3eee6af6 100644
+--- a/test/control-api-actions.test.ts
++++ b/test/control-api-actions.test.ts
+@@ -214,6 +214,17 @@ afterAll(async () => {
+   await removeTempDir(dir);
+ });
+ 
++describe('provider read-effect POST', () => {
++  it('does not require Allow actions and still uses the authenticated bounded read path', async () => {
++    gate.actions = false;
++    const result = await post('/v1/projects/resolve', { path: 'C:\\definitely-not-an-approved-provider-project' });
++    expect(result.status).toBe(404);
++    expect(result.body).toEqual({ error: 'project_unmapped' });
++    expect((await post('/v1/projects/resolve?x=1', { path: 'C:\\x' })).body).toMatchObject({ error: 'invalid_query' });
++    expect((await post('/v1/projects/resolve', { path: 'C:\\x', extra: true })).body).toMatchObject({ error: 'invalid_body' });
++  });
++});
++
+ describe('with actions switched off', () => {
+   it('answers every action route the same way, before reading anything, and changes nothing', async () => {
+     gate.actions = false;
+@@ -760,6 +771,29 @@ describe('starting a new chat', () => {
+     expect((await outbox()).filter((entry) => entry.id === id)).toHaveLength(1);
+   });
+ 
++  it('atomically creates an immutable background-disabled provider session and attests it on reads', async () => {
++    const { getSession } = await import('../src/main/session/store.js');
++    const id = randomUUID();
++    const request = { id, text: 'Provider-owned task', providerPolicy: { backgroundWork: 'disabled' as const } };
++    const started = await post('/v1/inputs', request);
++    expect(started.status).toBe(202);
++    expect(await getSession(id)).toMatchObject({ id, providerPolicy: { backgroundWork: 'disabled' } });
++    expect((await outbox()).find(row => row.id === id)).toMatchObject({ providerPolicy: { backgroundWork: 'disabled' } });
++    const detail = await call('GET', '/v1/sessions/' + id);
++    expect(detail.status).toBe(200);
++    expect(detail.body.session.providerPolicy).toEqual({ backgroundWork: 'disabled', enforced: true });
++
++    const replay = await post('/v1/inputs', request);
++    expect(replay.status).toBe(200);
++    expect(replay.body.replayed).toBe(true);
++    const missingPolicy = await post('/v1/inputs', { id, text: request.text });
++    expect(missingPolicy.status).toBe(409);
++    expect(missingPolicy.body.error).toBe('id_conflict');
++    const mutable = await post('/v1/inputs', { id: randomUUID(), sessionId: id, text: 'Follow-up', providerPolicy: { backgroundWork: 'disabled' } });
++    expect(mutable.status).toBe(400);
++    expect(mutable.body.error).toBe('invalid_body');
++  });
++
+   it('starts it in a project only when that project exists, and never moves an existing chat', async () => {
+     const unknown = await post('/v1/inputs', { id: randomUUID(), projectId: randomUUID(), text: 'In a project' });
+     expect(unknown.status).toBe(404);
+diff --git a/test/control-api-reads.test.ts b/test/control-api-reads.test.ts
+index 3a596847..e0deb529 100644
+--- a/test/control-api-reads.test.ts
++++ b/test/control-api-reads.test.ts
+@@ -29,7 +29,15 @@ vi.mock('electron', () => ({
+ const { initConfigPath } = await import('../src/main/config.js');
+ const { initSecretsPath } = await import('../src/main/secrets.js');
+ const { initDurableStore, flushDurable } = await import('../src/main/durable.js');
+-const { appendEvent, createSession, initSessionStore, resetSessionStoreForTests, upsertMessageEvent } = await import('../src/main/session/store.js');
++const {
++  appendEvent,
++  createSession,
++  deleteSession,
++  initSessionStore,
++  resetSessionStoreForTests,
++  upsertMessageEvent,
++  writeOverflowText
++} = await import('../src/main/session/store.js');
+ const { cancelInput, deliveryProof, enqueueInput } = await import('../src/main/session/input.js');
+ const { logInfo, logWarn, logError } = await import('../src/main/logger.js');
+ const { redactSecretText } = await import('../src/main/redaction.js');
+@@ -129,7 +137,7 @@ describe('read routes', () => {
+   it('are listed by health and need the token like every other route', async () => {
+     const health = await call('/v1/health');
+     expect(health.body.routes).toEqual([
+-      '/v1/health', '/v1/status', '/v1/sessions', '/v1/sessions/{id}', '/v1/sessions/{id}/events', '/v1/sessions/{id}/events/stream', '/v1/inputs', '/v1/agents', '/v1/workers/{ownerId}', '/v1/workers/{ownerId}/reports', '/v1/log'
++      '/v1/health', '/v1/status', '/v1/sessions', '/v1/sessions/{id}', '/v1/sessions/{id}/events', '/v1/sessions/{id}/events/stream', '/v1/sessions/{id}/events/{seq}/assistant-content', '/v1/projects/resolve', '/v1/inputs', '/v1/agents', '/v1/workers/{ownerId}', '/v1/workers/{ownerId}/reports', '/v1/log'
+     ]);
+     for (const route of ['/v1/sessions', `/v1/sessions/${sessionId}`, `/v1/sessions/${sessionId}/events`, '/v1/inputs', '/v1/agents', '/v1/log']) {
+       expect((await call(route, {})).status).toBe(401);
+@@ -500,6 +508,73 @@ describe('session events', () => {
+     for (const hidden of ['reviewAssetId', 'asset-secret', 'requestId', 'req-1', 'approximate']) expect(raw).not.toContain(hidden);
+   });
+ 
++  it('serves exact full assistant content by UTF-16 range after controller redaction', async () => {
++    const contentSession = await createSession({ title: 'Provider content range' });
++    try {
++      const face = String.fromCodePoint(0x1f600);
++      const raw = 'prefix ' + 'x'.repeat(5_000) + ' ' + apiKey + ' ' + face + ' suffix';
++      const recorded = (await upsertMessageEvent(contentSession.id, {
++        kind: 'assistant_message', source: 'extension', time: 21, messageId: 'provider-content',
++        message: text(raw), final: true, turnId: 'provider-content-turn'
++      })).event;
++      const expected = redactSecretText(raw);
++      const emoji = expected.indexOf(face);
++      expect(emoji).toBeGreaterThan(0);
++
++      const first = await call(`/v1/sessions/${contentSession.id}/events/${recorded.seq}/assistant-content?offset=0&limit=${emoji + 1}`);
++      expect(first.status).toBe(200);
++      expect(first.body).toMatchObject({ sessionId: contentSession.id, seq: recorded.seq, field: 'assistantText', offset: 0, totalLength: expected.length, complete: false });
++      expect(first.body.text).toBe(expected.slice(0, emoji));
++      expect(first.body.text).not.toContain(apiKey);
++
++      const pair = await call(`/v1/sessions/${contentSession.id}/events/${recorded.seq}/assistant-content?offset=${emoji}&limit=2`);
++      expect(pair.status).toBe(200);
++      expect(pair.body.text).toBe(face);
++      expect(pair.body.offset + pair.body.text.length).toBe(emoji + 2);
++      expect((await call(`/v1/sessions/${contentSession.id}/events/${recorded.seq}/assistant-content?offset=${emoji + 1}&limit=2`)).body).toMatchObject({ error: 'invalid_query' });
++      expect((await call(`/v1/sessions/${contentSession.id}/events/${recorded.seq}/assistant-content?offset=0&limit=1`)).body).toMatchObject({ error: 'invalid_query' });
++      expect((await call(`/v1/sessions/${contentSession.id}/events/${recorded.seq + 10_000}/assistant-content?offset=0&limit=2`)).body).toMatchObject({ error: 'event_not_found' });
++
++      const tail = await call(`/v1/sessions/${contentSession.id}/events/${recorded.seq}/assistant-content?offset=${emoji + 2}&limit=65536`);
++      expect(tail.status).toBe(200);
++      expect(tail.body.text).toBe(expected.slice(emoji + 2));
++      expect(tail.body.complete).toBe(true);
++    } finally {
++      await deleteSession(contentSession.id);
++    }
++  });
++  it('reads and redacts one spilled assistant final once across ranged chunks', async () => {
++    const contentSession = await createSession({ title: 'Provider content cached ranges' });
++    try {
++      const raw = 'prefix ' + 'z'.repeat(140_000) + ' ' + apiKey + ' tail';
++      const assetId = await writeOverflowText(contentSession.id, raw);
++      expect(assetId).toMatch(/\.txt$/);
++      const recorded = (await upsertMessageEvent(contentSession.id, {
++        kind: 'assistant_message', source: 'extension', time: 22, messageId: 'provider-content-cached',
++        message: { text: raw.slice(0, 4_000), truncated: true, chars: raw.length, assetId: assetId! },
++        final: true, turnId: 'provider-content-cached-turn'
++      })).event;
++      const expected = redactSecretText(raw);
++
++      const first = await call(`/v1/sessions/${contentSession.id}/events/${recorded.seq}/assistant-content?offset=0&limit=65536`);
++      expect(first.status).toBe(200);
++      expect(first.body.text).toBe(expected.slice(0, 65_536));
++      expect(first.body.complete).toBe(false);
++
++      // Once the exact event body has been admitted to the bounded redacted cache, later ranges
++      // must not re-read or re-redact the whole spill. Removing only this test fixture's backing
++      // asset makes that property observable without adding a production test hook.
++      await fs.rm(path.join(dir, 'sessions', contentSession.id, 'assets', assetId!), { force: true });
++      const second = await call(`/v1/sessions/${contentSession.id}/events/${recorded.seq}/assistant-content?offset=65536&limit=65536`);
++      expect(second.status).toBe(200);
++      expect(second.body.text).toBe(expected.slice(65_536, 131_072));
++      expect(second.body.text).not.toContain(apiKey);
++      expect(second.body.totalLength).toBe(expected.length);
++    } finally {
++      await deleteSession(contentSession.id);
++    }
++  });
++
+   it('exposes a position that pages through history even when a message was revised', async () => {
+     const tail = await call(`/v1/sessions/${sessionId}/events`);
+     const assistant = tail.body.events.find((event: { kind: string }) => event.kind === 'assistant_message');
+diff --git a/test/control-api.test.ts b/test/control-api.test.ts
+index 4b2f5fcd..517d7cbf 100644
+--- a/test/control-api.test.ts
++++ b/test/control-api.test.ts
+@@ -145,7 +145,7 @@ describe('local control API listener', () => {
+     const health = await request(port, '/v1/health', { headers: auth });
+     expect(health.body).toMatchObject({
+       protocol: 1,
+-      routes: ['/v1/health', '/v1/status', '/v1/sessions', '/v1/sessions/{id}', '/v1/sessions/{id}/events', '/v1/sessions/{id}/events/stream', '/v1/inputs', '/v1/agents', '/v1/workers/{ownerId}', '/v1/workers/{ownerId}/reports', '/v1/log']
++      routes: ['/v1/health', '/v1/status', '/v1/sessions', '/v1/sessions/{id}', '/v1/sessions/{id}/events', '/v1/sessions/{id}/events/stream', '/v1/sessions/{id}/events/{seq}/assistant-content', '/v1/projects/resolve', '/v1/inputs', '/v1/agents', '/v1/workers/{ownerId}', '/v1/workers/{ownerId}/reports', '/v1/log']
+     });
+   });
+ 
+diff --git a/test/exec-hints.test.ts b/test/exec-hints.test.ts
+index 58d4cf10..6a10e4e3 100644
+--- a/test/exec-hints.test.ts
++++ b/test/exec-hints.test.ts
+@@ -1246,7 +1246,7 @@ describe('a pipeline stopped early by Select-Object -First', () => {
+     expect(run(`${generator} | Select-Object -First 5 | Out-Null`)).not.toBe(0);
+     // -Wait drains instead of stopping, which is the remedy the note hands the model.
+     expect(run(`${generator} | Select-Object -First 5 -Wait | Out-Null`)).toBe(0);
+-  });
++  }, 120_000);
+ });
+ 
+ describe('git grep, which spends exit 1 on "found nothing" like every other search', () => {
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index e7145939..8d8c5389 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -4571,6 +4571,138 @@ describe('extension observation journal', () => {
+     expect(journalOf(session)).toEqual([]);
+   });
+ 
++  it('probes provider closing before fencing and drains its conversation journal before commit', async () => {
++    const conversationId = '24242424-3333-4444-8555-666666666666';
++    const drainToken = 'provider-drain-token-0001';
++    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
++    const session = new FakeStorageArea();
++    const order: string[] = [];
++    let acceptEvents = false;
++    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
++      const url = new URL(input);
++      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
++      if (url.pathname === '/events') {
++        order.push('/events');
++        return acceptEvents ? response(200, { stored: 1 }) : response(503, { error: 'temporarily_unavailable' });
++      }
++      if (url.pathname === '/provider/turn-drain-ready') {
++        const body = JSON.parse(String(init.body || '{}'));
++        order.push(`/provider/turn-drain-ready:${body.phase}`);
++        return body.phase === 'probe'
++          ? response(200, { ok: true, applicable: true, drainToken, state: 'closing' })
++          : response(200, { ok: true, applicable: true, drainToken, state: 'drained' });
++      }
++      return response(404, {});
++    });
++    const worker = loadWorker({ local, session, fetch });
++
++    await worker.send({
++      type: 'events', conversationId, entries: [{ conversationId, event: {
++        kind: 'turn_end', time: Date.now(), turnId: 'provider-turn', outcome: 'completed'
++      } }]
++    }, 64);
++    expect(journalOf(session)).toHaveLength(1);
++
++    order.length = 0;
++    const probe = await worker.send({ type: 'provider_turn_drain_ready', phase: 'probe', conversationId, turnId: 'provider-turn' }, 64);
++    expect(probe).toMatchObject({ ok: true, data: { applicable: true, drainToken } });
++    expect(order).toEqual(['/provider/turn-drain-ready:probe']);
++    expect(journalOf(session)).toHaveLength(1);
++
++    order.length = 0;
++    acceptEvents = true;
++    const commit = await worker.send({ type: 'provider_turn_drain_ready', phase: 'commit', conversationId,
++      turnId: 'provider-turn', drainToken }, 64);
++    expect(commit).toMatchObject({ ok: true, data: { applicable: true, drainToken, state: 'drained' } });
++    expect(order).toEqual(['/events', '/provider/turn-drain-ready:commit']);
++    expect(journalOf(session)).toEqual([]);
++  });
++
++  it('refuses provider commit from the probed document after that browser document is superseded', async () => {
++    const conversationId = '25252525-3333-4444-8555-666666666666';
++    const drainToken = 'provider-stale-document-token';
++    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
++    const session = new FakeStorageArea();
++    const requests: string[] = [];
++    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
++      const url = new URL(input);
++      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
++      if (url.pathname === '/provider/turn-drain-ready') {
++        const body = JSON.parse(String(init.body || '{}'));
++        requests.push(body.phase);
++        return response(200, { ok: true, applicable: true, drainToken, state: body.phase === 'probe' ? 'closing' : 'drained' });
++      }
++      return response(404, {});
++    });
++    const worker = loadWorker({ local, session, fetch });
++    const tabId = 65;
++    const oldDocument = 'document-65-0';
++    await worker.registerTab(tabId, oldDocument);
++    const probe = await worker.send({ type: 'provider_turn_drain_ready', phase: 'probe', conversationId,
++      turnId: 'provider-stale-turn' }, tabId, oldDocument);
++    expect(probe).toMatchObject({ ok: true, data: { drainToken } });
++    expect(requests).toEqual(['probe']);
++
++    await worker.navigateTab(tabId, `https://chatgpt.com/c/${conversationId}`);
++    const commit = await worker.send({ type: 'provider_turn_drain_ready', phase: 'commit', conversationId,
++      turnId: 'provider-stale-turn', drainToken }, tabId, oldDocument);
++    expect(commit).toMatchObject({ ok: false, error: 'stale_document' });
++    expect(requests).toEqual(['probe']);
++  });
++
++  it('replays the same provider commit token safely after a lost main reply', async () => {
++    const conversationId = '26262626-3333-4444-8555-666666666666';
++    const drainToken = 'provider-lost-reply-token';
++    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
++    const session = new FakeStorageArea();
++    const order: string[] = [];
++    let commitAttempts = 0;
++    let acceptEvents = false;
++    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
++      const url = new URL(input);
++      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
++      if (url.pathname === '/events') {
++        order.push('/events');
++        return acceptEvents ? response(200, { stored: 1 }) : response(503, { error: 'temporarily_unavailable' });
++      }
++      if (url.pathname === '/provider/turn-drain-ready') {
++        const body = JSON.parse(String(init.body || '{}'));
++        order.push(`/provider/turn-drain-ready:${body.phase}`);
++        if (body.phase === 'commit' && ++commitAttempts === 1) {
++          // Model the app accepting the durable token and then losing the HTTP reply. The worker
++          // has already durably emptied its journal; content retries the same token, never a new one.
++          throw new Error('simulated lost commit reply');
++        }
++        return response(200, { ok: true, applicable: true, drainToken,
++          state: body.phase === 'probe' ? 'closing' : 'drained' });
++      }
++      return response(404, {});
++    });
++    const worker = loadWorker({ local, session, fetch });
++    await worker.send({
++      type: 'events', conversationId, entries: [{ conversationId, event: {
++        kind: 'assistant_message', time: Date.now(), messageId: 'provider-lost-reply-final', text: 'Final', final: true
++      } }]
++    }, 66);
++    expect(journalOf(session)).toHaveLength(1);
++
++    order.length = 0;
++    acceptEvents = true;
++    const first = await worker.send({ type: 'provider_turn_drain_ready', phase: 'commit', conversationId,
++      turnId: 'provider-lost-reply-turn', drainToken }, 66);
++    expect(first.ok).toBe(false);
++    expect(journalOf(session)).toEqual([]);
++
++    const second = await worker.send({ type: 'provider_turn_drain_ready', phase: 'commit', conversationId,
++      turnId: 'provider-lost-reply-turn', drainToken }, 66);
++    expect(second).toMatchObject({ ok: true, data: { drainToken, state: 'drained' } });
++    expect(order).toEqual([
++      '/events',
++      '/provider/turn-drain-ready:commit',
++      '/provider/turn-drain-ready:commit'
++    ]);
++  });
++
+   it('carries the browser tab identity through Goal activity, draft and acknowledgement', async () => {
+     const conversationId = '22222222-3333-4444-5555-666666666666';
+     const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+diff --git a/test/goal.test.ts b/test/goal.test.ts
+index 6c001d39..7335c5c7 100644
+--- a/test/goal.test.ts
++++ b/test/goal.test.ts
+@@ -102,6 +102,24 @@ afterEach(() => {
+   globalThis.fetch = realFetch;
+ });
+ 
++it('refuses Goal/Loop and provider drafting for a background-disabled provider session', async () => {
++  const conversationId = 'provider-background-disabled';
++  const session = await createSession({ conversationId, providerPolicy: { backgroundWork: 'disabled' } });
++  await expect(goal.setGoalSwitchNow(conversationId, 'loop', true)).rejects.toThrow('provider_background_work_disabled');
++  await expect(goal.setGoalObjectiveNow(conversationId, 'keep working')).rejects.toThrow('provider_background_work_disabled');
++  await expect(goal.setGoalSwitchNow(conversationId, 'loop', false)).resolves.toMatchObject({ mode: 'goal' });
++  await expect(goal.setGoalObjectiveNow(conversationId, '')).resolves.toBe('');
++
++  const fetchSpy = vi.fn(async () => decision('continue', 'should never run'));
++  globalThis.fetch = fetchSpy as typeof fetch;
++  const draft = goal.startGoalDraft({ sessionId: session.id, conversationId, turnId: 'turn-provider-policy', deferStart: true });
++  expect(goal.beginGoalDraft(conversationId, draft.token)).toBe(true);
++  const done = await settled(conversationId);
++  expect(done.stage).toBe('failed');
++  expect(done.error).toContain('provider_background_work_disabled');
++  expect(fetchSpy).not.toHaveBeenCalled();
++});
++
+ it('preserves the Astra delivery preference across Goal/Loop, restart and finish-setting changes', async () => {
+   const config = (await import('../src/main/config.js')).getConfig();
+   await saveConfig({ ...config, ui: { ...config.ui, finishTool: true } });
+diff --git a/test/input-delivery-integration.test.ts b/test/input-delivery-integration.test.ts
+index 45de6f70..8f624f61 100644
+--- a/test/input-delivery-integration.test.ts
++++ b/test/input-delivery-integration.test.ts
+@@ -1677,7 +1677,7 @@ it('freezes the complete current prompt for each new chat and leaves the authore
+   const next = await input.claimBrowserInput(second.id, 'next-document', null, true);
+   expect(next?.text).toBe(prependUserPrompt('Second request', await currentCoreInstructions()));
+   expect(userPromptText(next!.text)).toBe('Second request');
+-});
++}, 120_000);
+ 
+ it.each(['off', 'goal', 'loop'] as const)('does not repeat setup in an existing chat with %s enabled', async automation => {
+   const conversationId = randomUUID();
+@@ -1722,7 +1722,7 @@ it('delivers only the selected project AGENTS.md, freezes claims across restart,
+   expect(tool.messages).toHaveLength(1);
+   expect(tool.messages[0]!.text).not.toMatch(/PROJECT_CHANGED|COS_CONTEXT/);
+   expect((await input.listInputs()).find(row => row.id === followup.id)!.deliveryText).toBe(followup.text);
+-});
++}, 120_000);
+ it.each(['finish', 'after-turn'] as const)('wakes browser delivery after a committed final makes %s input eligible', async mode => {
+   const conversationId = randomUUID();
+   const session = await createSession({ title: 'Final-boundary wake', conversationId });
+@@ -1770,7 +1770,7 @@ describe('IPC input delivery and Goal control integration', () => {
+     await input.enqueueInput(later as Parameters<typeof input.enqueueInput>[0]);
+     expect((await input.claimBrowserInput(later.id, 'later', chat.conversationId))!.text).toBe(later.text);
+     await input.cancelInput(later.id);
+-  });
++  }, 120_000);
+   it('requires an exact plugin claim and matching schema before a refresh completion', async () => {
+     await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, autoRefreshPlugins: true } });
+     const { publishPluginSurface, resetPluginRefreshForTests, setPluginRefreshTunnelGraceForTests } = await import('../src/main/plugin-refresh.js');
+diff --git a/test/kernel-desktop-identity.test.ts b/test/kernel-desktop-identity.test.ts
+index b4aae234..a5e06ca8 100644
+--- a/test/kernel-desktop-identity.test.ts
++++ b/test/kernel-desktop-identity.test.ts
+@@ -5,7 +5,9 @@ vi.mock('../src/main/session/recorder.js', async original => ({
+ }));
+ vi.mock('../src/main/session/store.js', async original => ({
+   ...await original<typeof import('../src/main/session/store.js')>(),
+-  conversationAttachment: async () => 'current'
++  conversationAttachment: async () => 'current',
++  providerTurnFenceActive: async () => false,
++  admitProviderEffect: async () => 'ordinary'
+ }));
+ import { dispatch, ok } from '../src/main/mcp/kernel.js';
+ import { currentCall } from '../src/main/mcp/call-context.js';
+diff --git a/test/kernel-identity-recovery.test.ts b/test/kernel-identity-recovery.test.ts
+index 6eba2dc8..622bbb18 100644
+--- a/test/kernel-identity-recovery.test.ts
++++ b/test/kernel-identity-recovery.test.ts
+@@ -7,7 +7,9 @@ vi.mock('../src/main/session/recorder.js', async original => ({
+   recordToolCall: fixture.record
+ }));
+ vi.mock('../src/main/session/store.js', async original => ({
+-  ...await original<typeof import('../src/main/session/store.js')>(), conversationAttachment: fixture.attachment
++  ...await original<typeof import('../src/main/session/store.js')>(), conversationAttachment: fixture.attachment,
++  providerTurnFenceActive: async () => false,
++  admitProviderEffect: async () => 'ordinary'
+ }));
+ vi.mock('../src/main/session/input.js', () => ({ offerToolInput: async () => ({ messages: [], reminder: '' }), acknowledgeToolInput: async () => {}, TOOL_INPUT_HEADER: '' }));
+ vi.mock('../src/main/session/blocked-chats.js', () => ({
+diff --git a/test/kernel-provider-turn.test.ts b/test/kernel-provider-turn.test.ts
+new file mode 100644
+index 00000000..48df5202
+--- /dev/null
++++ b/test/kernel-provider-turn.test.ts
+@@ -0,0 +1,205 @@
++import { promises as fs } from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { afterEach, beforeEach, expect, it, vi } from 'vitest';
++import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
++import { resetAgentsForTests } from '../src/main/agents.js';
++import { spawnAgentWorkers } from '../src/main/agent-admission.js';
++import { dispatch, ok } from '../src/main/mcp/kernel.js';
++import { currentCall } from '../src/main/mcp/call-context.js';
++import { observeRequestCorrelation, resetCorrelationRegistryForTests } from '../src/main/session/correlation.js';
++import { REQUEST_ID_GRACE_MS, recordChatObservations, resetRecorderForTests, tryDrainProviderTurn } from '../src/main/session/recorder.js';
++import {
++  closeProviderTurn,
++  createSession,
++  flushSessions,
++  getSession,
++  initSessionStore,
++  markProviderBrowserDrained,
++  providerTurnDrainToken,
++  readEvents,
++  resetSessionStoreForTests,
++  unsetSessionRootForTests,
++  upsertMessageEvent
++} from '../src/main/session/store.js';
++
++let dir = '';
++
++beforeEach(async () => {
++  dir = await fs.mkdtemp(path.join(os.tmpdir(), 'clf-kernel-provider-'));
++  initConfigPath(dir);
++  initSessionStore(dir);
++  await saveConfig(defaultConfig());
++  resetAgentsForTests();
++  resetCorrelationRegistryForTests();
++  resetRecorderForTests();
++});
++
++afterEach(async () => {
++  await flushSessions();
++  resetRecorderForTests();
++  resetCorrelationRegistryForTests();
++  resetAgentsForTests();
++  resetSessionStoreForTests();
++  unsetSessionRootForTests();
++  if (dir) await fs.rm(dir, { recursive: true, force: true });
++  dir = '';
++});
++
++const stored = (text: string) => ({ text, chars: text.length, truncated: false });
++
++async function activeProviderTurn() {
++  const conversationId = 'provider-kernel-chat';
++  const turnId = 'provider-kernel-turn';
++  const inputId = '11111111-2222-4333-8444-555555555555';
++  const questionId = 'provider-kernel-question';
++  const session = await createSession({
++    conversationId,
++    title: 'Provider kernel task',
++    providerPolicy: { backgroundWork: 'disabled' },
++    currentProviderTurn: { inputId, state: 'admitted' }
++  });
++  await upsertMessageEvent(session.id, {
++    time: 100,
++    source: 'app',
++    kind: 'user_message',
++    messageId: questionId,
++    inputId,
++    inputDelivery: 'confirmed',
++    message: stored('Run provider work.')
++  });
++  await recordChatObservations(conversationId, [
++    { kind: 'turn_start', time: 101, turnId }
++  ]);
++  expect(await getSession(session.id)).toMatchObject({
++    currentProviderTurn: { inputId, state: 'active', turnId }
++  });
++  return { sessionId: session.id, conversationId, turnId };
++}
++
++function prove(requestId: string, conversationId: string, sessionId: string) {
++  expect(observeRequestCorrelation({
++    requestId,
++    conversationId,
++    sessionId,
++    messageId: `${requestId}-message`,
++    tool: 'read',
++    observedAt: Date.now()
++  })).not.toBe('refused');
++}
++
++it('refuses worker admission at the broker owner for an exact provider session', async () => {
++  const owner = await activeProviderTurn();
++  await expect(spawnAgentWorkers({
++    caller: { conversationId: owner.conversationId, sessionId: owner.sessionId },
++    workers: [{ task: 'Must remain in the prime provider turn.' }]
++  }, async () => null, () => false)).rejects.toThrow('PROVIDER_BACKGROUND_WORK_DISABLED');
++});
++
++it('refuses an unproven provider call even when unattributed calls are globally allowed', async () => {
++  const cfg = defaultConfig();
++  await saveConfig({ ...cfg, multiAgent: { ...cfg.multiAgent, allowUnattributedCalls: true } });
++  await activeProviderTurn();
++
++  vi.useFakeTimers();
++  try {
++    let handlerRan = false;
++    const pending = dispatch('agents', { action: 'spawn' }, null, 'provider-unproven', 'core', async () => {
++      handlerRan = true;
++      return ok('must not run');
++    });
++    // Provider identity waits on the exact request-id proof even under the unattributed opt-in.
++    await vi.advanceTimersByTimeAsync(REQUEST_ID_GRACE_MS + 10);
++    const result = await pending;
++    expect(result.isError).toBe(true);
++    expect(JSON.stringify(result)).toContain('PROVIDER_CALLER_IDENTITY_REQUIRED');
++    expect(handlerRan).toBe(false);
++  } finally {
++    vi.useRealTimers();
++  }
++});
++
++it('keeps turn_drained behind an admitted background process completion', async () => {
++  const owner = await activeProviderTurn();
++  prove('provider-background-process', owner.conversationId, owner.sessionId);
++
++  let finishProcess!: (completion: { completedAt: number; durationMs: number; exitCode: number | null }) => void;
++  const processCompletion = new Promise<{ completedAt: number; durationMs: number; exitCode: number | null }>(resolve => {
++    finishProcess = resolve;
++  });
++
++  const launch = await dispatch('exec_command', { cmd: 'background fixture' }, null, 'provider-background-process', 'core', async () => {
++    const context = currentCall()!;
++    context.evidence.processSessionId = '31415';
++    context.evidence.processCompletion = processCompletion;
++    context.evidence.running = true;
++    context.evidence.exitCode = 0;
++    return ok('background process started');
++  });
++  expect(launch.isError).not.toBe(true);
++
++  await recordChatObservations(owner.conversationId, [
++    { kind: 'turn_end', time: 200, turnId: owner.turnId, outcome: 'stopped' }
++  ]);
++  const token = await providerTurnDrainToken(owner.sessionId, owner.conversationId, owner.turnId);
++  expect(token).toEqual(expect.any(String));
++  expect(await markProviderBrowserDrained(owner.sessionId, owner.conversationId, owner.turnId, token!)).toBe(true);
++
++  await tryDrainProviderTurn(owner.sessionId, owner.conversationId);
++  expect((await getSession(owner.sessionId))?.currentProviderTurn?.state).toBe('closing');
++  expect(await readEvents(owner.sessionId, { kinds: ['turn_drained'] })).toEqual([]);
++
++  finishProcess({ completedAt: 300, durationMs: 199, exitCode: 0 });
++  const deadline = Date.now() + 5_000;
++  while ((await getSession(owner.sessionId))?.currentProviderTurn?.state !== 'drained' && Date.now() < deadline) {
++    await new Promise(resolve => setTimeout(resolve, 10));
++  }
++  expect((await getSession(owner.sessionId))?.currentProviderTurn).toMatchObject({ state: 'drained', turnId: owner.turnId });
++
++  const events = await readEvents(owner.sessionId, { kinds: ['tool_call', 'turn_drained'] });
++  const process = events.find(event => event.kind === 'tool_call' && event.call.requestId === 'provider-background-process');
++  const marker = events.find(event => event.kind === 'turn_drained');
++  expect(process?.kind).toBe('tool_call');
++  expect(process?.kind === 'tool_call' ? process.call.process : undefined).toMatchObject({ completedAt: 300, exitCode: 0 });
++  expect(marker?.kind).toBe('turn_drained');
++  expect(marker?.kind === 'turn_drained' ? marker.finalAssistantSeq : undefined).toBeNull();
++  expect(process!.seq).toBeLessThan(marker!.seq);
++});
++
++it('lets an effect admitted before closing settle, but refuses a later exact call before its handler or recorder', async () => {
++  const owner = await activeProviderTurn();
++  prove('provider-pre-close', owner.conversationId, owner.sessionId);
++  prove('provider-post-close', owner.conversationId, owner.sessionId);
++
++  let entered = false;
++  let release!: () => void;
++  const held = new Promise<void>(resolve => { release = resolve; });
++  const first = dispatch('read', { paths: ['/provider/pre'] }, null, 'provider-pre-close', 'core', async () => {
++    entered = true;
++    await held;
++    return ok('pre-close completed');
++  });
++  while (!entered) await new Promise(resolve => setTimeout(resolve, 1));
++
++  expect(await closeProviderTurn(owner.sessionId, owner.turnId, 'completed')).toBe(true);
++  expect((await getSession(owner.sessionId))?.currentProviderTurn).toMatchObject({ state: 'closing', turnId: owner.turnId });
++
++  let postHandlerRan = false;
++  const refused = await dispatch('read', { paths: ['/provider/post'] }, null, 'provider-post-close', 'core', async () => {
++    postHandlerRan = true;
++    return ok('must not run');
++  });
++  expect(refused.isError).toBe(true);
++  expect(JSON.stringify(refused)).toContain('PROVIDER_TURN_CLOSING');
++  expect(postHandlerRan).toBe(false);
++
++  release();
++  const completed = await first;
++  expect(completed.isError).not.toBe(true);
++  expect(JSON.stringify(completed)).toContain('pre-close completed');
++
++  const calls = (await readEvents(owner.sessionId, { kinds: ['tool_call'] }))
++    .filter(event => event.kind === 'tool_call');
++  expect(calls.map(event => event.call.requestId)).toContain('provider-pre-close');
++  expect(calls.map(event => event.call.requestId)).not.toContain('provider-post-close');
++});
+diff --git a/test/kernel-run-inbox.test.ts b/test/kernel-run-inbox.test.ts
+index 217280d6..36253c79 100644
+--- a/test/kernel-run-inbox.test.ts
++++ b/test/kernel-run-inbox.test.ts
+@@ -17,7 +17,9 @@ vi.mock('../src/main/session/recorder.js', async (original) => ({
+   recordToolCall: async () => null, recordAgentMessage: broker.record
+ }));
+ vi.mock('../src/main/session/store.js', async (original) => ({
+-  ...await original<typeof import('../src/main/session/store.js')>(), conversationAttachment: async () => 'current'
++  ...await original<typeof import('../src/main/session/store.js')>(), conversationAttachment: async () => 'current',
++  providerTurnFenceActive: async () => false,
++  admitProviderEffect: async () => 'ordinary'
+ }));
+ vi.mock('../src/main/session/input.js', () => ({ offerToolInput: async () => ({ messages: [], reminder: '' }), acknowledgeToolInput: async () => undefined, TOOL_INPUT_HEADER: '\n--- New instructions from the user ---\n' }));
+ import { createRegistrar, dispatch, ok } from '../src/main/mcp/kernel.js';
+diff --git a/test/opening-input.test.ts b/test/opening-input.test.ts
+index a3fa5057..be293f4b 100644
+--- a/test/opening-input.test.ts
++++ b/test/opening-input.test.ts
+@@ -12,6 +12,7 @@ import { validateNewRoot } from '../src/main/sandbox.js';
+ import { isChatTrusted, resetTrustedChatsForTests, setChatTrusted } from '../src/main/session/trusted-chats.js';
+ import { makeTempDir, removeTempDir } from './helpers.js';
+ import { getLog } from '../src/main/logger.js';
++import { spawnAgentWorkers } from '../src/main/agent-admission.js';
+ 
+ let directory: string;
+ const args = (over: Partial<InputArgs> = {}): InputArgs => ({ id: randomUUID(), sessionId: null, text: 'Independent task', mode: 'auto',
+@@ -49,6 +50,25 @@ it('admits twenty independent durable sessions before any native ACK and preserv
+   await expect(enqueueInput(args({ sessionId: accepted[0]!.sessionId }))).rejects.toThrow('no ChatGPT conversation');
+ });
+ 
++it('persists provider background policy through opening WAL recovery and blocks worker admission before staging', async () => {
++  const request = args({ providerPolicy: { backgroundWork: 'disabled' } });
++  const accepted = await enqueueInput(request);
++  expect(accepted).toMatchObject({ sessionId: request.id, opening: true, providerPolicy: { backgroundWork: 'disabled' } });
++  expect(await getSession(request.id)).toMatchObject({ providerPolicy: { backgroundWork: 'disabled' } });
++
++  resetInputForTests(); resetSessionStoreForTests(); initSessionStore(directory);
++  expect((await listInputs()).find(row => row.id === request.id)).toMatchObject({ providerPolicy: { backgroundWork: 'disabled' } });
++  expect(await getSession(request.id)).toMatchObject({ providerPolicy: { backgroundWork: 'disabled' } });
++  await expect(enqueueInput(request)).resolves.toMatchObject({ id: request.id, providerPolicy: { backgroundWork: 'disabled' } });
++  await expect(enqueueInput({ ...request, providerPolicy: undefined })).rejects.toThrow('different input');
++
++  await expect(spawnAgentWorkers({
++    workers: [{ task: 'must never stage' }],
++    context: null,
++    caller: { sessionId: request.id }
++  }, async () => null, () => false)).rejects.toThrow('PROVIDER_BACKGROUND_WORK_DISABLED');
++});
++
+ it('materializes an accepted opening WAL after a crash before session creation without a second owner', async () => {
+   const request = args();
+   const row: InputEntry = { ...request, sessionId: request.id, opening: true, state: 'queued', owner: null, createdAt: Date.now(), conversationId: null };
+diff --git a/test/projects.test.ts b/test/projects.test.ts
+index 91add8a2..7eaa63a6 100644
+--- a/test/projects.test.ts
++++ b/test/projects.test.ts
+@@ -7,7 +7,7 @@ import { bindBrowserInputProject, claimBrowserInput, enqueueInput, listInputs, p
+ import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
+ import { initDurableStore, resetDurableForTests } from '../src/main/durable.js';
+ import { createSession, getSession, initSessionStore, rebindSession, resetSessionStoreForTests, setSessionOrigin } from '../src/main/session/store.js';
+-import { addProject, armProjectCreate, assignSessionProject, claimProjectCreate, completeProjectCreate, failProjectCreate, getProject, getSessionProject, inheritSessionProject, listProjects, markProjectGone, pendingProjectCreates, PROJECT_CREATE_ARMED_MS, PROJECT_CREATE_CLAIM_MS, projectWorkspace, removeProject, retryProjectCreate, setProjectColor } from '../src/main/projects.js';
++import { addProject, armProjectCreate, assignSessionProject, claimProjectCreate, completeProjectCreate, failProjectCreate, getProject, getSessionProject, inheritSessionProject, listProjects, markProjectGone, pendingProjectCreates, PROJECT_CREATE_ARMED_MS, PROJECT_CREATE_CLAIM_MS, projectWorkspace, removeProject, resolveExactProjectPath, retryProjectCreate, setProjectColor } from '../src/main/projects.js';
+ import { validateNewRoot } from '../src/main/sandbox.js';
+ 
+ let directory: string, approved: string;
+@@ -37,6 +37,16 @@ it('persists one project per canonical directory and validates approved director
+   expect(await listProjects()).toEqual([one]);
+ });
+ 
++it('resolves only one exact active canonical project root for provider callers', async () => {
++  const project = await addProject(path.join(approved, 'first'));
++  await fs.mkdir(path.join(project.path, 'nested'));
++  await expect(resolveExactProjectPath(project.path)).resolves.toEqual({ projectId: project.id, name: project.name, canonicalPath: project.path });
++  await expect(resolveExactProjectPath(path.join(project.path, 'nested'))).resolves.toBeNull();
++  await expect(resolveExactProjectPath(directory)).resolves.toBeNull();
++  await removeProject(project.id);
++  await expect(resolveExactProjectPath(project.path)).resolves.toBeNull();
++});
++
+ it('persists only predefined presentation colors without changing project workspace authority', async () => {
+   const project = await addProject(path.join(approved, 'first'));
+   const colored = await setProjectColor(project.id, 'purple');
+diff --git a/test/provider-build-id.test.ts b/test/provider-build-id.test.ts
+new file mode 100644
+index 00000000..2e89cbf7
+--- /dev/null
++++ b/test/provider-build-id.test.ts
+@@ -0,0 +1,17 @@
++import { describe, expect, it } from 'vitest';
++import { providerExtensionBuildIdFrom } from '../electron.vite.config.js';
++
++describe('provider extension build identity', () => {
++  const sha = '87AE9D631F82D8DA2F462D910410031AD8F97AC5';
++
++  it('advertises the exact lowercase commit only for a clean tree', () => {
++    expect(providerExtensionBuildIdFrom(sha, '')).toBe(sha.toLowerCase());
++    expect(providerExtensionBuildIdFrom(`\n${sha}\n`, '   ')).toBe(sha.toLowerCase());
++  });
++
++  it('fails closed to development for dirty or invalid provenance', () => {
++    expect(providerExtensionBuildIdFrom(sha, ' M src/main/control-api.ts')).toBe('development');
++    expect(providerExtensionBuildIdFrom('not-a-sha', '')).toBe('development');
++    expect(providerExtensionBuildIdFrom('', '')).toBe('development');
++  });
++});
+diff --git a/test/provider-turn-drain.test.ts b/test/provider-turn-drain.test.ts
+new file mode 100644
+index 00000000..bb8e341a
+--- /dev/null
++++ b/test/provider-turn-drain.test.ts
+@@ -0,0 +1,319 @@
++import { promises as fs } from 'node:fs';
++import path from 'node:path';
++import { randomUUID } from 'node:crypto';
++import { afterEach, beforeEach, describe, expect, it } from 'vitest';
++import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
++import {
++  admitProviderEffect,
++  admitProviderInput,
++  appendEvent,
++  closeProviderTurn,
++  createSession,
++  finalizeProviderTurnDrain,
++  flushSessions,
++  getSession,
++  initSessionStore,
++  markProviderBrowserDrained,
++  markProviderTurnEndRecorded,
++  providerTurnDrainToken,
++  readEvents,
++  resetSessionStoreForTests,
++  sessionsRoot,
++  upsertMessageEvent
++} from '../src/main/session/store.js';
++import { makeTempDir, removeTempDir } from './helpers.js';
++
++let dir = '';
++let serial = 0;
++
++beforeEach(async () => {
++  dir = await makeTempDir('clf-provider-drain-');
++  initConfigPath(dir);
++  initSessionStore(dir);
++  await saveConfig(defaultConfig());
++  serial = 0;
++});
++
++afterEach(async () => {
++  await flushSessions();
++  resetSessionStoreForTests();
++  await removeTempDir(dir);
++  dir = '';
++});
++
++const stored = (text: string) => ({ text, chars: text.length, truncated: false });
++
++async function openProviderTurn(outcome: 'completed' | 'stopped' = 'completed') {
++  serial += 1;
++  const conversationId = `provider-drain-chat-${serial}`;
++  const turnId = `provider-turn-${serial}`;
++  const inputId = randomUUID();
++  const questionId = `provider-question-${serial}`;
++  const answerId = `provider-answer-${serial}`;
++  const started = Date.now() + serial * 100;
++  const session = await createSession({
++    conversationId,
++    title: 'Provider task',
++    providerPolicy: { backgroundWork: 'disabled' },
++    currentProviderTurn: { inputId, state: 'admitted' }
++  });
++
++  await upsertMessageEvent(session.id, {
++    time: started,
++    source: 'app',
++    kind: 'user_message',
++    messageId: questionId,
++    inputId,
++    inputDelivery: 'confirmed',
++    message: stored('Do the provider task.')
++  });
++  await appendEvent(session.id, { time: started + 1, source: 'extension', kind: 'turn_start', turnId });
++  expect(await getSession(session.id)).toMatchObject({ currentProviderTurn: { inputId, state: 'active', turnId } });
++
++  let finalSeq: number | null = null;
++  if (outcome === 'completed') {
++    const final = await upsertMessageEvent(session.id, {
++      time: started + 2,
++      source: 'extension',
++      kind: 'assistant_message',
++      turnId,
++      messageId: answerId,
++      providerMessageId: '11111111-2222-4333-8444-555555555555',
++      state: 'final',
++      final: true,
++      message: stored('Provider result.')
++    });
++    finalSeq = final.event.seq;
++  }
++
++  expect(await closeProviderTurn(session.id, turnId, outcome)).toBe(true);
++  const ended = await appendEvent(session.id, { time: started + 3, source: 'extension', kind: 'turn_end', turnId, outcome });
++  expect(ended.kind).toBe('turn_end');
++  expect(await markProviderTurnEndRecorded(session.id, turnId, outcome, ended.seq)).toBe(true);
++  const closing = await getSession(session.id);
++  expect(closing).toMatchObject({ currentProviderTurn: { inputId, state: 'closing', turnId } });
++  expect(closing?.currentProviderTurn?.drainToken).toEqual(expect.any(String));
++  return { sessionId: session.id, conversationId, turnId, inputId, answerId, started, finalSeq };
++}
++
++describe('provider turn drain high-water', () => {
++  it('binds admission only to the exact confirmed native question', async () => {
++    const conversationId = 'provider-activation-chat';
++    const inputId = randomUUID();
++    const session = await createSession({
++      conversationId,
++      providerPolicy: { backgroundWork: 'disabled' },
++      currentProviderTurn: { inputId, state: 'admitted' }
++    });
++    await appendEvent(session.id, { time: 100, source: 'extension', kind: 'turn_start', turnId: 'wrong-first-turn' });
++    expect((await getSession(session.id))?.currentProviderTurn?.state).toBe('admitted');
++
++    await upsertMessageEvent(session.id, {
++      time: 101,
++      source: 'extension',
++      kind: 'user_message',
++      messageId: 'manual-question',
++      message: stored('Manual question')
++    });
++    expect((await getSession(session.id))?.currentProviderTurn?.state).toBe('admitted');
++
++    await upsertMessageEvent(session.id, {
++      time: 102,
++      source: 'app',
++      kind: 'user_message',
++      messageId: 'provider-question',
++      inputId,
++      inputDelivery: 'confirmed',
++      message: stored('Provider question')
++    });
++    // The already-open turn belongs to the earlier manual question. Exact question identity stops stealing it.
++    expect((await getSession(session.id))?.currentProviderTurn?.state).toBe('admitted');
++
++    await appendEvent(session.id, { time: 103, source: 'extension', kind: 'turn_end', turnId: 'wrong-first-turn', outcome: 'completed' });
++    await appendEvent(session.id, { time: 104, source: 'extension', kind: 'turn_start', turnId: 'provider-owned-turn' });
++    expect(await getSession(session.id)).toMatchObject({ currentProviderTurn: { inputId, state: 'active', turnId: 'provider-owned-turn' } });
++  });
++
++  it('requires the exact two-phase token and seals one authoritative final snapshot', async () => {
++    const opened = await openProviderTurn('completed');
++    expect(await admitProviderEffect(opened.conversationId, opened.sessionId)).toBe('refused');
++    expect(await finalizeProviderTurnDrain(opened.sessionId, opened.conversationId, opened.turnId)).toBeNull();
++
++    const drainToken = await providerTurnDrainToken(opened.sessionId, opened.conversationId, opened.turnId);
++    expect(drainToken).toEqual(expect.any(String));
++    expect(await markProviderBrowserDrained(opened.sessionId, opened.conversationId, opened.turnId, randomUUID())).toBe(false);
++    expect(await markProviderBrowserDrained(opened.sessionId, opened.conversationId, opened.turnId, drainToken!)).toBe(true);
++
++    const marker = await finalizeProviderTurnDrain(opened.sessionId, opened.conversationId, opened.turnId);
++    expect(marker).toMatchObject({
++      kind: 'turn_drained',
++      turnId: opened.turnId,
++      inputId: opened.inputId,
++      highWaterSeq: marker?.seq,
++      finalAssistantSeq: opened.finalSeq
++    });
++    expect((await getSession(opened.sessionId))?.currentProviderTurn).toMatchObject({
++      state: 'drained', turnId: opened.turnId, drainToken, browserDrained: true,
++      drainedSeq: marker?.seq, finalAssistantSeq: opened.finalSeq
++    });
++
++    const replay = await finalizeProviderTurnDrain(opened.sessionId, opened.conversationId, opened.turnId);
++    expect(replay?.seq).toBe(marker?.seq);
++    expect((await readEvents(opened.sessionId, { kinds: ['turn_drained'] }))).toHaveLength(1);
++    // A lost commit reply is safe to replay after the marker already exists.
++    expect(await markProviderBrowserDrained(opened.sessionId, opened.conversationId, opened.turnId, drainToken!)).toBe(true);
++  });
++
++  it('selects the latest authoritative final revision that reached custody before browser high-water', async () => {
++    const opened = await openProviderTurn('completed');
++    const corrected = await upsertMessageEvent(opened.sessionId, {
++      time: opened.started + 10,
++      source: 'extension',
++      kind: 'assistant_message',
++      turnId: opened.turnId,
++      messageId: opened.answerId,
++      providerMessageId: '11111111-2222-4333-8444-555555555555',
++      state: 'final',
++      final: true,
++      message: stored('Provider result, corrected before the high-water.')
++    });
++    expect(corrected.changed).toBe(true);
++    expect(corrected.event.seq).toBeGreaterThan(opened.finalSeq!);
++
++    const token = await providerTurnDrainToken(opened.sessionId, opened.conversationId, opened.turnId);
++    expect(await markProviderBrowserDrained(opened.sessionId, opened.conversationId, opened.turnId, token!)).toBe(true);
++    const marker = await finalizeProviderTurnDrain(opened.sessionId, opened.conversationId, opened.turnId);
++    expect(marker).toMatchObject({ kind: 'turn_drained', finalAssistantSeq: corrected.event.seq });
++  });
++
++  it('quarantines a changed same-turn final after drain without advancing the sealed history', async () => {
++    const opened = await openProviderTurn('completed');
++    const token = await providerTurnDrainToken(opened.sessionId, opened.conversationId, opened.turnId);
++    expect(await markProviderBrowserDrained(opened.sessionId, opened.conversationId, opened.turnId, token!)).toBe(true);
++    const marker = await finalizeProviderTurnDrain(opened.sessionId, opened.conversationId, opened.turnId);
++    expect(marker?.kind).toBe('turn_drained');
++
++    await expect(upsertMessageEvent(opened.sessionId, {
++      time: opened.started + 20,
++      source: 'extension',
++      kind: 'assistant_message',
++      turnId: opened.turnId,
++      messageId: opened.answerId,
++      providerMessageId: '11111111-2222-4333-8444-555555555555',
++      state: 'final',
++      final: true,
++      message: stored('A forbidden late correction after the provider high-water.')
++    })).rejects.toThrow('provider_turn_sealed:assistant_message');
++
++    const quarantined = await getSession(opened.sessionId);
++    expect(quarantined?.currentProviderTurn).toMatchObject({
++      state: 'broken', turnId: opened.turnId, drainedSeq: marker?.seq, finalAssistantSeq: opened.finalSeq
++    });
++    const events = await readEvents(opened.sessionId);
++    const final = events.find(event => event.kind === 'assistant_message' && event.messageId === opened.answerId);
++    expect(final?.kind === 'assistant_message' ? final.message.text : null).toBe('Provider result.');
++    expect(Math.max(...events.map(event => event.seq))).toBe(marker?.seq);
++    await expect(admitProviderInput(opened.sessionId, randomUUID())).rejects.toThrow('provider_turn_broken');
++  });
++
++  it('does not treat an unknown turn_end as provider terminal proof', async () => {
++    const conversationId = 'provider-unknown-end-chat';
++    const inputId = randomUUID();
++    const turnId = 'provider-unknown-end-turn';
++    const session = await createSession({
++      conversationId,
++      providerPolicy: { backgroundWork: 'disabled' },
++      currentProviderTurn: { inputId, state: 'admitted' }
++    });
++    await upsertMessageEvent(session.id, {
++      time: 500,
++      source: 'app',
++      kind: 'user_message',
++      messageId: 'provider-unknown-question',
++      inputId,
++      inputDelivery: 'confirmed',
++      message: stored('Question with no terminal proof yet.')
++    });
++    await appendEvent(session.id, { time: 501, source: 'extension', kind: 'turn_start', turnId });
++    expect((await getSession(session.id))?.currentProviderTurn).toMatchObject({ state: 'active', turnId });
++    await appendEvent(session.id, { time: 502, source: 'extension', kind: 'turn_end', turnId, outcome: 'unknown' });
++    expect((await getSession(session.id))?.currentProviderTurn).toMatchObject({ state: 'active', turnId });
++    expect(await providerTurnDrainToken(session.id, conversationId, turnId)).toBeNull();
++  });
++
++  it('quarantines a crash after durable closing but before the matching turn_end receipt', async () => {
++    const conversationId = 'provider-pre-terminal-crash-chat';
++    const inputId = randomUUID();
++    const turnId = 'provider-pre-terminal-crash-turn';
++    const session = await createSession({
++      conversationId,
++      providerPolicy: { backgroundWork: 'disabled' },
++      currentProviderTurn: { inputId, state: 'admitted' }
++    });
++    await upsertMessageEvent(session.id, {
++      time: 600,
++      source: 'app',
++      kind: 'user_message',
++      messageId: 'provider-pre-terminal-question',
++      inputId,
++      inputDelivery: 'confirmed',
++      message: stored('Question whose closing fence survives a crash.')
++    });
++    await appendEvent(session.id, { time: 601, source: 'extension', kind: 'turn_start', turnId });
++    expect(await closeProviderTurn(session.id, turnId, 'completed')).toBe(true);
++    expect((await getSession(session.id))?.currentProviderTurn).toMatchObject({
++      state: 'closing', turnId, closingOutcome: 'completed', drainToken: expect.any(String)
++    });
++    expect((await getSession(session.id))?.currentProviderTurn?.terminalSeq).toBeUndefined();
++
++    await flushSessions();
++    resetSessionStoreForTests();
++    initSessionStore(dir);
++    const restored = await getSession(session.id);
++    expect(restored?.currentProviderTurn).toMatchObject({ state: 'broken', turnId, closingOutcome: 'completed' });
++    expect(await providerTurnDrainToken(session.id, conversationId, turnId)).toBeNull();
++    await expect(admitProviderInput(session.id, randomUUID())).rejects.toThrow('provider_turn_broken');
++  });
++  it('drains an exact stopped/cancelled turn without inventing assistant prose', async () => {
++    const opened = await openProviderTurn('stopped');
++    const drainToken = await providerTurnDrainToken(opened.sessionId, opened.conversationId, opened.turnId);
++    expect(await markProviderBrowserDrained(opened.sessionId, opened.conversationId, opened.turnId, drainToken!)).toBe(true);
++    const marker = await finalizeProviderTurnDrain(opened.sessionId, opened.conversationId, opened.turnId);
++    expect(marker).toMatchObject({ kind: 'turn_drained', turnId: opened.turnId, finalAssistantSeq: null });
++  });
++
++  it('quarantines an unsealed closing turn after restart and refuses later provider input', async () => {
++    const opened = await openProviderTurn('completed');
++    await flushSessions();
++    resetSessionStoreForTests();
++    initSessionStore(dir);
++
++    const restored = await getSession(opened.sessionId);
++    expect(restored?.currentProviderTurn).toMatchObject({ state: 'broken', turnId: opened.turnId });
++    await expect(admitProviderInput(opened.sessionId, randomUUID())).rejects.toThrow('provider_turn_broken');
++    expect(await providerTurnDrainToken(opened.sessionId, opened.conversationId, opened.turnId)).toBeNull();
++  });
++
++  it('lets a committed drain marker repair a one-write-behind provider sidecar after restart', async () => {
++    const opened = await openProviderTurn('completed');
++    const token = await providerTurnDrainToken(opened.sessionId, opened.conversationId, opened.turnId);
++    await markProviderBrowserDrained(opened.sessionId, opened.conversationId, opened.turnId, token!);
++    const marker = await finalizeProviderTurnDrain(opened.sessionId, opened.conversationId, opened.turnId);
++    expect(marker?.kind).toBe('turn_drained');
++    await flushSessions();
++
++    const file = path.join(sessionsRoot()!, opened.sessionId, 'provider-state.json');
++    const sidecar = JSON.parse(await fs.readFile(file, 'utf8'));
++    sidecar.currentProviderTurn.state = 'closing';
++    delete sidecar.currentProviderTurn.drainedSeq;
++    delete sidecar.currentProviderTurn.finalAssistantSeq;
++    await fs.writeFile(file, JSON.stringify(sidecar));
++
++    resetSessionStoreForTests();
++    initSessionStore(dir);
++    const restored = await getSession(opened.sessionId);
++    expect(restored?.currentProviderTurn).toMatchObject({ state: 'drained', drainedSeq: marker?.seq, finalAssistantSeq: opened.finalSeq });
++    const repaired = JSON.parse(await fs.readFile(file, 'utf8'));
++    expect(repaired.currentProviderTurn).toMatchObject({ state: 'drained', drainedSeq: marker?.seq });
++  });
++});
+diff --git a/test/renderer-state.test.ts b/test/renderer-state.test.ts
+index 5d5a47a1..ad181022 100644
+--- a/test/renderer-state.test.ts
++++ b/test/renderer-state.test.ts
+@@ -1301,11 +1301,11 @@ it('preserves the selected OpenRouter model through an unchanged custom-provider
+   mounted.push(mounted.state);
+   const provider = w.document.getElementById('goalProvider') as HTMLSelectElement;
+   provider.value = 'custom'; provider.dispatchEvent(new w.Event('change', { bubbles: true }));
+-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
++  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1), { timeout: 15_000, interval: 20 });
+   // Repainting custom settings must not replace the hidden OpenRouter picker's model.
+   mounted.push({ ...mounted.state, hasCustomProviderKey: false });
+   provider.value = 'openrouter'; provider.dispatchEvent(new w.Event('change', { bubbles: true }));
+-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(2));
++  await vi.waitFor(() => expect(mounted.calls).toHaveLength(2), { timeout: 15_000, interval: 20 });
+   expect(mounted.calls[1].goal).toMatchObject({ provider: { kind: 'openrouter' }, model: original });
+   expect(w.document.getElementById('goalModelName')!.textContent).toBe(original);
+ });
+diff --git a/test/session-input.test.ts b/test/session-input.test.ts
+index 47cbdb4d..862c843d 100644
+--- a/test/session-input.test.ts
++++ b/test/session-input.test.ts
+@@ -25,6 +25,8 @@ const binding = vi.hoisted(() => ({ origin: 'desktop', conversationId: 'conversa
+ vi.mock('../src/main/session/store.js', () => ({
+   sessionsRoot: () => path.join(directory, 'sessions'),
+   listUsageSessions: vi.fn(async () => []),
++  admitProviderInput: vi.fn(async () => false),
++  markProviderInputNotSent: vi.fn(async () => undefined),
+   sessionDirectoryMissing: vi.fn(async () => false),
+   deleteSession: vi.fn(async (id: string) => { openings.delete(id); }),
+   readCompletedFinal: vi.fn(async () => null),
+diff --git a/test/update.test.ts b/test/update.test.ts
+index e81259b5..32c1ae80 100644
+--- a/test/update.test.ts
++++ b/test/update.test.ts
+@@ -813,8 +813,9 @@ describe('a check or download that goes wrong on a bad connection', () => {
+     await vi.advanceTimersByTimeAsync(59_000);
+     expect(online.asked).toEqual([]);
+     await vi.advanceTimersByTimeAsync(2_000);
+-    await vi.waitFor(() => expect(updateStatus().checkedAt).not.toBeNull());
+-    expect(updateStatus().error).toBeNull();
++    // Wait for the retry pass itself to finish, not only for its early checkedAt publication.
++    // Otherwise its download can cross the test boundary and mutate the next test's fresh status.
++    await vi.waitFor(() => expect(updateStatus()).toMatchObject({ stage: 'ready', error: null }));
+     const calls = online.asked.length;
+     await vi.advanceTimersByTimeAsync(60 * 60_000);
+     expect(online.asked).toHaveLength(calls);
+-- 
+2.53.0.windows.1
+

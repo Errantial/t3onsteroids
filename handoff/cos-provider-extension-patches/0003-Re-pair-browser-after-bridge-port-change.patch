@@ -1,0 +1,62 @@
+From 9d1ca208faef1fa7864be07e002336ac15d53600 Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sat, 17 Oct 2026 10:40:09 -0600
+Subject: [PATCH 03/17] Re-pair browser after bridge port change
+
+---
+ extension/background.js |  2 ++
+ test/extension.test.ts  | 24 ++++++++++++++++++++++++
+ 2 files changed, 26 insertions(+)
+
+diff --git a/extension/background.js b/extension/background.js
+index 4999994a..756e0b96 100644
+--- a/extension/background.js
++++ b/extension/background.js
+@@ -1155,7 +1155,9 @@ async function discoverNow(force) {
+     const body = await hello(candidate);
+     if (body) {
+       if (body.disconnected === true) await latchAppDisconnect();
++      const changedPort = port !== null && port !== candidate;
+       port = candidate;
++      if (changedPort && token !== null) token = null;
+       portCheckedAt = Date.now();
+       portCompatible = body.compatible !== false && body.bridge === BRIDGE_PROTOCOL;
+       appVersion = typeof body.version === 'string' ? body.version : null;
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index 8d8c5389..51078de3 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -3521,6 +3521,30 @@ describe('extension command delivery', () => {
+     expect(paths).toContain('/pair');
+   });
+ 
++  it('drops a stale token when discovery moves to a different live app port', async () => {
++    const local = new FakeStorageArea({ port: 8765, token: 'old-port-token' });
++    const session = new FakeStorageArea();
++    const seen: Array<{ port: string; path: string; auth: unknown }> = [];
++    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
++      const url = new URL(input);
++      const headers = (init.headers ?? {}) as Record<string, string>;
++      seen.push({ port: url.port, path: url.pathname, auth: headers.authorization });
++      if (url.pathname === '/hello' && url.port === '8765') throw new TypeError('old app is gone');
++      if (url.pathname === '/hello' && url.port === '8766') return response(200, { app: 'chat-on-steroids', bridge: 14, paired: false });
++      if (url.pathname === '/pair' && url.port === '8766') return response(200, { token: 'new-port-token' });
++      if (url.pathname === '/commands/redeem' && url.port === '8766') return response(200, { command: null });
++      return response(404, {});
++    });
++    const worker = loadWorker({ local, session, fetch });
++
++    const result = await worker.send({ type: 'redeem', id: 'cmd-1', client: 'page-1' });
++    expect(result.ok).toBe(true);
++    expect(local.data.port).toBe(8766);
++    expect(local.data.token).toBe('new-port-token');
++    expect(seen.some((call) => call.port === '8766' && call.path === '/pair')).toBe(true);
++    expect(seen.find((call) => call.path === '/commands/redeem')?.auth).toBe('Bearer new-port-token');
++  });
++
+   it('does not pair on its own after the user disconnected it', async () => {
+     const local = new FakeStorageArea({ port: 8765, disconnected: true });
+     const session = new FakeStorageArea();
+-- 
+2.53.0.windows.1
+

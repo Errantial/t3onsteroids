@@ -1,0 +1,193 @@
+From a0af92225b9bd015f709c74e7cbaddc6c0ec29cf Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sat, 17 Oct 2026 12:46:55 -0600
+Subject: [PATCH 07/17] Bind built-in companion to owning CoS instance
+
+---
+ extension/background.js       | 35 +++++++++++++++++++-
+ src/main/cos-browser/host.ts  |  8 +++++
+ src/main/cos-browser/index.ts |  3 +-
+ test/extension.test.ts        | 60 +++++++++++++++++++++++++++++++++++
+ 4 files changed, 104 insertions(+), 2 deletions(-)
+
+diff --git a/extension/background.js b/extension/background.js
+index faea56ee..78473804 100644
+--- a/extension/background.js
++++ b/extension/background.js
+@@ -1082,6 +1082,23 @@ async function hello(candidate) {
+   }
+ }
+ 
++/**
++ * The built-in CoS browser belongs to one exact app process. In a side-by-side install another
++ * CoS may already be listening on an earlier discovery port, so generic scanning would pair this
++ * app-owned browser with the wrong process. Its worker preload asks its owning main process for
++ * the exact bridge port; external browsers intentionally keep the normal scan behavior.
++ */
++async function discoveryPorts() {
++  if (!globalThis.__cosBrowserWorker?.call) return PORTS;
++  try {
++    const reply = await globalThis.__cosBrowserWorker.call('cos.bridgePort', []);
++    const own = Number(reply);
++    return Number.isInteger(own) && own >= 1 && own <= 65535 ? [own] : [];
++  } catch {
++    return [];
++  }
++}
++
+ /**
+  * Which build of this extension is running, as written by scripts/write-extension-stamp.mjs.
+  *
+@@ -1139,6 +1156,22 @@ function discover(force = false) {
+ 
+ async function discoverNow(force) {
+   await load();
++  const candidates = await discoveryPorts();
++  if (globalThis.__cosBrowserWorker && candidates.length === 0) {
++    port = null;
++    portCheckedAt = 0;
++    portCompatible = null;
++    appVersion = null;
++    appProtocol = null;
++    await persist();
++    return null;
++  }
++  if (port !== null && !force && globalThis.__cosBrowserWorker && !candidates.includes(port)) {
++    port = null;
++    if (token !== null) token = null;
++    portCheckedAt = 0;
++    await persist();
++  }
+   if (port !== null && !force) {
+     if (Date.now() - portCheckedAt < PORT_TRUST_MS) return { port, paired: token !== null, compatible: portCompatible !== false, version: appVersion, bridge: appProtocol };
+     const body = await hello(port);
+@@ -1151,7 +1184,7 @@ async function discoverNow(force) {
+       return { port, paired: body.paired === true, compatible: portCompatible, version: appVersion, bridge: appProtocol };
+     }
+   }
+-  for (const candidate of PORTS) {
++  for (const candidate of candidates) {
+     const body = await hello(candidate);
+     if (body) {
+       if (body.disconnected === true) await latchAppDisconnect();
+diff --git a/src/main/cos-browser/host.ts b/src/main/cos-browser/host.ts
+index b4427ca2..7ba12783 100644
+--- a/src/main/cos-browser/host.ts
++++ b/src/main/cos-browser/host.ts
+@@ -182,6 +182,8 @@ export class CosBrowser {
+ 
+   constructor(private readonly assets: {
+     preloadDir: string; rendererUrl: () => string | null; rendererDir: string;
++    /** Exact browser-bridge port owned by this app process; the built-in companion must not scan into another CoS instance. */
++    bridgePort?: () => number | null;
+     /** The user closed or minimized a shown window: it hides to the tray and goes on running. */
+     onUserHide?: () => void;
+     /** Where a window the user minimizes goes: the taskbar or Dock (default), or the tray. */
+@@ -301,6 +303,12 @@ export class CosBrowser {
+     const label = TRACE ? `${name}(${Array.isArray(args) ? traceIds(args) : ''})` : '';
+     const late = TRACE ? setTimeout(() => logWarn(`cos browser trace: ${label} still pending after 10 s`), 10_000) : null;
+     try {
++      if (name === 'cos.bridgePort') {
++        const value = this.assets.bridgePort?.() ?? null;
++        const reply = { ok: true as const, value };
++        if (TRACE) logInfo(`cos browser trace: ${label} ok`);
++        return reply;
++      }
+       const reply = await callChromeApi(this.control, name, args);
+       if (TRACE) logInfo(`cos browser trace: ${label} ${reply.ok ? 'ok' : `failed: ${reply.message}`}`);
+       return reply;
+diff --git a/src/main/cos-browser/index.ts b/src/main/cos-browser/index.ts
+index 43bc4d46..e60c4bc0 100644
+--- a/src/main/cos-browser/index.ts
++++ b/src/main/cos-browser/index.ts
+@@ -4,7 +4,7 @@
+  */
+ import { app, ipcMain, Notification } from 'electron';
+ import path from 'node:path';
+-import { bridgeStatus, onBridgeChange } from '../bridge.js';
++import { bridgePort, bridgeStatus, onBridgeChange } from '../bridge.js';
+ import { getConfig, updateConfig } from '../config.js';
+ import { logWarn } from '../logger.js';
+ import { mainText } from '../main-texts.js';
+@@ -19,6 +19,7 @@ export const cosBrowser = new CosBrowser({
+   preloadDir: path.join(out, 'preload'),
+   rendererDir: path.join(out, 'renderer'),
+   rendererUrl: () => process.env.ELECTRON_RENDERER_URL ?? null,
++  bridgePort,
+   onUserHide: showTrayHint,
+   minimizeTo: () => getConfig().ui.cosBrowserMinimize === 'tray' ? 'tray' : 'taskbar'
+ });
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index 7cc53163..cfe28f55 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -3521,6 +3521,66 @@ describe('extension command delivery', () => {
+     expect(paths).toContain('/pair');
+   });
+ 
++  it('pins the built-in CoS browser to its owning app bridge instead of another live CoS instance', async () => {
++    const local = new FakeStorageArea({ port: 8765, token: 'old-port-token' });
++    const session = new FakeStorageArea();
++    const seen: Array<{ port: string; path: string }> = [];
++    const fetch = vi.fn(async (input: string) => {
++      const url = new URL(input);
++      seen.push({ port: url.port, path: url.pathname });
++      if (url.pathname === '/hello' && url.port === '8765') return response(200, { app: 'chat-on-steroids', bridge: 14, paired: true });
++      if (url.pathname === '/hello' && url.port === '8766') return response(200, { app: 'chat-on-steroids', bridge: 14, paired: false });
++      if (url.pathname === '/pair' && url.port === '8766') return response(200, { token: 'candidate-token' });
++      return response(404, {});
++    });
++    const workerBridge = {
++      call: vi.fn(async (name: string) => name === 'cos.bridgePort' ? 8766 : null),
++      subscribe: vi.fn()
++    };
++    let listener: ((message: any, sender: any, sendResponse: (value: any) => void) => boolean) | null = null;
++    const chrome = {
++      storage: { local, session },
++      runtime: {
++        id: 'abcdefghijklmnopabcdefghijklmnop',
++        getURL: (file: string) => {
++          if (file === 'build-stamp.txt') throw new Error('No packaged stamp');
++          return `chrome-extension://abcdefghijklmnopabcdefghijklmnop/${file}`;
++        },
++        getManifest: () => ({ version: '1.6.0' }),
++        onMessage: { addListener(fn: typeof listener) { listener = fn; } },
++        onInstalled: { addListener() {} },
++        onStartup: { addListener() {} }
++      },
++      tabs: {
++        query: async () => [],
++        get: async () => { throw new Error('no tab'); },
++        sendMessage: async () => ({ ok: true }),
++        onUpdated: { addListener() {} },
++        onRemoved: { addListener() {} },
++        onCreated: { addListener() {} }
++      },
++      windows: {},
++      scripting: { executeScript: async () => [], insertCSS: async () => undefined },
++      alarms: { create() {}, clear: async () => true, onAlarm: { addListener() {} } }
++    };
++    const original = backgroundSource.replace(/^import .*$/gm, '');
++    vm.runInNewContext(`globalThis.__cosBrowserWorker = __workerBridge;\n${original}`, {
++      __workerBridge: workerBridge,
++      chrome,
++      fetch,
++      AbortController,
++      setTimeout,
++      clearTimeout,
++      URL,
++      TextEncoder,
++      crypto: globalThis.crypto,
++      console
++    }, { filename: 'background.js' });
++    await vi.waitFor(() => expect(local.data.token).toBe('candidate-token'), { timeout: 5_000 });
++    expect(local.data.port).toBe(8766);
++    expect(seen.some(call => call.port === '8765')).toBe(false);
++    expect(seen.some(call => call.port === '8766' && call.path === '/pair')).toBe(true);
++  });
+   it('drops a stale token when discovery moves to a different live app port', async () => {
+     const local = new FakeStorageArea({ port: 8765, token: 'old-port-token' });
+     const session = new FakeStorageArea();
+-- 
+2.53.0.windows.1
+

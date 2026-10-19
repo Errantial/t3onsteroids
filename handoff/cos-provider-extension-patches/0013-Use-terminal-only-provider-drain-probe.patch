@@ -1,0 +1,447 @@
+From 0f627004710089b2cc9f660942e1a150180df4bd Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sun, 18 Oct 2026 07:57:59 -0600
+Subject: [PATCH 13/17] Use terminal-only provider drain probe
+
+---
+ extension/content.js        |  60 ++++++++++++++++++++-
+ extension/fiber.js          |  75 +++++++++++++++++++++++++-
+ test/content-script.test.ts | 101 ++++++++++++++++++++++++++++++++++++
+ test/fiber.test.ts          |  42 ++++++++++++++-
+ 4 files changed, 273 insertions(+), 5 deletions(-)
+
+diff --git a/extension/content.js b/extension/content.js
+index 59458c4e..3fc49111 100644
+--- a/extension/content.js
++++ b/extension/content.js
+@@ -3703,6 +3703,8 @@
+    */
+   const FIBER_ASK = 'clf-fiber-ask';
+   const FIBER_REPLY = 'clf-fiber-reply';
++  const FIBER_TERMINAL_ASK = 'clf-fiber-terminal-ask';
++  const FIBER_TERMINAL_REPLY = 'clf-fiber-terminal-reply';
+   // 3: adds an exact turn-wide TobisComputer call count so folded api_tool metadata calls
+   // are not mistaken for local MCP calls. Older descriptors are refused rather than mixed.
+   // 4: adds a turn-level array naming each local connector request.
+@@ -4378,6 +4380,50 @@
+     return fiberAsking;
+   }
+ 
++  /**
++   * Revalidates one already-stamped page turn without asking MAIN to serialize its transcript.
++   *
++   * Provider drain runs after the complete final has already crossed the ordinary Fiber path.
++   * Re-reading that whole answer just to prove its endMessageId is still current made a 28k
++   * character answer spend more than a second inside turn_end -> turn_drained. The scan stamp
++   * names the exact DOM/Fiber turn that produced the cached descriptor; MAIN re-reads only that
++   * turn's terminal identity. Retry/Regenerate therefore still returns a different/null id and
++   * fails closed, while no authored bytes cross this lightweight boundary.
++   */
++  function askFiberTerminal(pageTurn) {
++    const nodes = pageTurn?.nodes || (pageTurn?.node ? [pageTurn.node] : []);
++    const stamps = [...new Set(nodes.map(node => node?.getAttribute?.('data-clf-fiber-turn')).filter(value =>
++      typeof value === 'string' && value.length > 2 && value.length <= 160))];
++    if (stamps.length !== 1) return Promise.resolve(null);
++    const stamp = stamps[0];
++    const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
++    return new Promise((resolve) => {
++      let done = false;
++      const finish = (value) => {
++        if (done) return;
++        done = true;
++        window.removeEventListener('message', onMessage);
++        resolve(value);
++      };
++      const onMessage = (event) => {
++        if (event.source !== window) return;
++        const data = event.data;
++        if (!data || typeof data !== 'object' || data.source !== FIBER_TERMINAL_REPLY || data.nonce !== nonce || data.v !== 1) return;
++        if (data.stamp !== stamp) return finish(null);
++        const endMessageId = typeof data.endMessageId === 'string' && data.endMessageId.length > 0 && data.endMessageId.length <= 220
++          ? data.endMessageId : null;
++        finish({ endMessageId });
++      };
++      window.addEventListener('message', onMessage);
++      setTimeout(() => finish(null), FIBER_TIMEOUT_MS);
++      try {
++        window.postMessage({ source: FIBER_TERMINAL_ASK, nonce, stamp }, location.origin);
++      } catch {
++        finish(null);
++      }
++    });
++  }
++
+   /**
+    * Refreshes the cache. `null` means no answer — keep whatever was last known.
+    *
+@@ -12829,12 +12875,22 @@
+     }).catch(() => undefined).finally(() => { decision.partialPublishing = false; });
+   }
+   /** Fresh exact terminal proof, shared by stuck-composer recovery and idle-tab retirement. */
+-  async function confirmedProviderTerminal(recordedFinal = false, expectedTerminal = null) {
++  async function confirmedProviderTerminal(recordedFinal = false, expectedTerminal = null, drainProbe = false) {
+     const terminal = expectedTerminal || fiberTerminalMessageId || (recordedFinal ? fiberTurnFor(currentAssistantTurn())?.endMessageId : null);
+     const pageTurn = currentAssistantTurn();
+     const observedEpoch = epoch;
+     const observedConversation = conversationId;
+     if (generating || !terminal || !pageTurn) return false;
++    if (drainProbe) {
++      const lightweight = await askFiberTerminal(pageTurn);
++      if (lightweight !== null) return Boolean(alive && epoch === observedEpoch && conversationId === observedConversation &&
++        CLF_DOM.conversationId() === observedConversation && !generating && pendingTools === 0 &&
++        lightweight.endMessageId === terminal && (recordedFinal || fiberTerminalMessageId === terminal) &&
++        fiberTurnFor(currentAssistantTurn())?.endMessageId === terminal);
++    }
++    // Compatibility/recovery fallback for a helper that has not learned the lightweight
++    // protocol yet, or for a turn whose exact stamp was not retained. The full refresh keeps
++    // the pre-existing fail-closed behaviour rather than treating absence as confirmation.
+     const recovered = await refreshFiber({ pageTurnId: pageTurn.id, pageTurn: pageTurn.node || pageTurn.nodes?.[0], terminalProbe: terminal });
+     return Boolean(recovered && alive && epoch === observedEpoch && conversationId === observedConversation &&
+       CLF_DOM.conversationId() === observedConversation && !generating && pendingTools === 0 &&
+@@ -12872,7 +12928,7 @@
+         // general observe timer, which browsers may heavily throttle in hidden provider tabs.
+         // No sleep/debounce: each refresh is itself an async page-model round trip.
+         for (let attempt = 0; attempt < 3 && current(); attempt++) {
+-          if (await confirmedProviderTerminal(true, expectedTerminal)) {
++          if (await confirmedProviderTerminal(true, expectedTerminal, true)) {
+             terminalConfirmed = true;
+             break;
+           }
+diff --git a/extension/fiber.js b/extension/fiber.js
+index 8ebcd1ee..b5740638 100644
+--- a/extension/fiber.js
++++ b/extension/fiber.js
+@@ -49,6 +49,8 @@
+   const ACTIVE_HELPER = '__clfFiberHelper';
+   const ASK = 'clf-fiber-ask';
+   const REPLY = 'clf-fiber-reply';
++  const TERMINAL_ASK = 'clf-fiber-terminal-ask';
++  const TERMINAL_REPLY = 'clf-fiber-terminal-reply';
+   /** Only a successfully described connector row carries this scan reference. */
+   const CONNECTOR = '[data-clf-fiber]';
+   /**
+@@ -2549,6 +2551,71 @@
+     return out;
+   }
+ 
++  /** Terminal identity only, for provider drain revalidation after the full turn was recorded. */
++  function shellTerminalMessageId(fiber, turnId) {
++    let entry = null;
++    for (let at = fiber, up = 0; at && up < 16; up++, at = at.return) {
++      if (Array.isArray(at.memoizedProps?.entry?.turn?.items)) { entry = at.memoizedProps.entry; break; }
++    }
++    if (!entry || !turnId || entry.id !== turnId || entry.turn.items.length > MAX_ROWS) return null;
++    for (let index = entry.turn.items.length - 1; index >= 0; index--) {
++      const item = entry.turn.items[index];
++      if (!item || typeof item !== 'object') continue;
++      if (item.type === 'assistant-message') {
++        if (item.phase !== 'final_answer') continue;
++        return item.completed === true && entry.turn.status === 'complete' ? str(item.messageId) : null;
++      }
++      if (item.type === 'generated-image') {
++        if (entry.turn.status !== 'complete' || item.status !== 'completed' || item.isPreview === true) return null;
++        const id = str(item.chatGptMessageId);
++        if (!id || !Array.isArray(entry.turn.messageIds) || !entry.turn.messageIds.includes(id)) return null;
++        const images = entry.turn.items.filter(candidate => candidate?.type === 'generated-image');
++        return images.every(candidate => str(candidate.chatGptMessageId) && candidate.status === 'completed' && candidate.isPreview !== true)
++          ? id : null;
++      }
++    }
++    return null;
++  }
++
++  function searchTurnTerminalMessageId(turn) {
++    if (!turn || typeof turn !== 'object' || !Array.isArray(turn.items) || turn.items.length > MAX_ROWS) return null;
++    for (let index = turn.items.length - 1; index >= 0; index--) {
++      const item = turn.items[index];
++      if (!item || typeof item !== 'object' || item.type !== 'assistant-message') continue;
++      if (item.phase !== 'final_answer') continue;
++      return item.completed === true && turn.status === 'complete' ? str(item.messageId) || str(item.latestMessageId) : null;
++    }
++    return null;
++  }
++
++  /**
++   * Re-read only the exact terminal id for a turn stamped by the preceding full scan. The
++   * stamp is an ephemeral scan identity, not a page-supplied turn id, and must resolve to one
++   * current mounted turn. No authored text or tool payload is copied through this path.
++   */
++  function terminalSnapshot(stamp) {
++    if (typeof stamp !== 'string' || stamp.length < 3 || stamp.length > 160) return null;
++    let matches;
++    try {
++      matches = [...document.querySelectorAll('[data-clf-fiber-turn]')].filter(node =>
++        node.getAttribute('data-clf-fiber-turn') === stamp && node.matches?.(TURN_SECTION) && !node.closest(OWN_SURFACES) && !onKeptPage(node));
++    } catch { return null; }
++    if (matches.length !== 1) return null;
++    const section = matches[0];
++    const fiber = fiberOf(section);
++    if (!fiber) return null;
++    let endMessageId = null;
++    if (section.matches?.(SHELL_TURN)) {
++      const turnId = str(section.querySelector('[data-content-search-turn-key]')?.getAttribute('data-content-search-turn-key'));
++      endMessageId = shellTerminalMessageId(fiber, turnId);
++    } else if (section.matches?.(SEARCH_TURN_ANCHOR)) {
++      endMessageId = searchTurnTerminalMessageId(turnViewOf(fiber));
++    } else {
++      endMessageId = turnEndMessageId(turnMessagesOf(fiber));
++    }
++    return { stamp, endMessageId };
++  }
++
+   /**
+    * Answers a request from the isolated world.
+    *
+@@ -2948,7 +3015,7 @@
+     // Only this window, only our own request shape. Anything else is not ours to answer.
+     if (event.source !== window) return;
+     const data = event.data;
+-    if (!data || typeof data !== 'object' || ![ASK, 'clf-picker-ask', 'clf-plugin-ask'].includes(data.source)) return;
++    if (!data || typeof data !== 'object' || ![ASK, TERMINAL_ASK, 'clf-picker-ask', 'clf-plugin-ask'].includes(data.source)) return;
+     const nonce = typeof data.nonce === 'string' ? data.nonce.slice(0, 64) : '';
+     if (!nonce) return;
+     adoptAppNames(data.apps);
+@@ -2968,6 +3035,12 @@
+       post({ source: 'clf-picker-reply', nonce, v: 1, picker }, location.origin);
+       return;
+     }
++    if (data.source === TERMINAL_ASK) {
++      const stamp = typeof data.stamp === 'string' ? data.stamp.slice(0, 160) : '';
++      const terminal = terminalSnapshot(stamp);
++      post({ source: TERMINAL_REPLY, nonce, v: 1, stamp, endMessageId: terminal?.endMessageId || null }, location.origin);
++      return;
++    }
+     try {
+       scan(nonce);
+     } catch {
+diff --git a/test/content-script.test.ts b/test/content-script.test.ts
+index 8d1129b5..921eff90 100644
+--- a/test/content-script.test.ts
++++ b/test/content-script.test.ts
+@@ -4653,6 +4653,15 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+     const instantTimer = window.setTimeout;
+     window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
+     const onAsk = (event: any) => {
++      if (event.data?.source === 'clf-fiber-terminal-ask') {
++        const index = Number(String(event.data.stamp).split(':').at(-1));
++        const endMessageId = Number.isInteger(index) ? bindings[index]?.turn.endMessageId ?? null : null;
++        window.dispatchEvent(new window.MessageEvent('message', { data: {
++          source: 'clf-fiber-terminal-reply', nonce: event.data.nonce, v: 1,
++          stamp: event.data.stamp, endMessageId
++        }, source: window }));
++        return;
++      }
+       if (event.data?.source !== 'clf-fiber-ask') return;
+       const token = event.data.nonce;
+       bindings.forEach(({ section }, index) => section.setAttribute('data-clf-fiber-turn', `${token}:${index}`));
+@@ -4764,6 +4773,15 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+     const instantTimer = window.setTimeout;
+     window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
+     const onAsk = (event: any) => {
++      if (event.data?.source === 'clf-fiber-terminal-ask') {
++        const endMessageId = probeSeen && staleRevalidation ? null : descriptor.endMessageId;
++        if (probeSeen && staleRevalidation) staleRevalidation = false;
++        window.dispatchEvent(new window.MessageEvent('message', { data: {
++          source: 'clf-fiber-terminal-reply', nonce: event.data.nonce, v: 1,
++          stamp: event.data.stamp, endMessageId
++        }, source: window }));
++        return;
++      }
+       if (event.data?.source !== 'clf-fiber-ask') return;
+       const token = event.data.nonce;
+       section.setAttribute('data-clf-fiber-turn', `${token}:0`);
+@@ -4787,6 +4805,68 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+     }
+   });
+ 
++  it('revalidates a large provider final after probe without another full Fiber transcript scan', async () => {
++    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
++    const drainToken = 'provider-terminal-only-token';
++    const phases: string[] = [];
++    let probeSeen = false;
++    let fullScansAfterProbe = 0;
++    let terminalScans = 0;
++    live = await harness(`https://chatgpt.com/c/${conversationId}`, {
++      provider_turn_drain_ready: message => {
++        phases.push(message.phase);
++        if (message.phase === 'probe') {
++          probeSeen = true;
++          return { ok: true, data: { ok: true, applicable: true, drainToken, state: 'closing' } };
++        }
++        return { ok: true, data: { ok: true, applicable: true, drainToken, state: 'drained' } };
++      }
++    });
++
++    startGenerating(live.document);
++    const section = assistantTurn(live.document, 'provider-large-page-turn', []);
++    live.hook.observe();
++    await settle();
++    const large = 'Long final sentence. '.repeat(1800);
++    prose(live.document, section, 'provider-large-final', large);
++    const descriptor = {
++      turnId: 'provider-large-page-turn', conversationId, endMessageId: 'provider-large-final', calls: [], activities: [],
++      messages: [{ messageId: 'provider-large-final', stable: true, rawText: large, renderedHtml: `<p>${large}</p>` }]
++    };
++    const window = live.window as any;
++    const instantTimer = window.setTimeout;
++    window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
++    const onAsk = (event: any) => {
++      if (event.data?.source === 'clf-fiber-terminal-ask') {
++        terminalScans += 1;
++        window.dispatchEvent(new window.MessageEvent('message', { data: {
++          source: 'clf-fiber-terminal-reply', nonce: event.data.nonce, v: 1,
++          stamp: event.data.stamp, endMessageId: descriptor.endMessageId
++        }, source: window }));
++        return;
++      }
++      if (event.data?.source !== 'clf-fiber-ask') return;
++      if (probeSeen) fullScansAfterProbe += 1;
++      const token = event.data.nonce;
++      section.setAttribute('data-clf-fiber-turn', `${token}:0`);
++      window.dispatchEvent(new window.MessageEvent('message', {
++        data: { source: 'clf-fiber-reply', nonce: token, scanToken: token, v: fiberVersion, scanOk: true, rows: [],
++          turns: [{ ...descriptor, index: 0 }] }, source: window
++      }));
++    };
++    window.addEventListener('message', onAsk);
++    try {
++      await live.hook.refreshFiber();
++      await live.hook.flush();
++      await vi.waitFor(() => expect(phases).toContain('commit'), { timeout: 2_000, interval: 5 });
++      expect(terminalScans).toBeGreaterThanOrEqual(1);
++      expect(fullScansAfterProbe).toBe(0);
++    } finally {
++      window.removeEventListener('message', onAsk);
++      window.setTimeout = instantTimer;
++    }
++  });
++
+   it('publishes provider drain when a post-turn Fiber refresh learns the final after stale revalidation', async () => {
+     const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+     const drainToken = 'provider-drain-raced-wake-token';
+@@ -4818,6 +4898,13 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+     const instantTimer = window.setTimeout;
+     window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
+     const onAsk = (event: any) => {
++      if (event.data?.source === 'clf-fiber-terminal-ask') {
++        window.dispatchEvent(new window.MessageEvent('message', { data: {
++          source: 'clf-fiber-terminal-reply', nonce: event.data.nonce, v: 1,
++          stamp: event.data.stamp, endMessageId: finalAvailable ? descriptor.endMessageId : null
++        }, source: window }));
++        return;
++      }
+       if (event.data?.source !== 'clf-fiber-ask') return;
+       // Keep Fiber genuinely unavailable through the DOM-completed turn boundary. The provider
+       // probe is the first moment after turn_end at which the page model may answer, matching
+@@ -4885,6 +4972,13 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+     const instantTimer = window.setTimeout;
+     window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
+     const onAsk = (event: any) => {
++      if (event.data?.source === 'clf-fiber-terminal-ask') {
++        window.dispatchEvent(new window.MessageEvent('message', { data: {
++          source: 'clf-fiber-terminal-reply', nonce: event.data.nonce, v: 1,
++          stamp: event.data.stamp, endMessageId: descriptor.endMessageId
++        }, source: window }));
++        return;
++      }
+       if (event.data?.source !== 'clf-fiber-ask') return;
+       const token = event.data.nonce;
+       section.setAttribute('data-clf-fiber-turn', `${token}:0`);
+@@ -4938,6 +5032,13 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+     const instantTimer = window.setTimeout;
+     window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
+     const onAsk = (event: any) => {
++      if (event.data?.source === 'clf-fiber-terminal-ask') {
++        window.dispatchEvent(new window.MessageEvent('message', { data: {
++          source: 'clf-fiber-terminal-reply', nonce: event.data.nonce, v: 1,
++          stamp: event.data.stamp, endMessageId: descriptor.endMessageId
++        }, source: window }));
++        return;
++      }
+       if (event.data?.source !== 'clf-fiber-ask') return;
+       const token = event.data.nonce;
+       section.setAttribute('data-clf-fiber-turn', `${token}:0`);
+diff --git a/test/fiber.test.ts b/test/fiber.test.ts
+index 9373ec4f..503db8d1 100644
+--- a/test/fiber.test.ts
++++ b/test/fiber.test.ts
+@@ -303,7 +303,8 @@ async function scan(
+   /** This install's connector names, as the content script passes them with every ask. */
+   apps?: unknown,
+   /** This install's proven connector apps ({ surface, appId, linkId, name }), passed the same way. */
+-  appIds?: unknown
++  appIds?: unknown,
++  terminalProbe = false
+ ): Promise<{
+   rows: Descriptor[];
+   version: number;
+@@ -315,6 +316,7 @@ async function scan(
+   imageStamps: Array<string | null>;
+   repeatedStampMutations: number;
+   turns: TurnEvidence[];
++  terminalEndMessageId?: string | null;
+ }> {
+   const dom = new JSDOM('<!doctype html><html><body></body></html>', {
+     url: `https://chatgpt.com/c/${THREAD}`,
+@@ -476,6 +478,28 @@ async function scan(
+   const turnStamps = [...document.querySelectorAll('[data-testid^="conversation-turn-"], [data-chatgpt-search-unit-key]')].map((section) =>
+     section.getAttribute('data-clf-fiber-turn')
+   );
++  let terminalEndMessageId: string | null | undefined;
++  if (terminalProbe) {
++    const stamp = turnStamps.find((value): value is string => typeof value === 'string');
++    if (!stamp) throw new Error('terminal probe requires a stamped turn');
++    const terminalNonce = 'terminal-test-nonce';
++    const terminalReply = new Promise<Record<string, any>>((resolve, reject) => {
++      const timer = globalThis.setTimeout(() => reject(new Error('the terminal helper never answered')), 2000);
++      window.addEventListener('message', (event: any) => {
++        if (event.data?.source !== 'clf-fiber-terminal-reply' || event.data.nonce !== terminalNonce) return;
++        globalThis.clearTimeout(timer);
++        resolve(event.data);
++      });
++    });
++    window.dispatchEvent(new window.MessageEvent('message', {
++      data: { source: 'clf-fiber-terminal-ask', nonce: terminalNonce, stamp }, source: window
++    }));
++    const terminal = await terminalReply;
++    expect(terminal).toMatchObject({ v: 1, stamp });
++    expect(terminal).not.toHaveProperty('turns');
++    expect(terminal).not.toHaveProperty('rows');
++    terminalEndMessageId = terminal.endMessageId ?? null;
++  }
+   dom.window.close();
+   return {
+     rows: data.rows as Descriptor[],
+@@ -487,7 +511,8 @@ async function scan(
+     thoughtStamps,
+     imageStamps,
+     repeatedStampMutations,
+-    turns: (data.turns ?? []) as TurnEvidence[]
++    turns: (data.turns ?? []) as TurnEvidence[],
++    ...(terminalProbe ? { terminalEndMessageId } : {})
+   };
+ }
+ 
+@@ -499,6 +524,19 @@ const rowInTurn = (messages: Message[], turnMessages: Message[], collapsed = 0)
+ // --------------------------------------------------------------------- tests
+ 
+ describe('reading a row out of the page', () => {
++  it('revalidates a stamped terminal without returning transcript payload', async () => {
++    const final = authored('terminal-only-final', 'A'.repeat(30_000), {
++      status: 'finished_successfully', endTurn: true, channel: 'final'
++    });
++    const result = await scan([], [{
++      id: 'terminal-only-turn',
++      messages: [final],
++      rendered: ['A'.repeat(30_000)]
++    }], false, undefined, undefined, true);
++    expect(result.turns[0]?.endMessageId).toBe('terminal-only-final');
++    expect(result.terminalEndMessageId).toBe('terminal-only-final');
++  });
++
+   it('reads the 2026-09 search-unit turn.items model without inventing request identity', async () => {
+     const result = await scan([], [{
+       id: 'search-turn-one',
+-- 
+2.53.0.windows.1
+

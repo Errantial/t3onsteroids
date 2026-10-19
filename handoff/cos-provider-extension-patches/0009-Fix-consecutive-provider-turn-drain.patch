@@ -1,0 +1,56 @@
+From 777b90c4dfdf1f9dd2346d45a6db655d09a049b4 Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sat, 17 Oct 2026 23:48:59 -0600
+Subject: [PATCH 09/17] Fix consecutive provider turn drain
+
+---
+ extension/content.js        |  5 +++--
+ test/content-script.test.ts | 16 ++++++++++++++++
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/extension/content.js b/extension/content.js
+index eb611313..4e393064 100644
+--- a/extension/content.js
++++ b/extension/content.js
+@@ -12895,8 +12895,9 @@
+       if (current()) observe();
+       return false;
+     })();
+-    providerDrainWork = work.finally(() => { if (providerDrainWork === work) providerDrainWork = null; });
+-    return providerDrainWork;
++    const tracked = work.finally(() => { if (providerDrainWork === tracked) providerDrainWork = null; });
++    providerDrainWork = tracked;
++    return tracked;
+   }
+ 
+   /** Both final-driven Goal/Loop and unfinished Continue settle the same native control. */
+diff --git a/test/content-script.test.ts b/test/content-script.test.ts
+index 9ec1e9ba..95612e0c 100644
+--- a/test/content-script.test.ts
++++ b/test/content-script.test.ts
+@@ -4711,6 +4711,22 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
+       expect(emitted(live.sent, 'assistant_message')).toContainEqual(expect.objectContaining({
+         event: expect.objectContaining({ messageId: 'provider-next-message', text: 'New turn progress.' })
+       }));
++
++      // The same document can complete another provider-owned turn without navigating. The
++      // first turn's permanent late-mutation fence must not prevent this newer exact turn from
++      // obtaining its own probe/commit high-water.
++      const nextLocalTurn = emitted(live.sent, 'turn_start').at(-1)!.event.turnId as string;
++      bindings[1] = { section: nextSection, turn: { ...bindings[1]!.turn,
++        endMessageId: 'provider-next-message',
++        messages: [{ messageId: 'provider-next-message', stable: true, rawText: 'New turn progress.',
++          renderedHtml: '<p>New turn progress.</p>' }] } };
++      await live.hook.refreshFiber();
++      await live.hook.flush();
++      await vi.waitFor(() => expect(phases).toEqual(['probe', 'commit', 'probe', 'commit']),
++        { timeout: 10_000, interval: 5 });
++      expect(emitted(live.sent, 'turn_end').at(-1)?.event).toMatchObject({
++        turnId: nextLocalTurn, outcome: 'completed'
++      });
+     } finally {
+       window.removeEventListener('message', onAsk);
+       window.setTimeout = instantTimer;
+-- 
+2.53.0.windows.1
+

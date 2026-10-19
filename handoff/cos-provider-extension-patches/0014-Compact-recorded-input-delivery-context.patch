@@ -1,0 +1,80 @@
+From e4311f2c495ec17d94411779a53db5745fec80a4 Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sun, 18 Oct 2026 08:12:33 -0600
+Subject: [PATCH 14/17] Compact recorded input delivery context
+
+---
+ src/main/session/input.ts  | 16 ++++++++++++++--
+ test/session-input.test.ts | 11 +++++++++++
+ 2 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/src/main/session/input.ts b/src/main/session/input.ts
+index eeb55ca2..6ec568fa 100644
+--- a/src/main/session/input.ts
++++ b/src/main/session/input.ts
+@@ -113,6 +113,12 @@ const entrySchema = inputArgs.extend({
+   deliveredAt: z.number().optional(),
+   stagesApplied: z.boolean().optional(),
+   historyRecorded: z.boolean().optional(),
++  /**
++   * Canonical history was written by a recorder version that stores the authored text separately
++   * from transport-only deliveryText. Once this is present, the large frozen delivery wrapper is
++   * no longer recovery authority and may be discarded from the durable outbox receipt.
++   */
++  historyProjectionVersion: z.literal(1).optional(),
+   /** Canonical message exists even when optional image assets could not be saved. */
+   historyAnchored: z.boolean().optional(),
+   /** Store origin proving the canonical row was committed; never a wall-clock guess. */
+@@ -420,7 +426,9 @@ async function load(): Promise<InputEntry[]> {
+     // Re-project wrapped receipts once when loading the outbox, so recordings made
+     // before authoredText existed recover their original visible text too. This
+     // is canonical history only; it never reopens transport or resends an input.
+-    if (row.historyRecorded && row.deliveryText && row.deliveryText !== row.text) row.historyRecorded = false;
++    if (row.historyRecorded && row.deliveryText && row.deliveryText !== row.text && row.historyProjectionVersion !== 1) {
++      row.historyRecorded = false;
++    }
+     if (!row.sessionId && row.purpose !== 'decision' && row.conversationId && row.deliveredAt !== undefined && !stamped.has(row.conversationId)) {
+       await noteChatOrigin(row.conversationId, { kind: 'desktop', fromSessionId: null, agentId: null, task: '' });
+     }
+@@ -1005,7 +1013,11 @@ async function publishHistory(): Promise<void> {
+   }
+   if (recorded.size || current.some(row => anchored.has(row.id) && (!row.historyAnchored || row.historySeq !== anchored.get(row.id)))) {
+     try { await commit(current.map(row => recorded.has(row.id) || anchored.has(row.id)
+-      ? { ...row, ...(recorded.has(row.id) ? { historyRecorded: true } : {}), ...(anchored.has(row.id) ? { historyAnchored: true, historySeq: anchored.get(row.id) } : {}) } : row)); }
++      ? { ...row,
++          ...(recorded.has(row.id)
++            ? { historyRecorded: true as const, historyProjectionVersion: 1 as const, deliveryText: undefined }
++            : {}),
++          ...(anchored.has(row.id) ? { historyAnchored: true, historySeq: anchored.get(row.id) } : {}) } : row)); }
+     catch { /* the durable delivery receipt remains; canonical retry is idempotent */ }
+   }
+ }
+diff --git a/test/session-input.test.ts b/test/session-input.test.ts
+index 862c843d..a853c946 100644
+--- a/test/session-input.test.ts
++++ b/test/session-input.test.ts
+@@ -883,10 +883,21 @@ describe('durable user input ownership', () => {
+     expect((await listInputs())[0]).toMatchObject({ state: 'sent', historyRecorded: true });
+     expect(record).toHaveBeenCalledTimes(1);
+     expect(record.mock.calls[0]?.[0]).toMatchObject({ text: 'hello', deliveryText: receipt.deliveryText, messageId: 'native-message' });
++    const compacted = (await readDurable<InputEntry[]>('session-input'))![0]!;
++    expect(compacted).toMatchObject({
++      state: 'sent', historyRecorded: true, historyProjectionVersion: 1,
++      text: 'hello', messageId: 'native-message'
++    });
++    expect(compacted.deliveryText).toBeUndefined();
+     expect(await claimBrowserInput(receipt.id, 'another-page', binding.conversationId)).toBeNull();
+     expect(await offerToolInput(sessionId, binding.conversationId, 'next', ++now)).toEqual([]);
+     await listInputs();
+     expect(record).toHaveBeenCalledTimes(1);
++    // A second cold restore keeps the compact receipt and does not need the legacy migration again.
++    resetInputForTests();
++    await listInputs();
++    expect(record).toHaveBeenCalledTimes(1);
++    expect((await readDurable<InputEntry[]>('session-input'))![0]?.deliveryText).toBeUndefined();
+   });
+   it('legacy queue: offers images in the held turn, bounds each offer to ten, and preserves the receipt boundary', async () => {
+     binding.activeTurnId = 'held-turn';
+-- 
+2.53.0.windows.1
+

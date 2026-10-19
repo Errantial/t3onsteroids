@@ -1,0 +1,81 @@
+From 7899c429d3f25f4462aad631c622a98488205c51 Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sat, 17 Oct 2026 16:04:25 -0600
+Subject: [PATCH 08/17] Expose built-in worker bridge in extension world
+
+---
+ src/preload/cos-browser-worker.ts       | 17 ++++++++++-------
+ test/cos-browser-worker-preload.test.ts |  8 ++++++--
+ 2 files changed, 16 insertions(+), 9 deletions(-)
+
+diff --git a/src/preload/cos-browser-worker.ts b/src/preload/cos-browser-worker.ts
+index fa43ae05..825fd954 100644
+--- a/src/preload/cos-browser-worker.ts
++++ b/src/preload/cos-browser-worker.ts
+@@ -36,7 +36,7 @@ if (workerProtocol === 'chrome-extension:') {
+   ipcRenderer.on('cos-browser:event', (_event, name: string, args: unknown[]) => {
+     for (const subscriber of subscribers) subscriber(name, args);
+   });
+-  contextBridge.exposeInMainWorld('__cosBrowserWorker', {
++  const workerBridge = {
+     call: async (name: string, args: unknown[]): Promise<unknown> => {
+       const reply = await invoke(name, args);
+       // Chrome's exact messages, such as "No tab with id: 7.", reach the extension unchanged.
+@@ -44,15 +44,17 @@ if (workerProtocol === 'chrome-extension:') {
+       return reply.value;
+     },
+     subscribe: (subscriber: (name: string, args: unknown[]) => void): void => { subscribers.add(subscriber); }
+-  });
+-  contextBridge.executeInMainWorld({ func: installChromeShim, args: [process.env.COS_BROWSER_TRACE === '1'] });
++  };
++  contextBridge.exposeInMainWorld('__cosBrowserWorker', workerBridge);
++  contextBridge.executeInMainWorld({ func: installChromeShim, args: [process.env.COS_BROWSER_TRACE === '1', workerBridge] });
+ }
+ 
+ /** Runs in the worker's own world; it is serialized, so it must not reference this module. */
+-function installChromeShim(trace: boolean): void {
+-  const bridge = (globalThis as unknown as {
+-    __cosBrowserWorker: { call(name: string, args: unknown[]): Promise<unknown>; subscribe(fn: (name: string, args: unknown[]) => void): void };
+-  }).__cosBrowserWorker;
++function installChromeShim(trace: boolean, bridge: {
++  call(name: string, args: unknown[]): Promise<unknown>;
++  subscribe(fn: (name: string, args: unknown[]) => void): void;
++}): void {
++  (globalThis as unknown as { __cosBrowserWorker?: typeof bridge }).__cosBrowserWorker = bridge;
+   const chrome = (globalThis as unknown as { chrome: Record<string, Record<string, unknown>> }).chrome;
+   if (!chrome?.runtime || !chrome.tabs) return;
+   const tabs = chrome.tabs;
+@@ -233,3 +235,4 @@ function installChromeShim(trace: boolean): void {
+     }
+   });
+ }
++
+diff --git a/test/cos-browser-worker-preload.test.ts b/test/cos-browser-worker-preload.test.ts
+index 9ce571b2..1b23b9b5 100644
+--- a/test/cos-browser-worker-preload.test.ts
++++ b/test/cos-browser-worker-preload.test.ts
+@@ -48,11 +48,14 @@ async function workerWorld() {
+     tabs: { sendMessage: nativeSendMessage, query: () => 'native query' },
+     scripting: {}
+   };
+-  const world = vm.createContext({ chrome, __cosBrowserWorker: electron.exposed.get('__cosBrowserWorker'), console, Promise, Error, JSON, Object, Set, Map,
++  const world = vm.createContext({ chrome, console, Promise, Error, JSON, Object, Set, Map,
+     Math, Number, Date, setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms), clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id) });
+   const install = electron.scripts[1]!;
++  const bridge = electron.exposed.get('__cosBrowserWorker');
++  (world as unknown as { __workerBridge?: unknown }).__workerBridge = bridge;
+   // From source text, as Electron serializes it: a reference to module scope fails here.
+-  vm.runInContext(`(${install.func.toString()})(...${JSON.stringify(install.args ?? [])})`, world);
++  vm.runInContext(`(${install.func.toString()})(${JSON.stringify((install.args ?? [])[0])}, __workerBridge)`, world);
++  expect((world as unknown as { __cosBrowserWorker?: unknown }).__cosBrowserWorker).toBe(bridge);
+   const event = (name: string, args: unknown[]) => electron.listeners.get('cos-browser:event')!({}, name, args);
+   return { chrome, nativeSendMessage, event };
+ }
+@@ -142,3 +145,4 @@ it('fires alarms itself, since Electron drops a due alarm without calling onAlar
+     expect(listed).toEqual([]);
+   } finally { vi.useRealTimers(); }
+ });
++
+-- 
+2.53.0.windows.1
+

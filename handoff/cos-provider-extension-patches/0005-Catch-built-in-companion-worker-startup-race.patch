@@ -1,0 +1,104 @@
+From 0ad8906214ab4d6dbb6f738826f870850bdc9dc1 Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sat, 17 Oct 2026 10:51:07 -0600
+Subject: [PATCH 05/17] Catch built-in companion worker startup race
+
+---
+ src/main/cos-browser/extension-worker.ts  | 18 +++++++++++++++---
+ src/main/cos-browser/host.ts              |  5 +++--
+ test/cos-browser-extension-worker.test.ts | 13 +++++++++++++
+ 3 files changed, 31 insertions(+), 5 deletions(-)
+
+diff --git a/src/main/cos-browser/extension-worker.ts b/src/main/cos-browser/extension-worker.ts
+index 88cd5193..39f6d993 100644
+--- a/src/main/cos-browser/extension-worker.ts
++++ b/src/main/cos-browser/extension-worker.ts
+@@ -51,11 +51,22 @@ export class ExtensionWorkerLink {
+   constructor(
+     private readonly registry: WorkerRegistry,
+     /** `chrome-extension://<id>/`: only this extension's worker is ever linked. */
+-    private readonly scope: string,
++    private scope: string | null,
+     private readonly answer: (name: string, args: unknown) => Promise<unknown>,
+     private readonly warn: (message: string) => void
+   ) {
+-    for (const versionId of Object.keys(registry.getAllRunning())) this.statusChanged(Number(versionId), 'running');
++    this.rescanRunning();
++  }
++
++  bindScope(scope: string): void {
++    this.scope = scope;
++    this.rescanRunning();
++    if (this.pending.length > 0 && this.workers.size === 0) this.wake();
++  }
++
++  private rescanRunning(): void {
++    if (!this.scope) return;
++    for (const versionId of Object.keys(this.registry.getAllRunning())) this.statusChanged(Number(versionId), 'running');
+   }
+ 
+   statusChanged(versionId: number, status: WorkerStatus): void {
+@@ -96,7 +107,7 @@ export class ExtensionWorkerLink {
+ 
+   private attach(versionId: number, running: boolean): void {
+     const worker = this.registry.getWorkerFromVersionID(versionId);
+-    if (!worker || worker.isDestroyed() || worker.scope !== this.scope) return;
++    if (!this.scope || !worker || worker.isDestroyed() || worker.scope !== this.scope) return;
+     if (this.workers.get(versionId) !== worker) {
+       this.workers.set(versionId, worker);
+       // A worker that outlived an earlier link still holds that link's handler.
+@@ -129,6 +140,7 @@ export class ExtensionWorkerLink {
+    * made while still no worker has appeared, fails too.
+    */
+   private wake(retried = false): void {
++    if (!this.scope) return;
+     void this.registry.startWorkerForScope(this.scope).catch(error => {
+       if (this.closed || this.workers.size > 0) return;
+       if (!retried) { setTimeout(() => { if (!this.closed && this.workers.size === 0) this.wake(true); }, WAKE_RETRY_MS); return; }
+diff --git a/src/main/cos-browser/host.ts b/src/main/cos-browser/host.ts
+index 74748b16..b4427ca2 100644
+--- a/src/main/cos-browser/host.ts
++++ b/src/main/cos-browser/host.ts
+@@ -243,12 +243,13 @@ export class CosBrowser {
+     const ses = session.fromPartition(PARTITION);
+     this.configure(ses);
+     this.ses = ses;
++    this.link = new ExtensionWorkerLink(ses.serviceWorkers as unknown as WorkerRegistry, null,
++      (name, args) => this.answer(name, args), logWarn);
+     const extension = await ses.extensions.loadExtension(dir);
+     this.extensionId = extension.id;
++    this.link.bindScope(`chrome-extension://${extension.id}/`);
+     try { this.companionIcon = `data:image/png;base64,${readFileSync(path.join(dir, 'icons', 'icon32.png')).toString('base64')}`; }
+     catch { this.companionIcon = null; }
+-    this.link = new ExtensionWorkerLink(ses.serviceWorkers as unknown as WorkerRegistry, `chrome-extension://${extension.id}/`,
+-      (name, args) => this.answer(name, args), logWarn);
+     // Chrome tells an extension the browser started; Electron loads it without that event, and
+     // the companion first looks for the app on it.
+     this.toWorker('runtime.onStartup', []);
+diff --git a/test/cos-browser-extension-worker.test.ts b/test/cos-browser-extension-worker.test.ts
+index b0d7314a..8703ab09 100644
+--- a/test/cos-browser-extension-worker.test.ts
++++ b/test/cos-browser-extension-worker.test.ts
+@@ -36,6 +36,19 @@ function link(reg: WorkerRegistry, answer = vi.fn(async (name: string) => ({ ok:
+   return { link: new ExtensionWorkerLink(reg, SCOPE, answer, warn), answer, warn };
+ }
+ 
++it('binds a scope after construction and recovers a worker that started before the scope was known', () => {
++  const w = worker();
++  const reg = registry({ 6: w }, [6]);
++  const warn = vi.fn();
++  const channel = new ExtensionWorkerLink(reg.value, null, vi.fn(async () => ({ ok: true })), warn);
++  channel.send('runtime.onStartup', []);
++  expect(w.sent).toEqual([]);
++  channel.bindScope(SCOPE);
++  expect(w.sent.map(([name]) => name)).toEqual(['runtime.onStartup']);
++  expect(w.handlers.has(API_CHANNEL)).toBe(true);
++  expect(w.tasks).toHaveLength(1);
++});
++
+ it('holds events until the worker has run its script, then delivers them in order', () => {
+   const w = worker();
+   const reg = registry({ 7: w });
+-- 
+2.53.0.windows.1
+

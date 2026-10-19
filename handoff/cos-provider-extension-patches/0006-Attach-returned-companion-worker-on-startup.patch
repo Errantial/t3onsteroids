@@ -1,0 +1,119 @@
+From 8f15561ba976b9f3a436f3cca08eba373616b225 Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Sat, 17 Oct 2026 12:36:19 -0600
+Subject: [PATCH 06/17] Attach returned companion worker on startup
+
+---
+ src/main/cos-browser/extension-worker.ts  | 29 +++++++++++++++----
+ test/cos-browser-extension-worker.test.ts | 34 +++++++++++++++++++++++
+ 2 files changed, 57 insertions(+), 6 deletions(-)
+
+diff --git a/src/main/cos-browser/extension-worker.ts b/src/main/cos-browser/extension-worker.ts
+index 39f6d993..53088f1c 100644
+--- a/src/main/cos-browser/extension-worker.ts
++++ b/src/main/cos-browser/extension-worker.ts
+@@ -29,7 +29,7 @@ export interface WorkerLike {
+ export interface WorkerRegistry {
+   getWorkerFromVersionID(versionId: number): WorkerLike | undefined;
+   getAllRunning(): Record<number, unknown>;
+-  startWorkerForScope(scope: string): Promise<unknown>;
++  startWorkerForScope(scope: string): Promise<(WorkerLike & { readonly versionId?: number }) | unknown>;
+ }
+ 
+ export type WorkerStatus = 'starting' | 'running' | 'stopping' | 'stopped';
+@@ -47,6 +47,7 @@ export class ExtensionWorkerLink {
+   private readonly pending: Array<[string, unknown[]]> = [];
+   private dropped = 0;
+   private closed = false;
++  private wakeFlight = false;
+ 
+   constructor(
+     private readonly registry: WorkerRegistry,
+@@ -140,11 +141,27 @@ export class ExtensionWorkerLink {
+    * made while still no worker has appeared, fails too.
+    */
+   private wake(retried = false): void {
+-    if (!this.scope) return;
+-    void this.registry.startWorkerForScope(this.scope).catch(error => {
+-      if (this.closed || this.workers.size > 0) return;
+-      if (!retried) { setTimeout(() => { if (!this.closed && this.workers.size === 0) this.wake(true); }, WAKE_RETRY_MS); return; }
++    if (!this.scope || this.closed || this.live().length > 0 || this.wakeFlight) return;
++    this.wakeFlight = true;
++    void this.registry.startWorkerForScope(this.scope).then(started => {
++      if (this.closed || !started || typeof started !== 'object') return;
++      const worker = started as WorkerLike & { readonly versionId?: number };
++      if (typeof worker.versionId !== 'number' || worker.scope !== this.scope || worker.isDestroyed()) return;
++      // Electron may resolve startWorkerForScope after the worker is already running without
++      // emitting another running-status-changed event. Treat the resolved worker as authoritative.
++      this.workers.set(worker.versionId, worker);
++      worker.ipc.removeHandler(API_CHANNEL);
++      worker.ipc.handle(API_CHANNEL, (_event, name, args) => this.answer(String(name), args));
++      if (!this.keepAlive.has(worker.versionId)) {
++        try { this.keepAlive.set(worker.versionId, worker.startTask()); }
++        catch (error) { this.warn(`cos browser: could not keep the extension worker alive: ${error instanceof Error ? error.message : String(error)}`); }
++      }
++      this.ready.add(worker.versionId);
++      this.flush();
++    }).catch(error => {
++      if (this.closed || this.live().length > 0) return;
++      if (!retried) { setTimeout(() => this.wake(true), WAKE_RETRY_MS); return; }
+       this.warn(`cos browser: could not start the extension worker: ${error instanceof Error ? error.message : String(error)}`);
+-    });
++    }).finally(() => { this.wakeFlight = false; });
+   }
+ }
+diff --git a/test/cos-browser-extension-worker.test.ts b/test/cos-browser-extension-worker.test.ts
+index 8703ab09..1b585a9d 100644
+--- a/test/cos-browser-extension-worker.test.ts
++++ b/test/cos-browser-extension-worker.test.ts
+@@ -49,6 +49,39 @@ it('binds a scope after construction and recovers a worker that started before t
+   expect(w.tasks).toHaveLength(1);
+ });
+ 
++
++it('accepts the worker returned by startWorkerForScope when Electron emits no status event', async () => {
++  const w = worker();
++  const started = Object.assign(w.value, { versionId: 11 });
++  const reg: WorkerRegistry = {
++    getWorkerFromVersionID: () => undefined,
++    getAllRunning: () => ({}),
++    startWorkerForScope: async () => started,
++  };
++  const { link: channel } = link(reg);
++  channel.send('runtime.onStartup', []);
++  await Promise.resolve();
++  expect(w.sent.map(([name]) => name)).toEqual(['runtime.onStartup']);
++  expect(w.handlers.has(API_CHANNEL)).toBe(true);
++  expect(w.tasks).toHaveLength(1);
++});
++
++it('retries when a worker was only starting and never became ready', async () => {
++  vi.useFakeTimers();
++  const w = worker();
++  let attempts = 0;
++  const reg: WorkerRegistry = {
++    getWorkerFromVersionID: id => id === 12 ? w.value : undefined,
++    getAllRunning: () => ({}),
++    startWorkerForScope: async () => { attempts += 1; throw new Error('Failed to start service worker.'); },
++  };
++  const { link: channel, warn } = link(reg);
++  channel.send('runtime.onStartup', []);
++  channel.statusChanged(12, 'starting');
++  await vi.advanceTimersByTimeAsync(2000);
++  expect(attempts).toBeGreaterThanOrEqual(2);
++  expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not start the extension worker'));
++});
+ it('holds events until the worker has run its script, then delivers them in order', () => {
+   const w = worker();
+   const reg = registry({ 7: w });
+@@ -136,6 +169,7 @@ it("does not report a start that raced Electron's own, and reports one that keep
+   const raced = link(reg);
+   raced.link.send('runtime.onStartup', []);
+   raced.link.statusChanged(8, 'starting');
++  raced.link.statusChanged(8, 'running');
+   await vi.advanceTimersByTimeAsync(2000);
+   expect(raced.warn).not.toHaveBeenCalled();
+   expect(starts).toHaveLength(1);
+-- 
+2.53.0.windows.1
+

@@ -13,6 +13,23 @@ import {
 
 export const DURABLE_SESSION_SCHEMA_VERSION = 1 as const;
 
+export type StateIoOperation = "read" | "write" | "replace";
+
+export class StateIoError extends Error {
+  readonly code = "state_io_error";
+  readonly operation: StateIoOperation;
+  readonly syscallCode: string | undefined;
+
+  constructor(operation: StateIoOperation, cause: unknown) {
+    super(`Durable state ${operation} failed`, { cause });
+    this.name = "StateIoError";
+    this.operation = operation;
+    this.syscallCode = typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string"
+      ? cause.code
+      : undefined;
+  }
+}
+
 export interface DurableSessionRecord extends SessionState {
   readonly schemaVersion: typeof DURABLE_SESSION_SCHEMA_VERSION;
   readonly revision: number;
@@ -211,17 +228,48 @@ async function writeAndSync(file: string, contents: string): Promise<void> {
   }
 }
 
-const WINDOWS_RENAME_SHARING_ERRORS = new Set(["EPERM", "EACCES", "EBUSY"]);
+const WINDOWS_SHARING_ERRORS = new Set(["EPERM", "EACCES", "EBUSY"]);
+// Eleven bounded waits (5, 10, 20, 40, 80, then 100 ms) give Windows sharing
+// contention up to 755 ms to clear without turning durable state operations into
+// an unbounded wait.
+const WINDOWS_STATE_IO_MAX_ATTEMPTS = 12;
+
+function stateIoAttempts(): number {
+  return process.platform === "win32" ? WINDOWS_STATE_IO_MAX_ATTEMPTS : 1;
+}
+
+function stateIoRetryDelayMs(attempt: number): number {
+  return Math.min(5 * (2 ** attempt), 100);
+}
+
+function isWindowsSharingError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return process.platform === "win32" && typeof code === "string" && WINDOWS_SHARING_ERRORS.has(code);
+}
+
+async function readJournalFile(file: string): Promise<Buffer> {
+  const maxAttempts = stateIoAttempts();
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      return await fs.readFile(file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
+      if (!isWindowsSharingError(error)) throw new StateIoError("read", error);
+      if (attempt + 1 >= maxAttempts) throw new StateIoError("read", error);
+      await new Promise((resolve) => setTimeout(resolve, stateIoRetryDelayMs(attempt)));
+    }
+  }
+  throw new StateIoError("read", new Error("Durable state read retry budget exhausted"));
+}
 
 async function replaceSyncedFile(temp: string, target: string, contents: string): Promise<void> {
-  const maxAttempts = process.platform === "win32" ? 8 : 1;
+  const maxAttempts = stateIoAttempts();
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       await fs.rename(temp, target);
       return;
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (process.platform !== "win32" || !code || !WINDOWS_RENAME_SHARING_ERRORS.has(code)) throw error;
+      if (!isWindowsSharingError(error)) throw new StateIoError("replace", error);
 
       // A Windows replace can race a lock-free reader/virus scanner that temporarily holds the
       // destination open. Never unlink the authoritative journal and never replay the state
@@ -233,9 +281,8 @@ async function replaceSyncedFile(temp: string, target: string, contents: string)
         // Missing or temporarily unreadable target is not proof of commit; keep the old journal
         // intact and retry the same temp file below.
       }
-      if (attempt + 1 >= maxAttempts) throw error;
-      const delayMs = Math.min(5 * (2 ** attempt), 40);
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (attempt + 1 >= maxAttempts) throw new StateIoError("replace", error);
+      await new Promise((resolve) => setTimeout(resolve, stateIoRetryDelayMs(attempt)));
     }
   }
 }
@@ -591,14 +638,16 @@ export class DurableSessionStore {
   }
 
   private async writeQuarantine(sessionId: string, record: QuarantineRecord): Promise<void> {
-    await fs.mkdir(path.dirname(this.quarantinePath(sessionId)), { recursive: true });
-    if (await this.activeQuarantine(sessionId)) return;
     const temp = `${this.quarantinePath(sessionId)}.${process.pid}.${randomUUID()}.tmp`;
     try {
+      await fs.mkdir(path.dirname(this.quarantinePath(sessionId)), { recursive: true });
+      if (await this.activeQuarantine(sessionId)) return;
       await writeAndSync(temp, JSON.stringify(record));
       await fs.rename(temp, this.quarantinePath(sessionId));
     } catch (error) {
-      if (!(await this.activeQuarantine(sessionId))) throw error;
+      if (await this.activeQuarantine(sessionId)) return;
+      if (error instanceof StateIoError) throw error;
+      throw new StateIoError("write", error);
     } finally {
       await fs.rm(temp, { force: true }).catch(() => undefined);
     }
@@ -610,7 +659,7 @@ export class DurableSessionStore {
     if (quarantined) {
       if (quarantined.reason === "state_schema_unsupported") {
         try {
-          const bytes = await fs.readFile(this.sessionPath(sessionId));
+          const bytes = await readJournalFile(this.sessionPath(sessionId));
           const parsed = parseRecord(bytes);
           if (parsed.kind === "unsupported") {
             return { status: "unsupportedSchema", sha256: quarantined.sourceSha256, schemaVersion: parsed.schemaVersion };
@@ -621,7 +670,7 @@ export class DurableSessionStore {
     }
     let bytes: Buffer;
     try {
-      bytes = await fs.readFile(this.sessionPath(sessionId));
+      bytes = await readJournalFile(this.sessionPath(sessionId));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return { status: "missing" };
       throw error;
@@ -642,8 +691,13 @@ export class DurableSessionStore {
     const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
     const contents = JSON.stringify(withoutUndefined(record));
     try {
-      await writeAndSync(temp, contents);
-      await replaceSyncedFile(temp, target, contents);
+      try {
+        await writeAndSync(temp, contents);
+        await replaceSyncedFile(temp, target, contents);
+      } catch (error) {
+        if (error instanceof StateIoError) throw error;
+        throw new StateIoError("write", error);
+      }
     } finally {
       await fs.rm(temp, { force: true }).catch(() => undefined);
     }

@@ -11,6 +11,7 @@ import {
   DurableSessionStore,
   HardLinkMutex,
   PowerShellWindowsProcessIdentity,
+  StateIoError,
   StateLockBusyError,
   UnsupportedStateFilesystemError,
   canonicalProfileIdentityHash,
@@ -198,6 +199,60 @@ describe("Windows hard-link state mutex", () => {
 });
 
 describe("durable tagged session state", () => {
+  it.runIf(process.platform === "win32")("retries a lock-free session-journal read after transient Windows sharing errors", async () => {
+    const root = await tempRoot();
+    const durable = store(root);
+    await durable.updateSession(sessionId, { kind: "create", state: initial() });
+    const target = path.join(root, "sessions", `${sessionId}.json`);
+    const originalReadFile = fs.readFile.bind(fs);
+    let sharingFailures = 0;
+    const readSpy = vi.spyOn(fs, "readFile").mockImplementation(async (...args: Parameters<typeof fs.readFile>) => {
+      if (String(args[0]) === target && sharingFailures < 2) {
+        sharingFailures += 1;
+        throw Object.assign(new Error("fixture sharing violation"), { code: "EBUSY" });
+      }
+      return originalReadFile(...args);
+    });
+
+    try {
+      await expect(durable.readSession(sessionId)).resolves.toMatchObject({
+        status: "found",
+        value: { revision: 1, sessionId },
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
+    expect(sharingFailures).toBe(2);
+  });
+
+  it.runIf(process.platform === "win32")("fails a persistently shared session-journal read with typed state I/O", async () => {
+    const root = await tempRoot();
+    const durable = store(root);
+    await durable.updateSession(sessionId, { kind: "create", state: initial() });
+    const target = path.join(root, "sessions", `${sessionId}.json`);
+    const originalReadFile = fs.readFile.bind(fs);
+    let readAttempts = 0;
+    const readSpy = vi.spyOn(fs, "readFile").mockImplementation(async (...args: Parameters<typeof fs.readFile>) => {
+      if (String(args[0]) === target) {
+        readAttempts += 1;
+        throw Object.assign(new Error("fixture persistent sharing violation"), { code: "EACCES" });
+      }
+      return originalReadFile(...args);
+    });
+
+    try {
+      await expect(durable.readSession(sessionId)).rejects.toMatchObject({
+        name: "StateIoError",
+        code: "state_io_error",
+        operation: "read",
+        syscallCode: "EACCES",
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
+    expect(readAttempts).toBe(12);
+  });
+
   it.runIf(process.platform === "win32")("retries an atomic session-journal replace after a transient Windows sharing error", async () => {
     const root = await tempRoot();
     const durable = store(root);
@@ -239,9 +294,11 @@ describe("durable tagged session state", () => {
     const before = await fs.readFile(target, "utf8");
 
     const originalRename = fs.rename.bind(fs);
+    let replaceAttempts = 0;
     const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (...args: Parameters<typeof fs.rename>) => {
       const [, destination] = args;
       if (String(destination) === target) {
+        replaceAttempts += 1;
         throw Object.assign(new Error("fixture persistent sharing violation"), { code: "EPERM" });
       }
       return originalRename(...args);
@@ -252,10 +309,16 @@ describe("durable tagged session state", () => {
         kind: "begin_input",
         inputId,
         generation: 1,
-      })).rejects.toMatchObject({ code: "EPERM" });
+      })).rejects.toMatchObject({
+        name: "StateIoError",
+        code: "state_io_error",
+        operation: "replace",
+        syscallCode: "EPERM",
+      });
     } finally {
       renameSpy.mockRestore();
     }
+    expect(replaceAttempts).toBe(12);
 
     await expect(fs.readFile(target, "utf8")).resolves.toBe(before);
     await expect(durable.readSession(sessionId)).resolves.toMatchObject({
@@ -263,6 +326,29 @@ describe("durable tagged session state", () => {
       value: { revision: 1, bindingState: "unbound", interactionMode: "default" },
     });
     await expect(fs.readdir(path.join(root, "sessions"))).resolves.toEqual([`${sessionId}.json`]);
+  });
+
+  it("types non-sharing journal I/O failures instead of leaking raw filesystem errors", async () => {
+    const root = await tempRoot();
+    const durable = store(root);
+    await durable.updateSession(sessionId, { kind: "create", state: initial() });
+    const target = path.join(root, "sessions", `${sessionId}.json`);
+    const originalReadFile = fs.readFile.bind(fs);
+    const readSpy = vi.spyOn(fs, "readFile").mockImplementation(async (...args: Parameters<typeof fs.readFile>) => {
+      if (String(args[0]) === target) throw Object.assign(new Error("fixture raw I/O failure"), { code: "EIO" });
+      return originalReadFile(...args);
+    });
+
+    try {
+      await expect(durable.readSession(sessionId)).rejects.toBeInstanceOf(StateIoError);
+      await expect(durable.readSession(sessionId)).rejects.toMatchObject({
+        code: "state_io_error",
+        operation: "read",
+        syscallCode: "EIO",
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 
   it("queues same-process overlapping mutations before the hard-link mutex timeout", async () => {

@@ -51,6 +51,7 @@ export class MemoryAdmissionLease implements AdmissionLease {
 export {
   DurableSessionStore,
   DURABLE_SESSION_SCHEMA_VERSION,
+  StateIoError,
   defaultStateDirectory,
 } from "./durable.js";
 export type {
@@ -58,6 +59,7 @@ export type {
   DurableSessionStoreOptions,
   DurableSessionTransition,
   SessionTransitionResult,
+  StateIoOperation,
   TaggedSessionRead,
 } from "./durable.js";
 export {

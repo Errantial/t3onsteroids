@@ -52,6 +52,7 @@ export {
   DurableSessionStore,
   HardLinkMutex,
   PowerShellWindowsProcessIdentity,
+  StateIoError,
   StateLockBusyError,
   UnsupportedStateFilesystemError,
   canonicalProfileIdentityHash,
@@ -67,6 +68,7 @@ export type {
   LeaseReleaseProof,
   ProductionStateContext,
   SessionTransitionResult,
+  StateIoOperation,
   TaggedSessionRead,
   WindowsProcessIdentity,
 } from "./state/index.js";

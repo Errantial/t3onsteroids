@@ -809,17 +809,22 @@ Complete every implementation-input change **before** installing the release can
 
 From this point through Step 8, any change to an implementation-input path changes `bridgeImplementationCommit` and invalidates the affected live evidence per the execution-contract rule above. Evidence/docs/gate-status-only commits do not.
 
-### Authorized live CoS extension install/smoke before Steps 7–8
+### Authorized live CoS candidate smoke before Steps 7–8
 
-This is a live-environment transition, not an implementation shortcut. Run it only after Steps 1–6 are green and only with explicit user authorization to replace/update the installed CoS test build.
+This is a live-environment transition, not an implementation shortcut. Run it only after Steps 1–6 are green and with explicit user authorization for one of these two lanes:
+
+- **side-by-side candidate lane (preferred while the user's active CoS remains in use):** launch the exact Step-1 candidate as a separate process with a dedicated, isolated CoS user-data/profile directory. It must not reuse or mutate the active CoS profile or installation. The candidate therefore owns its own controller discovery files/token/endpoint and bridge admission identity while still running under the same OS user;
+- **installed-candidate lane:** replace/update the installed CoS test build using the generated Windows package/installer workflow, with a trusted rollback package recorded before modification.
+
+For either lane:
 
 1. From `C:\Users\emilg\cos-provider-extension`, build the exact clean Step-1 commit with `npm run dist:x64`. Record the resulting package/artifact filename, SHA-256, source commit and build command in `.local-evidence/v1/<run>/manifest.json` and `docs/evidence/v1-01-cos-extension.md`.
-2. Before changing the installed app, record the current installed CoS version and `Chat On Steroids.exe` SHA-256. Establish a reversible restore path: retain or obtain the original trusted installer/package for the currently supported base build and record its SHA/source. If a trustworthy restore package is unavailable, stop with `SETUP_INVALID`; do not use a raw copied application directory as the rollback plan.
-3. Close CoS normally, install the Step-1 companion build using the CoS repository's generated Windows package/installer workflow, then restart CoS. Do not manually overwrite files inside the installed application directory or edit `app.asar` in place.
-4. Record the post-install executable version/SHA-256 and confirm `/v1/health` reports protocol 1, all four feature versions (project resolve, assistant content, provider-session policy, provider-turn drain), and the exact Step-1 `buildId`. If any identity differs, restore the prior trusted build and mark the attempt `SETUP_INVALID` rather than continuing.
-5. Run `node dist/cli/index.js --diagnose --user-data-dir <profile> --cwd <exact project root>` before any mutating acceptance case. This smoke must succeed without creating a CoS chat.
+2. Record the currently active CoS executable version and SHA-256 before starting the candidate. In the side-by-side lane this proves the active instance remained untouched; in the installed-candidate lane it is also part of rollback provenance.
+3. For the side-by-side lane, launch only from the built candidate artifact/output using the repository-supported executable/portable launch shape plus an explicit dedicated test user-data directory. Do not copy files into the installed application directory, edit `app.asar` in place, or point the candidate at the active profile. For the installed-candidate lane, close CoS normally, install the generated candidate package, and restart CoS; do not manually overwrite installed files.
+4. Record the candidate executable version/SHA-256 and confirm `/v1/health` reports protocol 1, all four feature versions (project resolve, assistant content, provider-session policy, provider-turn drain), and the exact Step-1 `buildId`. In the side-by-side lane also recheck the active instance's executable path/SHA-256 (and, when observable without mutation, process identity) to prove it was not replaced. If any identity differs, mark the attempt `SETUP_INVALID` and stop the candidate; if using the installed lane, restore the prior trusted build.
+5. Run `node dist/cli/index.js --diagnose --user-data-dir <candidate-profile> --cwd <exact project root>` before any mutating acceptance case. This smoke must succeed without creating a CoS chat. Use an isolated `T3ONSTEROIDS_STATE_DIR` for the live run.
 
-The installed extension build remains a test/release candidate until Step 8 passes. If live testing exposes a defect, fix it in the pinned CoS source checkout, commit/build a new candidate, update the provenance record, and repeat this authorized install/smoke sequence; never hot-patch the installed app.
+The candidate remains a test/release candidate until Step 8 passes. If live testing exposes a defect, fix it in the pinned CoS source checkout, commit/build a new candidate, update the provenance record, and repeat the selected authorized candidate-smoke lane; never hot-patch the running or installed app.
 
 ### Shared live preflight and evidence contract for Steps 7–8
 
@@ -834,7 +839,8 @@ nodeVersion
 t3Version + t3Sha
 cosBaseVersion + cosBaseSha
 cosExtensionBuildId
-installedCosBinarySha256
+candidateCosBinarySha256
+candidateLaunchLane             # side_by_side | installed
 controlProtocol + provider feature versions
 cosProfileIdentityHash         # hash, never raw user-data path
 projectLabel + canonicalProjectIdentityHash
@@ -849,7 +855,7 @@ Run these preflight checks in order:
 1. clean bridge worktree and `npm run verify` green;
 2. `package.json.version`, ACP `agentInfo.version`, compatibility output and release-readiness output all report `1.0.0`; `node dist/cli/index.js --release-readiness` shows the four implementation readiness fields owned by Steps 1–4 (`cosProviderExtensionReady`, `eventTranslatorReady`, `durableRecoveryReady`, `productionAcpEntrypoint`) as true and `releaseQualified:false`; verify that committed `docs/evidence/v1-05-controller-privacy.md` and `docs/evidence/v1-06-toolchain-audit.md` exist and record PASS for Steps 5–6;
 3. exact pinned T3 desktop/server version is running; do not use the older PATH CLI for stateful setup;
-4. installed CoS build/version/hash matches the Step-1 provenance record and `/v1/health` reports the pinned extension build id/features;
+4. candidate CoS build/version/hash matches the Step-1 provenance record and `/v1/health` reports the pinned extension build id/features. For `candidateLaunchLane=side_by_side`, the candidate uses a dedicated user-data/profile directory and the active installed CoS executable/profile are unchanged;
 5. CoS browser/companion is connected and the intended ChatGPT account is usable;
 6. CoS Local control API is enabled. **Allow actions is enabled for every live case that sends, cancels or Stops a controller input**, because `/v1/inputs`, pending-input cancel and exact-turn Stop are controller action routes even when the model is asked to do read-only/no-tool work. Provider validation that only exercises ACP `session/new` and read-effect diagnostics/project resolution do not require Allow actions. Host-tool mutation permission remains a separate CoS authority concern. Both settings remain user-controlled;
 7. `--diagnose` succeeds for the exact canonical project root and records only safe labels/hashes;

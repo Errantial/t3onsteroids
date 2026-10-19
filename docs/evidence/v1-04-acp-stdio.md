@@ -4,7 +4,7 @@ Status: PASS
 
 # V1 Step 4 — production ACP stdio provider
 
-`bridgeImplementationCommit`: `5c8fcce4c4962b6c671046fc12ae662c631b2f1a`.
+`bridgeImplementationCommit`: `7c717e1632e228a9af276f65a017be18bd4540c6`.
 
 Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `e571a421b3aa1b43acec3efc9695f5081cc224b0` (browser-extension file stamp remains separately `a8e3d21511dc`); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 

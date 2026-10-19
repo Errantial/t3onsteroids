@@ -4,7 +4,7 @@ Status: PASS
 
 # V1 Step 1 — CoS provider extension
 
-Bridge implementation identity for this qualification tuple: `5c8fcce4c4962b6c671046fc12ae662c631b2f1a`.
+Bridge implementation identity for this qualification tuple: `7c717e1632e228a9af276f65a017be18bd4540c6`.
 
 Final CoS `providerExtension` build identity: `e571a421b3aa1b43acec3efc9695f5081cc224b0`, produced from a clean committed CoS tree based on CoS `2.1.39` / upstream source `87ae9d631f82d8da2f462d910410031ad8f97ac5`. This server/provider-extension build id is intentionally distinct from the browser-extension file stamp: no `extension/` file changed in the repair, so the browser-extension stamp remains `a8e3d21511dc`.
 

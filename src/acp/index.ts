@@ -420,6 +420,60 @@ export class AcpBridgeRuntime {
     throw new BridgeError("session_broken", "CoS input identity does not match the exact durable provider input/session");
   }
 
+  private async refreshExactDurableGeneration(
+    sessionId: string,
+    inputId: string,
+    generation: number,
+  ): Promise<{ session: SessionState; translation: ProviderTurnTranslationState }> {
+    const session = await this.refreshDurable(sessionId);
+    const translation = session.providerTranslation;
+    if (!translation || session.activeInputId !== inputId || session.generation !== generation ||
+        translation.inputId !== inputId || translation.generation !== generation) {
+      throw new BridgeError("session_broken", "Pending provider input changed its exact durable generation during reconciliation");
+    }
+    return { session, translation };
+  }
+
+  private async requestStopForBoundCancellation(
+    sessionId: string,
+    inputId: string,
+    generation: number,
+    turnId: string,
+  ): Promise<SessionState> {
+    let exact = await this.refreshExactDurableGeneration(sessionId, inputId, generation);
+    let { session, translation } = exact;
+    if (translation.turnId !== turnId || session.activeCosTurnId !== turnId) {
+      throw new BridgeError("session_broken", "Bound provider turn identity changed during cancellation reconciliation");
+    }
+    if (session.cancelIntent !== "requested" && translation.cancelRequested !== true) return session;
+    if (session.cancelTargetTurnId !== undefined && session.cancelTargetTurnId !== turnId) {
+      throw new BridgeError("session_broken", "Pending cancellation targets a different provider turn");
+    }
+
+    // A pending-input cancel can race the provider creating its native turn. Retarget that already
+    // durable cancellation to the exact bound turn before issuing Stop. The exact-turn action is
+    // intentionally idempotent: a concurrent cancel path or crash recovery may safely request the
+    // same Stop again, but drive must never be allowed to complete normally before one is issued.
+    session = await this.applyDurableTransition(sessionId, {
+      kind: "set_cancel",
+      inputId,
+      generation,
+      turnId,
+    });
+    exact = await this.refreshExactDurableGeneration(sessionId, inputId, generation);
+    ({ session, translation } = exact);
+    if (translation.turnId !== turnId || session.activeCosTurnId !== turnId ||
+        session.cancelIntent !== "requested" || translation.cancelRequested !== true ||
+        session.cancelTargetTurnId !== turnId) {
+      throw new BridgeError("session_broken", "Exact provider cancellation target was not durably retained");
+    }
+    if (!this.options.controller.requestStopExactTurn) {
+      throw new BridgeError("session_broken", "Non-blocking exact-turn Stop is unavailable during cancellation reconciliation");
+    }
+    await this.options.controller.requestStopExactTurn(sessionId, turnId);
+    return (await this.refreshExactDurableGeneration(sessionId, inputId, generation)).session;
+  }
+
   private async reconcilePersistedCancellation(session: SessionState): Promise<SessionState> {
     if (!this.options.durableStore || !this.options.durableLease || session.cancelIntent !== "requested") return session;
     const translation = session.providerTranslation;
@@ -739,11 +793,12 @@ export class AcpBridgeRuntime {
     for (;;) {
       if (options.signal?.aborted) throw options.signal.reason ?? new Error("Provider turn wait aborted");
       let session = await this.refreshDurable(sessionId);
-      const current = session.providerTranslation;
+      let current = session.providerTranslation;
       const inputId = session.activeInputId;
       if (!current || !inputId || current.inputId !== inputId || current.generation !== session.generation) {
         throw new BridgeError("session_broken", "Pending provider input lost its exact durable generation");
       }
+      const generation = current.generation;
 
       const cancellationPending = session.cancelIntent === "requested" || current.cancelRequested === true;
       let input: Awaited<ReturnType<NonNullable<BridgeController["input"]>>> | undefined;
@@ -757,7 +812,12 @@ export class AcpBridgeRuntime {
           }
           throw cause;
         }
-        if (input) await this.requireInputIdentity(session, input, inputId);
+        if (input) {
+          const exact = await this.refreshExactDurableGeneration(sessionId, inputId, generation);
+          session = exact.session;
+          current = exact.translation;
+          await this.requireInputIdentity(session, input, inputId);
+        }
         if (input?.delivery === "sent") sentInputProven = true;
       }
 
@@ -772,10 +832,18 @@ export class AcpBridgeRuntime {
           }
           throw cause;
         }
+        {
+          const exact = await this.refreshExactDurableGeneration(sessionId, inputId, generation);
+          session = exact.session;
+          current = exact.translation;
+        }
         const turn = summary.providerTurn;
         if (turn && turn.inputId === inputId) {
           if (turn.state === "broken") throw new BridgeError("session_broken", "CoS marked the pending provider input broken");
           if (turn.state === "not_sent") {
+            const exact = await this.refreshExactDurableGeneration(sessionId, inputId, generation);
+            session = exact.session;
+            current = exact.translation;
             if (session.cancelIntent !== "requested" && current.cancelRequested !== true) {
               throw new BridgeError("session_broken", "CoS reported not_sent without an authoritative cancellation intent");
             }
@@ -783,23 +851,39 @@ export class AcpBridgeRuntime {
               kind: "not_sent",
               sessionId,
               inputId,
-              generation: current.generation,
+              generation,
             });
             session = await this.applyDurableTransition(sessionId, {
               kind: "settle_not_sent",
               inputId,
-              generation: current.generation,
+              generation,
             });
             this.sessions.set(sessionId, session);
             return { kind: "cancelled_not_sent" };
           }
           if (turn.turnId) {
+            const exact = await this.refreshExactDurableGeneration(sessionId, inputId, generation);
+            session = exact.session;
+            current = exact.translation;
             session = await this.applyDurableTransition(sessionId, {
               kind: "bind_turn",
               inputId,
-              generation: current.generation,
+              generation,
               turnId: turn.turnId,
             });
+            const rebound = await this.refreshExactDurableGeneration(sessionId, inputId, generation);
+            session = rebound.session;
+            current = rebound.translation;
+            if (current.turnId !== turn.turnId || session.activeCosTurnId !== turn.turnId) {
+              throw new BridgeError("session_broken", "Observed provider turn did not remain exactly bound");
+            }
+            if (session.cancelIntent === "requested" || current.cancelRequested === true) {
+              session = await this.requestStopForBoundCancellation(sessionId, inputId, generation, turn.turnId);
+              current = session.providerTranslation;
+              if (!current || current.inputId !== inputId || current.generation !== generation) {
+                throw new BridgeError("session_broken", "Provider generation changed after exact Stop reconciliation");
+              }
+            }
             this.sessions.set(sessionId, session);
             return { kind: "turn_ready" };
           }
@@ -808,6 +892,9 @@ export class AcpBridgeRuntime {
 
       const authoritativeNotSent = input?.delivery === "not_sent";
       if (authoritativeNotSent) {
+        const exact = await this.refreshExactDurableGeneration(sessionId, inputId, generation);
+        session = exact.session;
+        current = exact.translation;
         if (session.cancelIntent !== "requested" && current.cancelRequested !== true) {
           throw new BridgeError("session_broken", "CoS reported not_sent without an authoritative cancellation intent");
         }
@@ -815,12 +902,12 @@ export class AcpBridgeRuntime {
           kind: "not_sent",
           sessionId,
           inputId,
-          generation: current.generation,
+          generation,
         });
         session = await this.applyDurableTransition(sessionId, {
           kind: "settle_not_sent",
           inputId,
-          generation: current.generation,
+          generation,
         });
         this.sessions.set(sessionId, session);
         return { kind: "cancelled_not_sent" };

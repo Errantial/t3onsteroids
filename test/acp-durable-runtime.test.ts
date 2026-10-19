@@ -378,6 +378,149 @@ describe("durable ACP runtime boundaries", () => {
     expect(settled.value).not.toHaveProperty("activeInputId");
   });
 
+  it("re-reads durable cancellation after controller input I/O before accepting authoritative not_sent", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    let raced = false;
+    const input = vi.fn(async (id: string) => {
+      if (!raced) {
+        raced = true;
+        await store.updateSession(sessionId, { kind: "set_cancel", inputId: sessionId, generation: 1 });
+      }
+      return { id, sessionId, delivery: "not_sent" as const };
+    });
+    const ctrl = controller({
+      send: vi.fn(async (row) => ({ id: row.id, sessionId, delivery: "pending" as const })),
+      input,
+    });
+    const bridge = runtime(ctrl, store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "race cancellation with input read" }] });
+
+    await expect(bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 })).resolves.toEqual({ kind: "cancelled_not_sent" });
+    expect(input).toHaveBeenCalledTimes(1);
+    await expect(lease.read()).resolves.toEqual({ status: "missing" });
+    const settled = await store.readSession(sessionId);
+    expect(settled).toMatchObject({ status: "found", value: { generation: 1, cancelIntent: "none" } });
+  });
+
+  it("re-reads durable cancellation after controller session I/O before accepting provider-turn not_sent", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    let raced = false;
+    const ctrl = controller({
+      send: vi.fn(async (row) => ({ id: row.id, sessionId, delivery: "sent" as const })),
+      input: vi.fn(async (id: string) => ({ id, sessionId, delivery: "sent" as const })),
+      session: vi.fn(async () => {
+        if (!raced) {
+          raced = true;
+          await store.updateSession(sessionId, { kind: "set_cancel", inputId: sessionId, generation: 1 });
+        }
+        return {
+          id: sessionId,
+          providerTurn: {
+            inputId: sessionId,
+            state: "not_sent" as const,
+            turnId: null,
+            drainedSeq: null,
+            finalAssistantSeq: null,
+          },
+        };
+      }),
+    });
+    const bridge = runtime(ctrl, store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "race cancellation with session read" }] });
+
+    await expect(bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 })).resolves.toEqual({ kind: "cancelled_not_sent" });
+    await expect(lease.read()).resolves.toEqual({ status: "missing" });
+    await expect(store.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { generation: 1, cancelIntent: "none" },
+    });
+  });
+
+  it("fails closed instead of applying stale not_sent when the exact generation changes during controller I/O", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    const replacementLeaseId = "22222222-2222-4222-8222-222222222222";
+    const input = vi.fn(async (id: string) => {
+      await store.updateSession(sessionId, { kind: "settle_not_sent", inputId: sessionId, generation: 1 });
+      await store.updateSession(sessionId, { kind: "begin_input", inputId: secondSessionId, generation: 2, leaseId: replacementLeaseId });
+      return { id, sessionId, delivery: "not_sent" as const };
+    });
+    const ctrl = controller({
+      send: vi.fn(async (row) => ({ id: row.id, sessionId, delivery: "pending" as const })),
+      input,
+    });
+    const bridge = runtime(ctrl, store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "replace generation during controller read" }] });
+
+    await expect(bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 })).rejects.toMatchObject({ code: "session_broken" });
+    await expect(store.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { generation: 2, activeInputId: secondSessionId, admissionLeaseId: replacementLeaseId },
+    });
+    await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { generation: 1, inputId: sessionId } });
+  });
+
+  it("retargets a pending cancellation to a turn that appears between cancel and bind, then requests exact Stop", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    let releaseInput!: () => void;
+    let markInputStarted!: () => void;
+    const inputGate = new Promise<void>((resolve) => { releaseInput = resolve; });
+    const inputStarted = new Promise<void>((resolve) => { markInputStarted = resolve; });
+    let turnAppeared = false;
+    const input = vi.fn(async (id: string) => {
+      markInputStarted();
+      await inputGate;
+      return { id, sessionId, delivery: "sent" as const };
+    });
+    const cancelPendingInput = vi.fn(async () => {
+      turnAppeared = true;
+      throw Object.assign(new Error("not_cancellable"), { status: 409 });
+    });
+    const requestStopExactTurn = vi.fn(async () => undefined);
+    const ctrl = controller({
+      send: vi.fn(async (row) => ({ id: row.id, sessionId, delivery: "pending" as const })),
+      input,
+      cancelPendingInput,
+      requestStopExactTurn,
+      session: vi.fn(async () => ({
+        id: sessionId,
+        providerTurn: turnAppeared
+          ? { inputId: sessionId, state: "active" as const, turnId, drainedSeq: null, finalAssistantSeq: null }
+          : { inputId: sessionId, state: "admitted" as const, turnId: null, drainedSeq: null, finalAssistantSeq: null },
+      })),
+    });
+    const bridge = runtime(ctrl, store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "turn appears during cancel" }] });
+
+    const pending = bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 });
+    await inputStarted;
+    await expect(bridge.cancel(sessionId)).rejects.toThrow("not_cancellable");
+    releaseInput();
+
+    await expect(pending).resolves.toEqual({ kind: "turn_ready" });
+    expect(cancelPendingInput).toHaveBeenCalledTimes(1);
+    expect(requestStopExactTurn).toHaveBeenCalledTimes(1);
+    expect(requestStopExactTurn).toHaveBeenCalledWith(sessionId, turnId);
+    await expect(store.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: {
+        generation: 1,
+        activeCosTurnId: turnId,
+        cancelIntent: "requested",
+        cancelTargetTurnId: turnId,
+        providerTranslation: { inputId: sessionId, generation: 1, turnId, cancelRequested: true },
+      },
+    });
+    await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { sessionId, inputId: sessionId, generation: 1 } });
+  });
+
   it("keeps session/new memory-only and persists create_pending before an ambiguous first POST", async () => {
     const root = await tempRoot();
     const { store, lease } = durable(root);

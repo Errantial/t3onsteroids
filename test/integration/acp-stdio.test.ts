@@ -8,12 +8,12 @@ import * as acp from "@agentclientprotocol/sdk";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { compatibility } from "../../src/compatibility.js";
 
-type InputMode = "active" | "pending_cancel";
+type InputMode = "active" | "pending_cancel" | "pending_cancel_race";
 
 interface FakeSession {
   readonly sessionId: string;
   readonly inputId: string;
-  readonly turnId: string | null;
+  turnId: string | null;
   readonly mode: InputMode;
   delivery: "pending" | "sent" | "not_sent";
   providerState: "admitted" | "active" | "closing" | "drained" | "not_sent";
@@ -52,6 +52,7 @@ class FakeCos {
   readonly buildId = compatibility.cos.providerExtension.buildId;
   readonly stopRequests: { sessionId: string; turnId: string }[] = [];
   readonly pendingCancels: string[] = [];
+  readonly pendingCancelAttempts: string[] = [];
   readonly server: Server;
   inputPostAttempts = 0;
   missingProviderFeature: string | null = null;
@@ -114,7 +115,10 @@ class FakeCos {
       json(res, 200, {
         protocol: 1,
         app: "chat-on-steroids",
-        actions: { enabled: true, routes: ["POST /v1/inputs"] },
+        actions: {
+          enabled: true,
+          routes: ["POST /v1/inputs", "POST /v1/inputs/{id}/cancel", "POST /v1/sessions/{id}/stop"],
+        },
         features,
         providerExtension: { apiVersion: 1, buildId: this.buildId },
       });
@@ -170,6 +174,14 @@ class FakeCos {
       const session = this.inputs.find((entry) => entry.inputId === inputId);
       if (!session) {
         json(res, 404, { error: "input_not_found" });
+        return;
+      }
+      this.pendingCancelAttempts.push(inputId);
+      if (session.mode === "pending_cancel_race") {
+        session.turnId = `turn-${this.nextTurn++}`;
+        session.delivery = "sent";
+        session.providerState = "active";
+        json(res, 409, { error: "not_cancellable" });
         return;
       }
       this.pendingCancels.push(inputId);
@@ -468,6 +480,69 @@ describe.runIf(process.platform === "win32")("built ACP stdio provider", () => {
       await fake.close();
     }
     expect(stderr).toBe("");
+  }, 30_000);
+
+  it("converts a pending-cancel 409 race into exact Stop when the sent turn appears before bind", async () => {
+    const root = await tempRoot();
+    const profile = path.join(root, "profile");
+    const control = path.join(profile, "control-api");
+    const project = path.join(root, "project");
+    const state = path.join(root, "state");
+    await Promise.all([fs.mkdir(control, { recursive: true }), fs.mkdir(project, { recursive: true })]);
+    const fake = new FakeCos(project);
+    fake.wrapSessionDetail = true;
+    const port = await fake.listen();
+    await fs.writeFile(path.join(control, "endpoint.json"), JSON.stringify({ url: `http://127.0.0.1:${port}`, pid: process.pid }));
+    await fs.writeFile(path.join(control, "token"), `${fake.token}\n`);
+
+    const child = spawn(process.execPath, [path.join(process.cwd(), "dist", "cli", "index.js")], {
+      cwd: process.cwd(),
+      env: { ...process.env, T3ONSTEROIDS_COS_USER_DATA_DIR: profile, T3ONSTEROIDS_STATE_DIR: state },
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    children.push(child);
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+
+    try {
+      await acp.client({ name: "stdio-integration" }).connectWith(childStream(child), async (ctx) => {
+        await ctx.request(acp.methods.agent.initialize, { protocolVersion: 2, clientCapabilities: {} });
+        const created = await ctx.request(acp.methods.agent.session.new, { cwd: project, mcpServers: [] });
+        fake.nextMode = "pending_cancel_race";
+        let settled = false;
+        const prompt = ctx.request(acp.methods.agent.session.prompt, {
+          sessionId: created.sessionId,
+          prompt: [{ type: "text", text: "cancel while the native turn appears" }],
+        }).finally(() => { settled = true; });
+
+        await waitUntil(() => fake.sessions.has(created.sessionId));
+        await ctx.notify(acp.methods.agent.session.cancel, { sessionId: created.sessionId });
+        await waitUntil(() => fake.stopRequests.length === 1);
+        const session = fake.sessions.get(created.sessionId);
+        if (!session?.turnId) throw new Error("race fake session did not materialize a turn id");
+        expect(fake.pendingCancelAttempts).toEqual([session.inputId]);
+        expect(fake.pendingCancels).toEqual([]);
+        expect(fake.stopRequests).toEqual([{ sessionId: created.sessionId, turnId: session.turnId }]);
+        expect(settled).toBe(false);
+
+        fake.emit(created.sessionId, "turn_end", 1, { outcome: "stopped" });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(settled).toBe(false);
+        fake.emit(created.sessionId, "turn_drained", 2, {
+          inputId: session.inputId,
+          highWaterSeq: 2,
+          finalAssistantSeq: null,
+        });
+        await expect(prompt).resolves.toEqual({ stopReason: "cancelled" });
+      });
+    } finally {
+      child.stdin.end();
+      await fake.close();
+    }
+    expect(stderr).toContain("Error handling notification");
+    expect(stderr).toContain("request_failed");
+    expect(stderr).not.toContain("cancel while the native turn appears");
   }, 30_000);
 
   it("reattaches a healthy durable session after child restart without posting a replacement input", async () => {

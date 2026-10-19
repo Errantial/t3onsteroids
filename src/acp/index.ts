@@ -13,7 +13,8 @@ import {
   type ProviderTurnController,
   type ProviderTurnOutputEffect,
 } from "../translate/driver.js";
-import type { ProviderTurnTranslationState } from "../translate/events.js";
+import { newProviderTurnTranslationState, type ProviderTurnTranslationState } from "../translate/events.js";
+import { StateLockBusyError } from "../state/index.js";
 import type {
   AdmissionLease,
   DurableAdmissionLease,
@@ -287,7 +288,52 @@ export class AcpBridgeRuntime {
     transition: DurableSessionTransition,
   ): Promise<SessionState> {
     if (!this.options.durableStore) throw new Error("Durable transition requested without durable store");
-    const result = await this.options.durableStore.updateSession(sessionId, transition);
+    const committedPromotion = async (): Promise<SessionState | undefined> => {
+      if (transition.kind !== "promote_mode") return undefined;
+      const tagged = await this.options.durableStore!.readSession(sessionId);
+      if (tagged.status !== "found") return undefined;
+      const record = tagged.value;
+      const translation = record.providerTranslation;
+      if (record.generation !== transition.generation ||
+          record.activeInputId !== transition.inputId ||
+          translation?.generation !== transition.generation ||
+          translation.inputId !== transition.inputId ||
+          record.pendingInteractionMode !== undefined ||
+          record.modeTransitionInputId !== undefined) {
+        return undefined;
+      }
+      return record;
+    };
+    let result;
+    try {
+      result = await this.options.durableStore.updateSession(sessionId, transition);
+    } catch (error) {
+      if (!(error instanceof StateLockBusyError) || transition.kind !== "promote_mode") throw error;
+      // promote_mode is scoped to the exact durable input generation and is idempotent. A mutex
+      // release can fail after the atomic session replace has already committed. Prefer proving
+      // that exact commit from the lock-free durable read; this avoids requiring a second mutex
+      // release to succeed merely to observe an already-committed transition.
+      const committed = await committedPromotion();
+      if (committed) {
+        this.sessions.set(sessionId, committed);
+        return committed;
+      }
+      // A pre-write lock loss has no durable promotion to prove, so retain one exact retry. If that
+      // retry itself reports an ambiguous post-write release failure, accept it only after the same
+      // generation/input proof appears durably; otherwise fail closed with the original error path.
+      try {
+        result = await this.options.durableStore.updateSession(sessionId, transition);
+      } catch (retryError) {
+        if (retryError instanceof StateLockBusyError) {
+          const committedAfterRetry = await committedPromotion();
+          if (committedAfterRetry) {
+            this.sessions.set(sessionId, committedAfterRetry);
+            return committedAfterRetry;
+          }
+        }
+        throw retryError;
+      }
+    }
     if (result.status === "updated" || result.status === "unchanged") {
       this.sessions.set(sessionId, result.value);
       return result.value;
@@ -683,7 +729,13 @@ export class AcpBridgeRuntime {
     if (!this.options.controller.session || !this.options.controller.input) {
       throw new BridgeError("session_broken", "Provider turn/input reconciliation APIs are unavailable");
     }
-    const pollMs = options.pollMs ?? 25;
+    // CoS exposes a 600 authenticated-read/minute controller budget. This wait runs before the
+    // provider event SSE can take over, so a tight 25 ms loop can exhaust that entire budget in a
+    // few seconds and then starve the stream that would deliver the authoritative turn events.
+    // One active provider turn is supported; 500 ms keeps this reconciliation bounded while
+    // adding at most half a second to the variance-sensitive end-to-end metric, not pre-send.
+    const pollMs = options.pollMs ?? 500;
+    let sentInputProven = false;
     for (;;) {
       if (options.signal?.aborted) throw options.signal.reason ?? new Error("Provider turn wait aborted");
       let session = await this.refreshDurable(sessionId);
@@ -693,10 +745,33 @@ export class AcpBridgeRuntime {
         throw new BridgeError("session_broken", "Pending provider input lost its exact durable generation");
       }
 
-      const input = await this.options.controller.input(inputId);
-      if (input) await this.requireInputIdentity(session, input, inputId);
-      if (input?.delivery === "sent") {
-        const summary = await this.options.controller.session(sessionId);
+      const cancellationPending = session.cancelIntent === "requested" || current.cancelRequested === true;
+      let input: Awaited<ReturnType<NonNullable<BridgeController["input"]>>> | undefined;
+      if (!sentInputProven || cancellationPending) {
+        try {
+          input = await this.options.controller.input(inputId);
+        } catch (cause) {
+          if (cause && typeof cause === "object" && "retryable" in cause && (cause as { retryable?: unknown }).retryable === true) {
+            await new Promise((resolve) => setTimeout(resolve, pollMs));
+            continue;
+          }
+          throw cause;
+        }
+        if (input) await this.requireInputIdentity(session, input, inputId);
+        if (input?.delivery === "sent") sentInputProven = true;
+      }
+
+      if (sentInputProven) {
+        let summary: Awaited<ReturnType<NonNullable<BridgeController["session"]>>>;
+        try {
+          summary = await this.options.controller.session(sessionId);
+        } catch (cause) {
+          if (cause && typeof cause === "object" && "retryable" in cause && (cause as { retryable?: unknown }).retryable === true) {
+            await new Promise((resolve) => setTimeout(resolve, pollMs));
+            continue;
+          }
+          throw cause;
+        }
         const turn = summary.providerTurn;
         if (turn && turn.inputId === inputId) {
           if (turn.state === "broken") throw new BridgeError("session_broken", "CoS marked the pending provider input broken");
@@ -876,7 +951,9 @@ export class AcpBridgeRuntime {
     const promptReceivedAt = this.options.metrics?.monotonicTimestampMs();
     this.options.metrics?.increment("promptReceived");
     const inMemory = this.sessions.get(request.sessionId);
+    let phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
     const persisted = await this.readPersisted(request.sessionId);
+    const persistedReadMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
     let session = persisted ?? inMemory;
     const resumedCwd = this.resumedCwds.get(request.sessionId);
     if (this.options.durableStore && persisted && resumedCwd &&
@@ -889,7 +966,6 @@ export class AcpBridgeRuntime {
       session = { ...persisted, cwd: resumedCwd };
     }
     if (!session) throw new BridgeError("session_not_found", "ACP session is unknown");
-    if (this.options.durableStore && !persisted) session = await this.ensureDurableCreated(session);
     if (session.bindingState === "broken") throw new BridgeError("session_broken", "Session is marked broken and requires recovery");
 
     if (this.options.durableStore && session.providerTranslation?.terminal) {
@@ -906,9 +982,13 @@ export class AcpBridgeRuntime {
     const cwd = session.cwd;
     if (!cwd) throw new BridgeError("project_unmapped", "Session has no cwd");
 
+    phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
     const project = await this.options.controller.resolveProject(cwd);
+    const projectResolveMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
+    phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
     const canonicalRoot = await this.canonicalize(project.canonicalPath);
     const normalized = await normalizePrompt(request.prompt, session.interactionMode, canonicalRoot, this.canonicalize);
+    const promptNormalizeMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
 
     if (this.options.durableStore && session.providerTranslation) {
       const pendingInputId = session.providerTranslation.inputId;
@@ -1025,33 +1105,75 @@ export class AcpBridgeRuntime {
       }
     }
 
+    phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
     await this.requirePromptReadiness(session);
+    const readinessMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
 
     const first = session.bindingState === "unbound";
     const inputId = first ? session.sessionId : this.makeUuid();
     const generation = (session.generation ?? 0) + 1;
     this.options.metrics?.beginTurn(request.sessionId, generation, promptReceivedAt);
+    let durablePrepareMs = 0;
+    let leaseAcquireMs = 0;
+    let markDispatchedMs = 0;
     if (this.options.durableStore) {
       const leaseId = randomUUID().toLowerCase();
-      session = await this.applyDurableTransition(session.sessionId, {
-        kind: "begin_input",
-        inputId,
-        generation,
-        leaseId,
-        pendingInteractionMode: normalized.interactionMode,
-      });
-      if (first) {
-        session = await this.applyDurableTransition(session.sessionId, {
-          kind: "binding",
-          inputId,
-          generation,
+      phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
+      if (first && !persisted) {
+        // session/new is intentionally memory-only. On the first prompt, persist the complete
+        // pre-POST recovery checkpoint atomically instead of serializing three separate session
+        // writes (create -> begin_input -> create_pending binding). This state is still strictly
+        // before send authority: inputDispatchState=prepared, and a crash before lease acquisition
+        // is reconciled as proven not-sent exactly like the previous multi-transition sequence.
+        const prepared: SessionState = {
+          ...session,
           bindingState: "create_pending",
           canonicalCwd: canonicalRoot,
           cosProjectId: project.projectId,
+          activeInputId: inputId,
+          inputDispatchState: "prepared",
+          dispatchInputId: inputId,
+          admissionLeaseId: leaseId,
+          generation,
+          providerTranslation: newProviderTurnTranslationState({
+            sessionId: session.sessionId,
+            inputId,
+            generation,
+            cancelRequested: false,
+          }),
+          pendingInteractionMode: normalized.interactionMode,
+          modeTransitionInputId: inputId,
+        };
+        const created = await this.options.durableStore.updateSession(session.sessionId, { kind: "create", state: prepared });
+        if (created.status !== "updated") {
+          throw new BridgeError("input_busy", "Concurrent durable state appeared while the first provider input was being prepared");
+        }
+        session = created.value;
+        this.sessions.set(session.sessionId, session);
+      } else {
+        session = await this.applyDurableTransition(session.sessionId, {
+          kind: "begin_input",
+          inputId,
+          generation,
+          leaseId,
+          pendingInteractionMode: normalized.interactionMode,
         });
+        if (first) {
+          session = await this.applyDurableTransition(session.sessionId, {
+            kind: "binding",
+            inputId,
+            generation,
+            bindingState: "create_pending",
+            canonicalCwd: canonicalRoot,
+            cosProjectId: project.projectId,
+          });
+        }
       }
+      durablePrepareMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
       try {
+        phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
         await this.acquireLease(session.sessionId, inputId, generation, leaseId);
+        leaseAcquireMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
       } catch (error) {
         if (await this.durableLeaseMatches(session, inputId, generation)) {
           await this.releaseLeaseAfterProof(session.sessionId, { kind: "not_sent", sessionId: session.sessionId, inputId, generation });
@@ -1059,7 +1181,9 @@ export class AcpBridgeRuntime {
         await this.applyDurableTransition(session.sessionId, { kind: "settle_not_sent", inputId, generation });
         throw error;
       }
+      phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
       session = await this.applyDurableTransition(session.sessionId, { kind: "mark_dispatched", inputId, generation });
+      markDispatchedMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
     } else {
       await this.acquireLease(session.sessionId, inputId, generation);
       session = withInteractionMode(session, normalized.interactionMode);
@@ -1075,10 +1199,22 @@ export class AcpBridgeRuntime {
       }
     }
 
+    phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
     const input = await this.options.controller.send({
       id: inputId,
       text: normalized.text,
       ...(first ? { projectId: project.projectId, providerPolicy: v1ProviderSessionPolicy } : { sessionId: session.sessionId }),
+    });
+    const inputSendMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
+    this.options.metrics?.observePreSendPhases(session.sessionId, generation, {
+      persistedReadMs,
+      projectResolveMs,
+      promptNormalizeMs,
+      readinessMs,
+      durablePrepareMs,
+      leaseAcquireMs,
+      markDispatchedMs,
+      inputSendMs,
     });
 
     if (this.options.durableStore) {

@@ -78,6 +78,36 @@ describe("CoS protocol-1 controller client", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("reuses a recent successful provider-extension readiness attestation", async () => {
+    let healthReads = 0;
+    const extensionHealth = {
+      ...health,
+      features: {
+        "provider-project-resolve-v1": 1,
+        "provider-assistant-content-v1": 1,
+        "provider-session-policy-v1": 1,
+        "provider-turn-drain-v1": 1,
+      },
+      providerExtension: { apiVersion: 1, buildId: "a".repeat(40) },
+    };
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).endsWith("/v1/health")) {
+        healthReads += 1;
+        return jsonResponse(extensionHealth);
+      }
+      throw new Error(`unexpected ${String(url)}`);
+    });
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+    );
+
+    await expect(client.requireProviderExtension()).resolves.toMatchObject({ actionsEnabled: true });
+    await expect(client.requireProviderExtension()).resolves.toMatchObject({ actionsEnabled: true });
+    await expect(client.requireProviderExtension()).resolves.toMatchObject({ actionsEnabled: true });
+    expect(healthReads).toBe(1);
+  });
+
   it("reconciles an ambiguous send before deciding whether to retry", async () => {
     const id = "11111111-1111-4111-8111-111111111111";
     let postCount = 0;
@@ -145,6 +175,48 @@ describe("CoS protocol-1 controller client", () => {
     const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch }, { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1 });
     await expect(client.health()).resolves.toMatchObject({ protocol: 1 });
     expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("classifies temporary controller read saturation as retryable", async () => {
+    const fetch = vi.fn(async () => jsonResponse({ error: "busy", detail: "too many reads are waiting on the app; retry shortly" }, 503));
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    );
+    await expect(client.session("session-1")).rejects.toMatchObject({
+      code: "request_failed",
+      status: 503,
+      retryable: true,
+    });
+  });
+
+  it("classifies a bounded controller read deadline as retryable", async () => {
+    const fetch = vi.fn(async () => jsonResponse({ error: "timeout", detail: "the app did not answer in time; /v1/health may still answer" }, 504));
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    );
+    await expect(client.session("session-1")).rejects.toMatchObject({
+      code: "request_failed",
+      status: 504,
+      retryable: true,
+    });
+  });
+
+  it("classifies a not-yet-readable provider session projection as retryable", async () => {
+    const fetch = vi.fn(async () => jsonResponse({ error: "session_not_found" }, 404));
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    );
+    await expect(client.session("session-1")).rejects.toMatchObject({
+      code: "request_failed",
+      status: 404,
+      retryable: true,
+    });
   });
 
   it("resumes SSE from the last observed sequence after reconnect", async () => {
@@ -231,5 +303,67 @@ describe("CoS protocol-1 controller client", () => {
     }
     expect(rows).toEqual([8, 9]);
     expect(seen[1]).toContain("from=9");
+  });
+
+  it("reconnects after a controller end frame and resumes from the exact cursor", async () => {
+    const seen: string[] = [];
+    let call = 0;
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      seen.push(String(url));
+      call += 1;
+      if (call === 1) {
+        return new Response(
+          'id: 26\nevent: turn_end\ndata: {"seq":26,"position":26,"time":26,"kind":"turn_end","source":"extension","turnId":"t"}\n\n' +
+          'event: end\ndata: {"reason":"error"}\n\n',
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        );
+      }
+      return new Response(
+        'id: 27\nevent: turn_drained\ndata: {"seq":27,"position":27,"time":27,"kind":"turn_drained","source":"app","turnId":"t","inputId":"11111111-1111-4111-8111-111111111111","highWaterSeq":27,"finalAssistantSeq":25}\n\n',
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      );
+    });
+    const abort = new AbortController();
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1 },
+    );
+    const rows = [];
+    for await (const event of client.streamEvents("s", { signal: abort.signal })) {
+      rows.push(event.seq);
+      if (event.seq === 27) abort.abort();
+    }
+    expect(rows).toEqual([26, 27]);
+    expect(seen[1]).toContain("from=27");
+  });
+
+  it("closes the active SSE transport when its consumer stops after a delivered event", async () => {
+    let bodyCancelled = false;
+    let requestAborted = false;
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => { requestAborted = true; }, { once: true });
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(
+            'id: 7\nevent: turn_drained\ndata: {"seq":7,"position":7,"time":7,"kind":"turn_drained","source":"app","turnId":"t","inputId":"11111111-1111-4111-8111-111111111111","highWaterSeq":7,"finalAssistantSeq":5}\n\n',
+          ));
+        },
+        cancel() { bodyCancelled = true; },
+      });
+      return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    });
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1 },
+    );
+
+    for await (const event of client.streamEvents("session")) {
+      expect(event.seq).toBe(7);
+      break;
+    }
+
+    expect(bodyCancelled || requestAborted).toBe(true);
   });
 });

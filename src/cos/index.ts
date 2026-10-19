@@ -148,6 +148,7 @@ const DEFAULT_RETRY_POLICY: RetryPolicy = {
   baseDelayMs: 50,
   maxDelayMs: 500,
 };
+const PROVIDER_EXTENSION_READINESS_TTL_MS = 1_000;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -337,6 +338,9 @@ function mapHttpError(status: number, body: unknown): CosControllerError {
   if (status === 403 && wireCode === "actions_disabled") return new CosControllerError("actions_disabled", "CoS controller actions are disabled", { status });
   if (status === 401 || status === 403) return new CosControllerError("controller_auth_changed", "CoS controller authentication changed", { retryable: true, status });
   if (status === 429) return new CosControllerError("rate_limited", "CoS controller rate limited the request", { retryable: true, status });
+  if (status === 503 && wireCode === "busy") return new CosControllerError("request_failed", "CoS controller read capacity is temporarily busy", { retryable: true, status });
+  if (status === 504 && wireCode === "timeout") return new CosControllerError("request_failed", "CoS controller read timed out while its owner was still working", { retryable: true, status });
+  if (status === 404 && wireCode === "session_not_found") return new CosControllerError("request_failed", "CoS session projection is not readable yet", { retryable: true, status });
   if (status === 503 && wireCode === "queue_full") return new CosControllerError("queue_full", "CoS controller action queue is full", { retryable: true, status });
   if (status === 404 && wireCode === "project_unmapped") return new CosControllerError("project_unmapped", "No exact usable CoS project matches the requested canonical path", { status });
   if (status === 409 && wireCode === "provider_policy_unavailable") return new CosControllerError("provider_policy_unavailable", "Required CoS provider-session policy is unavailable", { status });
@@ -349,6 +353,7 @@ function sleep(ms: number): Promise<void> {
 
 export class CosControllerClient {
   private discovery: CosControllerDiscovery | undefined;
+  private providerExtensionReadiness: { readonly value: CosControllerReadiness; readonly expiresAt: number } | undefined;
   private metricsState = {
     readAttempts: 0,
     readRetries: 0,
@@ -367,6 +372,7 @@ export class CosControllerClient {
   ) {}
 
   private async getDiscovery(force = false): Promise<CosControllerDiscovery> {
+    if (force) this.providerExtensionReadiness = undefined;
     if (force || !this.discovery) this.discovery = await this.discover();
     return this.discovery;
   }
@@ -397,6 +403,7 @@ export class CosControllerClient {
         const mapped = mapHttpError(response.status, body);
         if (mapped.code === "controller_auth_changed" && attempt < maxAttempts) {
           this.discovery = undefined;
+          this.providerExtensionReadiness = undefined;
           lastError = mapped;
           continue;
         }
@@ -430,6 +437,10 @@ export class CosControllerClient {
   }
 
   async requireProviderExtension(): Promise<CosControllerReadiness> {
+    const now = Date.now();
+    if (this.providerExtensionReadiness && this.providerExtensionReadiness.expiresAt > now) {
+      return this.providerExtensionReadiness.value;
+    }
     const readiness = await this.health();
     for (const feature of Object.values(COS_PROVIDER_EXTENSION_FEATURES)) {
       if (readiness.features[feature] !== 1) {
@@ -439,6 +450,10 @@ export class CosControllerClient {
     if (!readiness.providerExtension || readiness.providerExtension.apiVersion !== 1) {
       throw new CosControllerError("provider_extension_unavailable", "Required CoS provider extension build identity is unavailable");
     }
+    this.providerExtensionReadiness = {
+      value: readiness,
+      expiresAt: now + PROVIDER_EXTENSION_READINESS_TTL_MS,
+    };
     return readiness;
   }
 
@@ -675,22 +690,26 @@ export class CosControllerClient {
       const discovery = await this.getDiscovery();
       const headers = new Headers({ Accept: "text/event-stream", Authorization: `Bearer ${discovery.token}` });
       if (cursor !== undefined) headers.set("Last-Event-ID", String(Math.max(0, cursor - 1)));
+      let streamController: AbortController | undefined;
+      let onAbort: (() => void) | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let reader: ReadableStreamDefaultReader<string> | undefined;
       try {
         this.metricsState.sseConnectAttempts += 1;
         if (connectedOnce) this.metricsState.sseReconnects += 1;
         this.bridgeMetrics?.increment("sseConnectCount");
         if (connectedOnce) this.bridgeMetrics?.increment("sseReconnectCount");
         const suffix = cursor === undefined ? "" : `?from=${encodeURIComponent(String(cursor))}`;
-        const streamController = new AbortController();
-        const onAbort = () => streamController.abort(options.signal?.reason);
+        streamController = new AbortController();
+        onAbort = () => streamController!.abort(options.signal?.reason);
         options.signal?.addEventListener("abort", onAbort, { once: true });
-        const timer = setTimeout(() => streamController.abort(new Error("sse_rollover")), rolloverMs);
+        timer = setTimeout(() => streamController!.abort(new Error("sse_rollover")), rolloverMs);
         const requestInit: RequestInit = { headers, signal: streamController.signal };
         const response = await this.transport.fetch(`${discovery.baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/events/stream${suffix}`, requestInit);
         if (!response.ok) throw mapHttpError(response.status, undefined);
         if (!response.body) throw new CosControllerError("controller_unavailable", "SSE response has no body", { retryable: true });
         connectedOnce = true;
-        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+        reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
         let buffer = "";
         let sawEvent = false;
         for (;;) {
@@ -708,12 +727,19 @@ export class CosControllerClient {
             const frame = buffer.slice(0, boundary).replace(/\r/g, "");
             buffer = buffer.slice(boundary + separatorLength);
             let id: number | undefined;
+            let eventName: string | undefined;
             const dataLines: string[] = [];
             for (const line of frame.split("\n")) {
               if (line.startsWith("id:")) id = Number(line.slice(3).trim());
+              else if (line.startsWith("event:")) eventName = line.slice(6).trim();
               else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
             }
             if (dataLines.length === 0) continue;
+            // CoS uses an unnumbered `event: end` control frame to retire an SSE connection
+            // (max lifetime, controller stop/error, slow consumer, etc.). It is not a session
+            // event and therefore has no seq/position/time/kind/source fields. Treat it as a
+            // reconnect boundary; the next request resumes from the exact last event cursor.
+            if (eventName === "end") continue;
             let parsed: unknown;
             try {
               parsed = JSON.parse(dataLines.join("\n"));
@@ -763,6 +789,19 @@ export class CosControllerClient {
         );
         const jitter = Math.floor(exponential * 0.2 * Math.random());
         await sleep(Math.min(this.retryPolicy.maxDelayMs, exponential + jitter));
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        if (onAbort) options.signal?.removeEventListener("abort", onAbort);
+        // A provider-turn consumer normally returns as soon as the authoritative drain has been
+        // emitted and acknowledged. Async-generator return does not automatically cancel this
+        // nested fetch body, so without an explicit finally every completed turn can leave one
+        // held CoS event stream behind until its 30-minute server lifetime expires. Closing both
+        // sides here frees the controller's bounded stream slot immediately on terminal return.
+        if (streamController && !streamController.signal.aborted) streamController.abort(new Error("sse_consumer_closed"));
+        if (reader) {
+          try { await reader.cancel(); } catch { /* the abort above may already have closed it */ }
+          try { reader.releaseLock(); } catch { /* an already-closed reader may have no lock */ }
+        }
       }
     }
   }

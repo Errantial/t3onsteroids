@@ -197,6 +197,17 @@ switch (command) {
     class BoundaryStore extends DurableSessionStore {
       override async updateSession(...params: Parameters<DurableSessionStore["updateSession"]>) {
         const [targetSessionId, transition] = params;
+        if (exactStage === "after_begin_input" && transition.kind === "create" &&
+            transition.state.inputDispatchState === "prepared" && transition.state.activeInputId === exactSessionId) {
+          // The optimized first-prompt path atomically creates the same prepared pre-lease
+          // checkpoint that used to require create -> begin_input -> create_pending. Crash only
+          // after that durable create has committed so this retains the original recovery proof.
+          const result = await super.updateSession(...params);
+          const tagged = await this.readSession(targetSessionId);
+          await flushedLine({ event: exactStage, tagged, held: await lease.read() });
+          process.exit(34);
+          return result;
+        }
         if (exactStage === "after_begin_input" && transition.kind === "binding" && transition.bindingState === "create_pending") {
           const tagged = await this.readSession(targetSessionId);
           await flushedLine({ event: exactStage, tagged, held: await lease.read() });

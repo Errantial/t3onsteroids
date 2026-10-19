@@ -86,6 +86,12 @@ export function updateForEffect(effect: ProviderTurnOutputEffect, notices = fals
 export async function runProductionAcpStdio(options: ProductionAcpOptions = {}): Promise<void> {
   const env = options.env ?? process.env;
   const metrics = options.metrics ?? new BridgeMetrics();
+  const metricsPath = env.T3ONSTEROIDS_METRICS_PATH?.trim();
+  const persistMetrics = async (): Promise<void> => {
+    if (!metricsPath) return;
+    await mkdir(dirname(metricsPath), { recursive: true });
+    await writeFile(metricsPath, `${JSON.stringify(metrics.snapshot(), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  };
   const userDataDir = cosUserDataDirectory(env);
   const state = await createProductionStateContext(userDataDir, env, { warmProcessIdentity: true });
   const controller = new CosControllerClient(() => discoverCosController(userDataDir), undefined, undefined, metrics);
@@ -123,6 +129,7 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
         const admission = await runtime.awaitDurableProviderTurnOrCancelledNotSent(params.sessionId);
         if (admission.kind === "cancelled_not_sent") {
           metrics.increment("acpTerminalSent");
+          await persistMetrics();
           return { stopReason: "cancelled" };
         }
         const result = await runtime.driveDurableProviderTurn(controller, {
@@ -138,10 +145,8 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
         });
         if (!result.terminal) throw new Error("Provider event stream ended before authoritative terminal proof");
         metrics.increment("acpTerminalSent");
-        const terminalSession = await state.sessionStore.readSession(params.sessionId);
-        if (terminalSession.status === "found" && terminalSession.value.generation) {
-          metrics.markTurn(params.sessionId, terminalSession.value.generation, "acp_terminal_sent");
-        }
+        metrics.markTurn(params.sessionId, result.state.generation, "acp_terminal_sent");
+        await persistMetrics();
         return { stopReason: result.terminal.stopReason };
       } catch (error) {
         return safeRequestError(error);
@@ -163,10 +168,5 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
   );
   const connection = app.connect(stream);
   await connection.closed;
-
-  const metricsPath = env.T3ONSTEROIDS_METRICS_PATH?.trim();
-  if (metricsPath) {
-    await mkdir(dirname(metricsPath), { recursive: true });
-    await writeFile(metricsPath, `${JSON.stringify(metrics.snapshot(), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  }
+  await persistMetrics();
 }

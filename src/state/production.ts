@@ -1,3 +1,5 @@
+import { mkdir } from "node:fs/promises";
+import path from "node:path";
 import { DurableSessionStore, defaultStateDirectory } from "./durable.js";
 import { DurableAdmissionLease, canonicalProfileIdentityHash, leaseReferencedSessionIds } from "./lease.js";
 import { PowerShellWindowsProcessIdentity } from "./mutex.js";
@@ -46,7 +48,14 @@ export async function createProductionStateContext(
     // mutate state, which also avoids unnecessary child-process pressure in read-only/test paths.
     await processIdentity.current();
   }
-  await sessionStore.init();
+  // These directories are deterministic local state scaffolding, not CoS I/O. Creating them with
+  // the state domain keeps the first provider prompt from paying directory-creation latency inside
+  // the profile-wide lease/mutex critical path while preserving every durable write and fsync.
+  await Promise.all([
+    sessionStore.init(),
+    mkdir(path.join(stateDirectory, "leases"), { recursive: true }),
+    mkdir(path.join(stateDirectory, "locks", "profiles", "tmp"), { recursive: true }),
+  ]);
   const protectedSessions = await leaseReferencedSessionIds(stateDirectory);
   await sessionStore.pruneBroken(undefined, protectedSessions);
   return {

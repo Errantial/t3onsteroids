@@ -8,6 +8,7 @@ import type { CosProviderTurnAttestation } from "../src/cos/index.js";
 import {
   DurableAdmissionLease,
   DurableSessionStore,
+  StateLockBusyError,
   type WindowsProcessIdentity,
 } from "../src/state/index.js";
 import type { ProviderTurnController, ProviderTurnOutputEffect } from "../src/translate/driver.js";
@@ -95,6 +96,81 @@ function translation(extra: Partial<ProviderTurnTranslationState> = {}): Provide
 }
 
 describe("durable ACP runtime boundaries", () => {
+  it("reconciles an exact promote_mode commit that reports a post-write state-lock failure", async () => {
+    const root = await tempRoot();
+    const { store: baseStore, lease } = durable(root);
+    let injected = false;
+    class PostWriteBusyStore extends DurableSessionStore {
+      override async updateSession(...args: Parameters<DurableSessionStore["updateSession"]>) {
+        const result = await super.updateSession(...args);
+        if (!injected && args[1].kind === "promote_mode") {
+          injected = true;
+          throw new StateLockBusyError("State mutex ownership changed before release");
+        }
+        return result;
+      }
+    }
+    const store = new PostWriteBusyStore(root, {
+      probeFilesystem: false,
+      mutex: { identity: new TestIdentity(), timeoutMs: 1_000, pollMs: 2 },
+    });
+    await baseStore.init();
+    const send = vi.fn(async (input: { id: string; sessionId?: string }) => ({
+      id: input.id,
+      sessionId: input.sessionId ?? input.id,
+      delivery: "pending" as const,
+    }));
+    const bridge = runtime(controller({ send }), store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+
+    await expect(bridge.prompt({ sessionId, prompt: [{ type: "text", text: "one" }] })).resolves.toMatchObject({
+      session: { generation: 1, interactionMode: "default", inputDispatchState: "dispatched" },
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(injected).toBe(true);
+    await expect(store.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { generation: 1, interactionMode: "default", inputDispatchState: "dispatched" },
+    });
+  });
+
+  it("reconciles an exact promote_mode commit when every post-write lock release reports busy", async () => {
+    const root = await tempRoot();
+    const { store: baseStore, lease } = durable(root);
+    let injected = 0;
+    class RepeatedPostWriteBusyStore extends DurableSessionStore {
+      override async updateSession(...args: Parameters<DurableSessionStore["updateSession"]>) {
+        const result = await super.updateSession(...args);
+        if (args[1].kind === "promote_mode") {
+          injected += 1;
+          throw new StateLockBusyError("State mutex ownership changed before release");
+        }
+        return result;
+      }
+    }
+    const store = new RepeatedPostWriteBusyStore(root, {
+      probeFilesystem: false,
+      mutex: { identity: new TestIdentity(), timeoutMs: 1_000, pollMs: 2 },
+    });
+    await baseStore.init();
+    const send = vi.fn(async (input: { id: string; sessionId?: string }) => ({
+      id: input.id,
+      sessionId: input.sessionId ?? input.id,
+      delivery: "sent" as const,
+    }));
+    const bridge = runtime(controller({ send }), store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+
+    await expect(bridge.prompt({ sessionId, prompt: [{ type: "text", text: "one" }] })).resolves.toMatchObject({
+      session: { generation: 1, interactionMode: "default", inputDispatchState: "dispatched" },
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(injected).toBeGreaterThanOrEqual(1);
+    await expect(store.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { generation: 1, interactionMode: "default", inputDispatchState: "dispatched" },
+    });
+  });
   it("waits for first-input delivery before reading the lazily-created CoS session", async () => {
     const root = await tempRoot();
     const { store, lease } = durable(root);
@@ -127,6 +203,115 @@ describe("durable ACP runtime boundaries", () => {
     expect(inputReads).toBe(3);
     expect(sessionRead).toHaveBeenCalledTimes(1);
     expect(ctrl.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("collapses first-prompt durable preparation before the CoS send boundary", async () => {
+    const root = await tempRoot();
+    const identity = new TestIdentity();
+    const transitionKinds: string[] = [];
+    class RecordingStore extends DurableSessionStore {
+      override async updateSession(...args: Parameters<DurableSessionStore["updateSession"]>) {
+        transitionKinds.push(args[1].kind);
+        return super.updateSession(...args);
+      }
+    }
+    const store = new RecordingStore(root, {
+      probeFilesystem: false,
+      mutex: { identity, timeoutMs: 1_000, pollMs: 2 },
+    });
+    const lease = new DurableAdmissionLease(root, "a".repeat(64), {
+      identity,
+      mutex: { identity, timeoutMs: 1_000, pollMs: 2 },
+    });
+    await store.init();
+    let beforeSend: string[] = [];
+    const send = vi.fn(async (input: { id: string }) => {
+      beforeSend = [...transitionKinds];
+      return { id: input.id, sessionId, delivery: "sent" as const };
+    });
+    const bridge = runtime(controller({ send }), store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "first" }] });
+
+    expect(beforeSend).toEqual(["create", "mark_dispatched"]);
+    const durableSession = await store.readSession(sessionId);
+    expect(durableSession).toMatchObject({
+      status: "found",
+      value: {
+        bindingState: "bound",
+        generation: 1,
+        inputDispatchState: "dispatched",
+        activeInputId: sessionId,
+      },
+    });
+  });
+
+  it("keeps polling after a transient provider-turn session read failure once the exact input is sent", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    let sessionReads = 0;
+    const transient = Object.assign(new Error("temporary controller read failure"), { retryable: true });
+    const ctrl = controller({
+      send: vi.fn(async (input) => ({ id: input.id, sessionId, delivery: "sent" as const })),
+      input: vi.fn(async (id: string) => ({ id, sessionId, delivery: "sent" as const })),
+      session: vi.fn(async () => {
+        sessionReads += 1;
+        if (sessionReads === 1) throw transient;
+        return {
+          id: sessionId,
+          providerTurn: {
+            inputId: sessionId,
+            state: "active" as const,
+            turnId,
+            drainedSeq: null,
+            finalAssistantSeq: null,
+          },
+        };
+      }),
+    });
+    const bridge = runtime(ctrl, store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "pending" }] });
+    await expect(bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 })).resolves.toEqual({ kind: "turn_ready" });
+    expect(sessionReads).toBe(2);
+    expect(ctrl.send).toHaveBeenCalledTimes(1);
+    await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { inputId: sessionId, generation: 1 } });
+  });
+
+  it("does not re-read an immutable sent input while waiting for its provider turn", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    let sessionReads = 0;
+    const input = vi.fn(async (id: string) => ({ id, sessionId, delivery: "sent" as const }));
+    const session = vi.fn(async () => {
+      sessionReads += 1;
+      return {
+        id: sessionId,
+        providerTurn: sessionReads < 4
+          ? undefined
+          : {
+              inputId: sessionId,
+              state: "active" as const,
+              turnId,
+              drainedSeq: null,
+              finalAssistantSeq: null,
+            },
+      };
+    });
+    const ctrl = controller({
+      send: vi.fn(async (row) => ({ id: row.id, sessionId, delivery: "sent" as const })),
+      input,
+      session,
+    });
+    const bridge = runtime(ctrl, store, lease);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "pending turn" }] });
+
+    await expect(bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 })).resolves.toEqual({ kind: "turn_ready" });
+    expect(input).toHaveBeenCalledTimes(1);
+    expect(session).toHaveBeenCalledTimes(4);
   });
 
   it("fails closed if a pending first input names a different session", async () => {

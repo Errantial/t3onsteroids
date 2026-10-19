@@ -317,6 +317,7 @@ describe.runIf(process.platform === "win32")("built ACP stdio provider", () => {
     const control = path.join(profile, "control-api");
     const project = path.join(root, "project");
     const state = path.join(root, "state");
+    const metrics = path.join(root, "evidence", "metrics.json");
     await Promise.all([fs.mkdir(control, { recursive: true }), fs.mkdir(project, { recursive: true })]);
     const fake = new FakeCos(project);
     fake.wrapSessionDetail = true;
@@ -326,7 +327,12 @@ describe.runIf(process.platform === "win32")("built ACP stdio provider", () => {
 
     const child = spawn(process.execPath, [path.join(process.cwd(), "dist", "cli", "index.js")], {
       cwd: process.cwd(),
-      env: { ...process.env, T3ONSTEROIDS_COS_USER_DATA_DIR: profile, T3ONSTEROIDS_STATE_DIR: state },
+      env: {
+        ...process.env,
+        T3ONSTEROIDS_COS_USER_DATA_DIR: profile,
+        T3ONSTEROIDS_STATE_DIR: state,
+        T3ONSTEROIDS_METRICS_PATH: metrics,
+      },
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -383,6 +389,14 @@ describe.runIf(process.platform === "win32")("built ACP stdio provider", () => {
             finalAssistantSeq: null,
           });
           await expect(prompt).resolves.toEqual({ stopReason: "end_turn" });
+          const liveMetrics = JSON.parse(await fs.readFile(metrics, "utf8")) as Record<string, unknown>;
+          expect(liveMetrics).toMatchObject({
+            promptReceived: 1,
+            cosInputAcceptedOrReconciled: 1,
+            matchingTurnEndObserved: 1,
+            matchingTurnDrainedObserved: 1,
+            acpTerminalSent: 1,
+          });
         });
     } finally {
       child.stdin.end();

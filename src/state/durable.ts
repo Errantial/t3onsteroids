@@ -292,7 +292,9 @@ function normalTransition(record: DurableSessionRecord, transition: Exclude<Dura
     case "promote_mode": {
       const current = translationFor(record, transition.generation, transition.inputId);
       if (!("cursor" in current)) return current;
-      if (record.modeTransitionInputId !== transition.inputId || record.activeInputId !== transition.inputId) return { status: "wrong_input", value: record };
+      if (record.activeInputId !== transition.inputId) return { status: "wrong_input", value: record };
+      if (record.pendingInteractionMode === undefined && record.modeTransitionInputId === undefined) return { status: "unchanged", value: record };
+      if (record.modeTransitionInputId !== transition.inputId) return { status: "wrong_input", value: record };
       if (record.pendingInteractionMode === undefined) return { status: "unchanged", value: record };
       const { pendingInteractionMode, modeTransitionInputId: _mode, ...rest } = record;
       void _mode;
@@ -620,7 +622,8 @@ export class DurableSessionStore {
   async updateSession(sessionId: string, transition: DurableSessionTransition): Promise<SessionTransitionResult> {
     await this.init();
     return this.withLocalSessionQueue(sessionId, () => this.mutex(sessionId).withLock(async () => {
-      if (await this.activeQuarantine(sessionId)) return { status: "quarantined" };
+      // readSession owns the quarantine check. Repeating it here doubled the same ENOENT/read on
+      // every durable transition, including both first-prompt commits on the live critical path.
       const currentRead = await this.readSession(sessionId);
       if (currentRead.status === "corrupt" || currentRead.status === "unsupportedSchema") return { status: "quarantined" };
       if (transition.kind === "create") {

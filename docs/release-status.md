@@ -2,13 +2,15 @@
 
 The codebase is pinned to T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`, CoS `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`, controller protocol 1, ACP SDK 1.9.0, Node 24, Windows x64.
 
-**Current state: pre-v1, not release-qualified.** The bridge has the Step 1–6 implementation lineage, including the production ACP stdio entrypoint, drain-aware event translator, durable/cross-process state and lease implementation, hardened controller/SSE/privacy boundary, and metadata-only metrics/logging. The migrated checkout is requalifying those source gates against one exact current implementation tuple before any Step-7 live evidence can count. The authoritative remaining sequence is in `PLAN.md` under **Remaining work to finished v1**; do not treat historical local verification from another machine as a current PASS.
+**Current state: version `1.0.0`, but not release-qualified.** The bridge has the production ACP stdio entrypoint, drain-aware event translator, durable/cross-process state and lease implementation, restart/cancellation recovery, hardened controller/SSE/privacy boundary, and metadata-only metrics/logging. The release manifest records the deterministic Steps 1–6 gates, but each PASS is valid only for the implementation identity named by its evidence; any later implementation-input change must be requalified before live evidence can count. Steps 7–9 remain pending and therefore `releaseQualified` remains false.
 
 ## Supported launcher
 
 T3 must launch a real executable with `shell:false`. The selected/validated **launch shape** is the installed real `node.exe` with the built `dist/cli/index.js` script as its argument. `.cmd`/`.bat` wrappers are unsupported. No standalone packager is bundled or implicitly downloaded.
 
 That packaging form is proven and the no-argument CLI now serves the stable ACP v1 stdio provider. Do not treat the bridge as release-qualified until the provenance/live gates in `PLAN.md` are complete.
+
+The v1 deployment boundary is same-host and **same OS user/profile**. T3 must use the exact canonical CoS project root; worktrees, nested directories, remapped paths and changed reparse/junction identities fail closed rather than being mapped heuristically. V1 supports one active bridged turn per stable CoS profile/controller identity.
 
 ## Readiness diagnostics
 
@@ -19,6 +21,8 @@ node dist/cli/index.js --diagnose --user-data-dir <CoS user data dir> --cwd <exa
 ```
 
 The diagnostic is read-only. It checks controller discovery, health/protocol, provider-extension feature IDs, actions-enabled state, and exact project resolution. It does not enable CoS Local control API or Allow actions.
+
+For real prompts, pending-input cancel and exact-turn Stop, both CoS **Local control API** and **Allow actions** must be enabled by the user. T3 runtime mode does not replace CoS's own host-tool authority. Read-only diagnostics/project resolution and ACP provider-validation probes remain nonmutating.
 
 ## Remaining v1 gates
 
@@ -34,6 +38,10 @@ Current upstream T3 HEAD drift is a separate compatibility lane and does not cha
 
 V1 intentionally supports one active bridged turn per stable CoS controller identity. **2–4 concurrent chats are a desired post-v1 feature** and have their own measured qualification gates in `PLAN.md`; they do not block the first release.
 
+The pinned release tuple remains T3 `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`, CoS base `87ae9d631f82d8da2f462d910410031ad8f97ac5`, provider-extension build `0893fbdfe35192f5784f07fc03f97d2ccc235425`, ACP SDK `1.9.0`, Node 24 and Windows x64. A current-T3-HEAD result is recorded separately as compatible or incompatible; it does not silently widen this tuple.
+
+For live qualification, the preferred lane while the active CoS installation remains in use is a side-by-side candidate launched from the exact clean extension build with its own isolated user-data/profile directory and isolated bridge state root. The active installation/profile must remain untouched, and candidate/active executable identities plus the extension build id are recorded as provenance before mutating cases.
+
 ## Dependency audit disposition
 
-The bridge uses Vitest `5.0.5`, vite-node `6.0.0`, typescript-eslint `8.71.2`, ESLint / @eslint/js `9.39.5`, TypeScript `5.9.3`, and runtime `@agentclientprotocol/sdk@1.9.0`. On this migrated machine a fresh `npm ci` and `npm audit --json` report zero vulnerabilities. Step-6 evidence is refreshed only after the final pre-live implementation identity passes the complete clean verification lane; the older `docs/evidence/v1-06-toolchain-audit.md` remains provenance, not a current-tuple PASS, until then.
+The bridge uses Vitest `5.0.5`, vite-node `6.0.0`, typescript-eslint `8.71.2`, ESLint / @eslint/js `9.39.5`, TypeScript `5.9.3`, and runtime `@agentclientprotocol/sdk@1.9.0`. Step-6 evidence records a clean `npm ci`, `npm run verify`, `npm audit --json` with zero bridge-package vulnerabilities, and `git diff --check` for the exact `bridgeImplementationCommit` named in that evidence. If implementation inputs advance afterward, the Step-6 qualification must be refreshed rather than treated as portable by implication. This bridge audit is separate from the inherited CoS application dependency advisories recorded in Step-1 evidence.

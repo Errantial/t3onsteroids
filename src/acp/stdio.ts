@@ -96,6 +96,12 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
   const userDataDir = cosUserDataDirectory(env);
   const state = await createProductionStateContext(userDataDir, env, { warmProcessIdentity: true });
   const controller = new CosControllerClient(() => discoverCosController(userDataDir), undefined, undefined, metrics);
+  // Prime Node/fetch/controller discovery while T3 is still completing the ACP handshake. The
+  // response is deliberately discarded: prompt admission still takes its own fresh provider
+  // readiness snapshot, so a restart, token rotation, disabled actions, or provenance change
+  // between startup and the first prompt continues to fail closed. This only removes cold
+  // transport/JIT cost from the measured prompt critical path.
+  void controller.health().catch(() => undefined);
   let clientNotices = false;
   const runtime = new AcpBridgeRuntime({
     controller,

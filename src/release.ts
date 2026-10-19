@@ -4,7 +4,7 @@ import { BRIDGE_VERSION } from "./version.js";
 
 export interface ReleaseReadiness {
   readonly bridgeVersion: string;
-  readonly supportedConcurrency: 1;
+  readonly supportedConcurrency: 1 | 2 | 4;
   readonly platform: "win32-x64";
   readonly t3Pinned: true;
   readonly cosPinned: true;

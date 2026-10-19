@@ -226,6 +226,37 @@ describe.runIf(process.platform === "win32")("cross-process durable state", () =
     expect(firstLease.leaseId).toBe(secondLease.leaseId);
   }, 30_000);
 
+  it("admits two simultaneous cross-process contenders when configured for two slots", async () => {
+    const root = await tempRoot();
+    const hash = "6".repeat(64);
+    const secondSession = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const secondInput = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const first = child(root, "lease-acquire-capacity", hash, sessionId, inputId, "1", "owner-one", "2");
+    const second = child(root, "lease-acquire-capacity", hash, secondSession, secondInput, "1", "owner-two", "2");
+    const firstDone = completion(first);
+    const secondDone = completion(second);
+    const [firstResult, secondResult] = await Promise.all([firstLine(first), firstLine(second)]);
+    await expect(firstDone).resolves.toMatchObject({ code: 0 });
+    await expect(secondDone).resolves.toMatchObject({ code: 0 });
+
+    expect(firstResult).toMatchObject({ status: "acquired", lease: { sessionId } });
+    expect(secondResult).toMatchObject({ status: "acquired", lease: { sessionId: secondSession } });
+    expect((firstResult.lease as { leaseId: string }).leaseId).not.toBe((secondResult.lease as { leaseId: string }).leaseId);
+
+    const lease = new DurableAdmissionLease(root, hash, { identity: new ParentIdentity(), maxConcurrentTurns: 2 });
+    const snapshot = await lease.readAll();
+    expect(snapshot.status).toBe("found");
+    if (snapshot.status === "found") {
+      expect(snapshot.active.map((entry) => entry.sessionId).sort()).toEqual([sessionId, secondSession].sort());
+      expect(snapshot.waiting).toHaveLength(0);
+    }
+    await lease.releaseAfterProof((firstResult.lease as { leaseId: string }).leaseId, {
+      kind: "not_sent", sessionId, inputId, generation: 1,
+    });
+    await lease.releaseAfterProof((secondResult.lease as { leaseId: string }).leaseId, {
+      kind: "not_sent", sessionId: secondSession, inputId: secondInput, generation: 1,
+    });
+  }, 30_000);
   it("keeps a long-lived lease after its child owner exits and exposes it to the next process", async () => {
     const root = await tempRoot();
     const hash = "c".repeat(64);

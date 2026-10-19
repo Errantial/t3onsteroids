@@ -40,6 +40,7 @@ export type BridgeErrorCode =
   | "input_too_large"
   | "project_unmapped"
   | "input_busy"
+  | "cancelled"
   | "provider_policy_unavailable"
   | "actions_disabled"
   | "session_broken";
@@ -336,6 +337,9 @@ export class AcpBridgeRuntime {
         throw retryError;
       }
     }
+    if (result.status === "cancelled" && transition.kind === "mark_dispatched") {
+      throw new BridgeError("cancelled", "Provider input was cancelled before dispatch");
+    }
     if (result.status === "updated" || result.status === "unchanged") {
       this.sessions.set(sessionId, result.value);
       return result.value;
@@ -367,8 +371,11 @@ export class AcpBridgeRuntime {
     if (this.options.durableLease) {
       if (!leaseId) throw new BridgeError("session_broken", "Durable admission requires a journaled exact lease id");
       const result = await this.options.durableLease.acquire({ sessionId, inputId, generation, ownerId: this.ownerId, leaseId });
+      if (result.status === "cancelled") {
+        throw new BridgeError("cancelled", "Queued provider input was cancelled before dispatch");
+      }
       if (result.status !== "acquired") {
-        throw new BridgeError("input_busy", "Another T3→CoS turn is already active for this CoS controller identity");
+        throw new BridgeError("input_busy", "No admission slot is available for this CoS controller identity");
       }
       if (result.lease.leaseId !== leaseId) throw new BridgeError("session_broken", "Acquired durable lease id did not match the journaled generation");
       return;
@@ -383,7 +390,6 @@ export class AcpBridgeRuntime {
     });
     if (!acquired) throw new BridgeError("input_busy", "Another T3→CoS turn is already active for this CoS controller identity");
   }
-
   private async releaseLeaseAfterProof(sessionId: string, proof: LeaseReleaseProof): Promise<void> {
     if (this.options.durableLease) {
       const journal = await this.readPersisted(sessionId);
@@ -399,20 +405,25 @@ export class AcpBridgeRuntime {
     await this.options.lease.release(this.options.controllerIdentity, this.ownerId);
   }
 
-  private async durableLeaseMatches(session: SessionState, inputId: string, generation: number): Promise<boolean> {
+  private async durableLeaseState(
+    session: SessionState,
+    inputId: string,
+    generation: number,
+  ): Promise<"active" | "queued" | "missing"> {
     if (!this.options.durableLease) throw new Error("Durable lease check requested without durable lease");
-    if (!session.admissionLeaseId) return false;
-    const current = await this.options.durableLease.read();
+    const leaseId = session.admissionLeaseId;
+    if (!leaseId) return "missing";
+    const current = await this.options.durableLease.readLease(leaseId);
     if (current.status === "corrupt") {
       throw new BridgeError("session_broken", "Durable admission lease is corrupt and cannot be reconciled safely");
     }
-    return current.status === "found" &&
-      current.lease.leaseId === session.admissionLeaseId &&
-      current.lease.sessionId === session.sessionId &&
-      current.lease.inputId === inputId &&
-      current.lease.generation === generation;
+    if (current.status === "missing") return "missing";
+    if (current.lease.leaseId !== leaseId || current.lease.sessionId !== session.sessionId ||
+        current.lease.inputId !== inputId || current.lease.generation !== generation) {
+      throw new BridgeError("session_broken", "Durable admission lease does not match the exact session generation");
+    }
+    return current.status;
   }
-
   private async requireInputIdentity(session: SessionState, input: CosInputRecord, expectedInputId: string): Promise<void> {
     const wrongId = input.id !== expectedInputId;
     const wrongSession = input.sessionId !== undefined && input.sessionId !== session.sessionId;
@@ -484,13 +495,13 @@ export class AcpBridgeRuntime {
       throw new BridgeError("session_broken", "Persisted cancellation lacks an exact provider input generation");
     }
 
-    const matchingLease = await this.durableLeaseMatches(session, inputId, translation.generation);
+    const matchingLease = await this.durableLeaseState(session, inputId, translation.generation);
     if (translation.turnId) {
       if (session.activeCosTurnId !== translation.turnId ||
           (session.cancelTargetTurnId !== undefined && session.cancelTargetTurnId !== translation.turnId)) {
         throw new BridgeError("session_broken", "Persisted cancellation turn identity is inconsistent");
       }
-      if (!matchingLease) {
+      if (matchingLease !== "active") {
         await this.markBroken(session, "ambiguous_recovery");
         throw new BridgeError("session_broken", "Delivered cancelled turn no longer owns its exact durable lease");
       }
@@ -537,7 +548,7 @@ export class AcpBridgeRuntime {
 
     // A prepared pending input without its matching lease never had authority to POST. This also
     // recovers a crash after proof-gated lease deletion but before settle_not_sent persistence.
-    if (!matchingLease) {
+    if (matchingLease === "missing") {
       return this.applyDurableTransition(session.sessionId, {
         kind: "settle_not_sent",
         inputId,
@@ -1162,7 +1173,7 @@ export class AcpBridgeRuntime {
       }
 
       if (session.activeCosTurnId) {
-        if (!await this.durableLeaseMatches(session, pendingInputId, generation)) {
+        if (await this.durableLeaseState(session, pendingInputId, generation) !== "active") {
           await this.markBroken(session, "ambiguous_recovery");
           throw new BridgeError("session_broken", "Delivered provider turn no longer owns its exact durable lease");
         }
@@ -1180,8 +1191,8 @@ export class AcpBridgeRuntime {
         throw new BridgeError("input_busy", "The previously delivered provider turn must finish before a new prompt is admitted");
       }
 
-      const matchingLease = await this.durableLeaseMatches(session, pendingInputId, generation);
-      if (!matchingLease) {
+      const matchingLease = await this.durableLeaseState(session, pendingInputId, generation);
+      if (matchingLease === "missing") {
         // No matching profile lease means this prepared input never had authority to POST (or a
         // proven-not-sent release already won). Clear only this exact generation and continue.
         session = await this.applyDurableTransition(session.sessionId, {
@@ -1364,16 +1375,35 @@ export class AcpBridgeRuntime {
         phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
         await this.acquireLease(session.sessionId, inputId, generation, leaseId);
         leaseAcquireMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
+        phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
+        session = await this.applyDurableTransition(session.sessionId, { kind: "mark_dispatched", inputId, generation });
+        markDispatchedMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
       } catch (error) {
-        if (await this.durableLeaseMatches(session, inputId, generation)) {
-          await this.releaseLeaseAfterProof(session.sessionId, { kind: "not_sent", sessionId: session.sessionId, inputId, generation });
+        const latest = await this.readPersisted(session.sessionId);
+        if (latest?.generation === generation && latest.providerTranslation?.inputId === inputId &&
+            latest.activeInputId === inputId) {
+          if (await this.durableLeaseState(latest, inputId, generation) !== "missing") {
+            await this.releaseLeaseAfterProof(session.sessionId, {
+              kind: "not_sent", sessionId: session.sessionId, inputId, generation,
+            });
+          }
+          try {
+            await this.applyDurableTransition(session.sessionId, { kind: "settle_not_sent", inputId, generation });
+          } catch (settleError) {
+            const settled = await this.readPersisted(session.sessionId);
+            if (settleError instanceof BridgeError && settleError.code === "session_broken" &&
+                settled?.generation === generation && !settled.activeInputId && !settled.providerTranslation &&
+                settled.cancelIntent === "none") {
+              throw new BridgeError("cancelled", "Provider input was cancelled before dispatch");
+            }
+            throw settleError;
+          }
+        } else if (latest?.generation === generation && !latest.providerTranslation && !latest.activeInputId &&
+            error instanceof BridgeError && (error.code === "session_broken" || error.code === "cancelled")) {
+          throw new BridgeError("cancelled", "Provider input was cancelled before dispatch");
         }
-        await this.applyDurableTransition(session.sessionId, { kind: "settle_not_sent", inputId, generation });
         throw error;
       }
-      phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
-      session = await this.applyDurableTransition(session.sessionId, { kind: "mark_dispatched", inputId, generation });
-      markDispatchedMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
     } else {
       await this.acquireLease(session.sessionId, inputId, generation);
       session = withInteractionMode(session, normalized.interactionMode);
@@ -1477,6 +1507,42 @@ export class AcpBridgeRuntime {
           await this.options.controller.stopExactTurn(sessionId, turnId);
         }
       } else {
+        const latest = await this.refreshDurable(sessionId);
+        if (latest.generation !== generation) {
+          throw new BridgeError("session_broken", "Pending cancellation generation changed during reconciliation");
+        }
+        if (latest.activeInputId !== activeInputId) {
+          if (!latest.providerTranslation && !latest.activeInputId && latest.cancelIntent === "none") return;
+          throw new BridgeError("session_broken", "Pending cancellation target changed during reconciliation");
+        }
+        if (latest.inputDispatchState === "prepared") {
+          const leaseId = latest.admissionLeaseId;
+          if (leaseId && this.options.durableLease) {
+            const queued = await this.options.durableLease.cancelQueued(leaseId);
+            if (queued === "active") {
+              await this.releaseLeaseAfterProof(sessionId, {
+                kind: "not_sent", sessionId, inputId: activeInputId, generation,
+              });
+            }
+          }
+          try {
+            await this.applyDurableTransition(sessionId, {
+              kind: "settle_not_sent", inputId: activeInputId, generation,
+            });
+          } catch (error) {
+            // The waiting prompt can observe its removed queue ticket and settle the same exact
+            // not-sent generation before this cancel request reaches the journal transition.
+            // Accept only that fully settled generation; any changed or still-pending state
+            // remains a hard failure.
+            const settled = await this.readPersisted(sessionId);
+            if (!(error instanceof BridgeError) || error.code !== "session_broken" ||
+                settled?.generation !== generation || settled.activeInputId || settled.providerTranslation ||
+                settled.cancelIntent !== "none") {
+              throw error;
+            }
+          }
+          return;
+        }
         if (!this.options.controller.cancelPendingInput) throw new BridgeError("session_broken", "Pending-input cancellation is unavailable");
         await this.options.controller.cancelPendingInput(activeInputId);
       }

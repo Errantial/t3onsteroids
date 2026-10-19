@@ -51,6 +51,7 @@ export type SessionTransitionResult =
   | { readonly status: "stale_generation"; readonly value: DurableSessionRecord }
   | { readonly status: "wrong_input"; readonly value: DurableSessionRecord }
   | { readonly status: "wrong_turn"; readonly value: DurableSessionRecord }
+  | { readonly status: "cancelled"; readonly value: DurableSessionRecord }
   | { readonly status: "quarantined" };
 
 export type DurableSessionTransition =
@@ -361,6 +362,7 @@ function normalTransition(record: DurableSessionRecord, transition: Exclude<Dura
       const current = translationFor(record, transition.generation, transition.inputId);
       if (!("cursor" in current)) return current;
       if (record.activeInputId !== transition.inputId || record.dispatchInputId !== transition.inputId) return { status: "wrong_input", value: record };
+      if (record.cancelIntent === "requested" || current.cancelRequested) return { status: "cancelled", value: record };
       if (record.inputDispatchState === "dispatched") return { status: "unchanged", value: record };
       if (record.inputDispatchState !== "prepared") return { status: "wrong_input", value: record };
       return { ...record, inputDispatchState: "dispatched" };

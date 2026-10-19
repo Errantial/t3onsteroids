@@ -3,6 +3,7 @@ import path from "node:path";
 import { DurableSessionStore, defaultStateDirectory } from "./durable.js";
 import { DurableAdmissionLease, canonicalProfileIdentityHash, leaseReferencedSessionIds } from "./lease.js";
 import { PowerShellWindowsProcessIdentity } from "./mutex.js";
+import { releaseReadiness } from "../release.js";
 
 export interface ProductionStateContext {
   readonly stateDirectory: string;
@@ -14,6 +15,10 @@ export interface ProductionStateContext {
 export interface ProductionStateContextOptions {
   /** Resolve the exact current-process identity before serving live mutations. */
   readonly warmProcessIdentity?: boolean;
+  /** Test/qualification override; production otherwise follows the measured release capability. */
+  readonly maxConcurrentTurns?: number;
+  /** Test/qualification override; zero preserves immediate busy behavior. */
+  readonly maxQueuedTurns?: number;
 }
 
 /**
@@ -38,9 +43,12 @@ export async function createProductionStateContext(
   // proof is actually required.
   const processIdentity = new PowerShellWindowsProcessIdentity();
   const sessionStore = new DurableSessionStore(stateDirectory, { mutex: { identity: processIdentity } });
+  const supportedConcurrency = options.maxConcurrentTurns ?? releaseReadiness().supportedConcurrency;
   const admissionLease = new DurableAdmissionLease(stateDirectory, profileIdentityHash, {
     identity: processIdentity,
     mutex: { identity: processIdentity },
+    maxConcurrentTurns: supportedConcurrency,
+    maxQueuedTurns: options.maxQueuedTurns ?? (supportedConcurrency > 1 ? 8 : 0),
   });
   if (options.warmProcessIdentity) {
     // The live ACP provider warms this once during startup so the first durable mutation stays free

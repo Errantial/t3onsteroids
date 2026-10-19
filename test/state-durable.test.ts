@@ -71,6 +71,15 @@ function store(root: string, identity = new FakeIdentity(1001, "6389625600000000
   });
 }
 
+async function waitForWaitingSession(lease: DurableAdmissionLease, targetSessionId: string): Promise<void> {
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    const snapshot = await lease.readAll();
+    if (snapshot.status === "found" && snapshot.waiting.some((entry) => entry.lease.sessionId === targetSessionId)) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("queued lease did not appear before the test deadline");
+}
 describe("Windows hard-link state mutex", () => {
   it.runIf(process.platform === "win32")("memoizes the current PowerShell process identity across repeated mutex instances", async () => {
     const root = await tempRoot();
@@ -445,7 +454,7 @@ describe("durable tagged session state", () => {
 
     try {
       const cursor = durable.updateSession(sessionId, { kind: "advance_cursor", inputId, generation: 1, seq: 9 });
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await new Promise((resolve) => setTimeout(resolve, 20));
       const cancel = durable.updateSession(sessionId, { kind: "set_cancel", inputId, generation: 1, turnId });
       await expect(Promise.all([cursor, cancel])).resolves.toEqual([
         expect.objectContaining({ status: "updated" }),
@@ -521,6 +530,28 @@ describe("durable tagged session state", () => {
     });
   });
 
+  it("refuses the dispatch transition when cancellation intent already won", async () => {
+    const root = await tempRoot();
+    const durable = store(root);
+    const pendingInput = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await durable.updateSession(sessionId, { kind: "create", state: initial() });
+    await durable.updateSession(sessionId, { kind: "begin_input", inputId: pendingInput, generation: 1 });
+    await durable.updateSession(sessionId, { kind: "set_cancel", inputId: pendingInput, generation: 1 });
+
+    await expect(durable.updateSession(sessionId, {
+      kind: "mark_dispatched",
+      inputId: pendingInput,
+      generation: 1,
+    })).resolves.toMatchObject({ status: "cancelled" });
+    await expect(durable.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: {
+        inputDispatchState: "prepared",
+        cancelIntent: "requested",
+        providerTranslation: { inputId: pendingInput, cancelRequested: true },
+      },
+    });
+  });
   it("rejects stale generation and wrong input transitions without advancing revision", async () => {
     const root = await tempRoot();
     const durable = store(root);
@@ -771,6 +802,205 @@ describe("profile-wide durable admission lease", () => {
     await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { leaseId: replacement.lease.leaseId } });
   });
 
+  it("admits two active turns and promotes the durable FIFO waiter after proof-gated release", async () => {
+    const root = await tempRoot();
+    const hash = "7".repeat(64);
+    const identity = new FakeIdentity(404, "638962560000000404");
+    const lease = new DurableAdmissionLease(root, hash, {
+      identity,
+      mutex: { identity, timeoutMs: 100 },
+      maxConcurrentTurns: 2,
+      maxQueuedTurns: 2,
+      queuePollMs: 20,
+    });
+    const thirdSession = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const secondInput = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const thirdInput = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const thirdLeaseId = "99999999-9999-4999-8999-999999999999";
+    const first = await lease.acquire({ sessionId, inputId, generation: 1, ownerId: "first" });
+    const second = await lease.acquire({ sessionId: secondSessionId, inputId: secondInput, generation: 1, ownerId: "second" });
+    expect(first.status).toBe("acquired");
+    expect(second.status).toBe("acquired");
+
+    const thirdPending = lease.acquire({
+      sessionId: thirdSession,
+      inputId: thirdInput,
+      generation: 1,
+      ownerId: "third",
+      leaseId: thirdLeaseId,
+    });
+    await waitForWaitingSession(lease, thirdSession);
+    await expect(lease.readAll()).resolves.toMatchObject({
+      status: "found",
+      active: [{ sessionId }, { sessionId: secondSessionId }],
+      waiting: [{ lease: { sessionId: thirdSession, leaseId: thirdLeaseId }, queueSequence: 1 }],
+    });
+
+    await expect(lease.releaseAfterProof(first.lease.leaseId, {
+      kind: "not_sent", sessionId, inputId, generation: 1,
+    })).resolves.toBe("released");
+    await expect(thirdPending).resolves.toMatchObject({ status: "acquired", lease: { leaseId: thirdLeaseId } });
+    await expect(lease.readAll()).resolves.toMatchObject({
+      status: "found",
+      active: [{ sessionId: secondSessionId }, { sessionId: thirdSession }],
+      waiting: [],
+    });
+    await lease.releaseAfterProof(second.lease.leaseId, {
+      kind: "not_sent", sessionId: secondSessionId, inputId: secondInput, generation: 1,
+    });
+    await lease.releaseAfterProof(thirdLeaseId, {
+      kind: "not_sent", sessionId: thirdSession, inputId: thirdInput, generation: 1,
+    });
+  });
+
+  it("bounds the waiting queue and cancels only the exact queued lease", async () => {
+    const root = await tempRoot();
+    const hash = "8".repeat(64);
+    const identity = new FakeIdentity(505, "638962560000000505");
+    const lease = new DurableAdmissionLease(root, hash, {
+      identity,
+      mutex: { identity, timeoutMs: 100 },
+      maxConcurrentTurns: 1,
+      maxQueuedTurns: 1,
+      queuePollMs: 20,
+    });
+    const queuedInput = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const queuedLeaseId = "99999999-9999-4999-8999-999999999999";
+    const first = await lease.acquire({ sessionId, inputId, generation: 1, ownerId: "active" });
+    expect(first.status).toBe("acquired");
+    const queued = lease.acquire({
+      sessionId: secondSessionId,
+      inputId: queuedInput,
+      generation: 1,
+      ownerId: "queued",
+      leaseId: queuedLeaseId,
+    });
+    await waitForWaitingSession(lease, secondSessionId);
+
+    const overflow = await lease.acquire({
+      sessionId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      inputId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      generation: 1,
+      ownerId: "overflow",
+    });
+    expect(overflow).toMatchObject({ status: "held", lease: { leaseId: first.lease.leaseId } });
+    await expect(lease.cancelQueued(queuedLeaseId)).resolves.toBe("removed");
+    await expect(queued).resolves.toMatchObject({ status: "cancelled", lease: { leaseId: queuedLeaseId } });
+    await expect(lease.readAll()).resolves.toMatchObject({
+      status: "found",
+      active: [{ sessionId }],
+      waiting: [],
+    });
+    await lease.releaseAfterProof(first.lease.leaseId, { kind: "not_sent", sessionId, inputId, generation: 1 });
+  });
+
+  it("admits four active turns and promotes a fifth only after one slot is released", async () => {
+    const root = await tempRoot();
+    const hash = "9".repeat(64);
+    const identity = new FakeIdentity(606, "638962560000000606");
+    const lease = new DurableAdmissionLease(root, hash, {
+      identity,
+      mutex: { identity, timeoutMs: 100 },
+      maxConcurrentTurns: 4,
+      maxQueuedTurns: 1,
+      queuePollMs: 20,
+    });
+    const sessions = [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    ];
+    const inputs = [
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333",
+      "44444444-4444-4444-8444-444444444444",
+    ];
+    const active = [];
+    for (let index = 0; index < sessions.length; index += 1) {
+      const session = sessions[index];
+      const input = inputs[index];
+      if (!session || !input) throw new Error("invalid concurrency test fixture");
+      const acquired = await lease.acquire({ sessionId: session, inputId: input, generation: 1, ownerId: "active-" + index });
+      expect(acquired.status).toBe("acquired");
+      if (acquired.status === "acquired") active.push({ lease: acquired.lease, sessionId: session, inputId: input });
+    }
+    const fifthSession = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const fifthInput = "55555555-5555-4555-8555-555555555555";
+    const fifth = lease.acquire({ sessionId: fifthSession, inputId: fifthInput, generation: 1, ownerId: "fifth" });
+    await waitForWaitingSession(lease, fifthSession);
+    await expect(lease.readAll()).resolves.toMatchObject({ status: "found", active: [{}, {}, {}, {}], waiting: [{ lease: { sessionId: fifthSession } }] });
+
+    const released = active[1];
+    if (!released) throw new Error("missing selected active lease");
+    await lease.releaseAfterProof(released.lease.leaseId, {
+      kind: "not_sent", sessionId: released.sessionId, inputId: released.inputId, generation: 1,
+    });
+    await expect(fifth).resolves.toMatchObject({ status: "acquired", lease: { sessionId: fifthSession } });
+    const snapshot = await lease.readAll();
+    expect(snapshot.status).toBe("found");
+    if (snapshot.status === "found") {
+      expect(snapshot.active).toHaveLength(4);
+      expect(snapshot.waiting).toHaveLength(0);
+      expect(snapshot.active.map((entry) => entry.sessionId)).toContain(fifthSession);
+    }
+    for (const entry of active.filter((value) => value !== released)) {
+      await lease.releaseAfterProof(entry.lease.leaseId, {
+        kind: "not_sent", sessionId: entry.sessionId, inputId: entry.inputId, generation: 1,
+      });
+    }
+    if (snapshot.status === "found") {
+      const fifthLease = snapshot.active.find((entry) => entry.sessionId === fifthSession);
+      if (fifthLease) {
+        await lease.releaseAfterProof(fifthLease.leaseId, {
+          kind: "not_sent", sessionId: fifthSession, inputId: fifthInput, generation: 1,
+        });
+      }
+    }
+  });
+
+  it("migrates a legacy single-lease file without dropping the active owner", async () => {
+    const root = await tempRoot();
+    const hash = "a".repeat(64);
+    const identity = new FakeIdentity(707, "638962560000000707");
+    const legacyLeaseId = "11111111-1111-4111-8111-111111111111";
+    await fs.mkdir(path.join(root, "leases"), { recursive: true });
+    await fs.writeFile(path.join(root, "leases", `${hash}.json`), JSON.stringify({
+      schemaVersion: 1,
+      leaseId: legacyLeaseId,
+      controllerIdentityHash: hash,
+      sessionId,
+      inputId,
+      generation: 1,
+      ownerId: "legacy-owner",
+      ownerPid: identity.pid,
+      ownerProcessStartTicks: identity.ticks,
+      acquiredAt: 10,
+      heartbeatAt: 10,
+    }));
+    const lease = new DurableAdmissionLease(root, hash, {
+      identity,
+      mutex: { identity, timeoutMs: 100 },
+      maxConcurrentTurns: 2,
+      maxQueuedTurns: 1,
+    });
+    const secondInput = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const second = await lease.acquire({ sessionId: secondSessionId, inputId: secondInput, generation: 1, ownerId: "new-owner" });
+    expect(second.status).toBe("acquired");
+    await expect(lease.readAll()).resolves.toMatchObject({
+      status: "found",
+      active: [{ leaseId: legacyLeaseId, sessionId }, { sessionId: secondSessionId }],
+    });
+    const bytes = await fs.readFile(path.join(root, "leases", `${hash}.json`), "utf8");
+    expect(JSON.parse(bytes)).toMatchObject({ schemaVersion: 2, active: [{ leaseId: legacyLeaseId }, { sessionId: secondSessionId }] });
+    await lease.releaseAfterProof(legacyLeaseId, { kind: "not_sent", sessionId, inputId, generation: 1 });
+    if (second.status === "acquired") {
+      await lease.releaseAfterProof(second.lease.leaseId, {
+        kind: "not_sent", sessionId: secondSessionId, inputId: secondInput, generation: 1,
+      });
+    }
+  });
   it("hashes only the canonical profile directory into a stable non-path lease identity", async () => {
     const root = await tempRoot();
     const profile = path.join(root, "Profile");

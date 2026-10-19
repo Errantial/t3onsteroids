@@ -54,7 +54,7 @@ function controller(overrides: Partial<BridgeController> = {}): BridgeController
   };
 }
 
-function durable(root: string) {
+function durable(root: string, maxConcurrentTurns = 1, maxQueuedTurns = 0) {
   const identity = new TestIdentity();
   const store = new DurableSessionStore(root, {
     probeFilesystem: false,
@@ -63,6 +63,8 @@ function durable(root: string) {
   const lease = new DurableAdmissionLease(root, profileHash, {
     identity,
     mutex: { identity, timeoutMs: 1_000, pollMs: 2 },
+    maxConcurrentTurns,
+    maxQueuedTurns,
   });
   return { store, lease };
 }
@@ -96,6 +98,79 @@ function translation(extra: Partial<ProviderTurnTranslationState> = {}): Provide
 }
 
 describe("durable ACP runtime boundaries", () => {
+  it("dispatches two different ACP sessions concurrently when the measured slot override is two", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root, 2, 1);
+    const send = vi.fn(async (input: { id: string; sessionId?: string }) => ({
+      id: input.id,
+      sessionId: input.sessionId ?? input.id,
+      delivery: "sent" as const,
+    }));
+    const ids = [sessionId, secondSessionId];
+    const bridge = runtime(controller({ send }), store, lease, () => ids.shift() ?? "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    const first = bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    const second = bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+
+    const results = await Promise.all([
+      bridge.prompt({ sessionId: first.sessionId, prompt: [{ type: "text", text: "first concurrent turn" }] }),
+      bridge.prompt({ sessionId: second.sessionId, prompt: [{ type: "text", text: "second concurrent turn" }] }),
+    ]);
+    expect(results.map((result) => result.session.sessionId).sort()).toEqual([first.sessionId, second.sessionId].sort());
+    expect(send).toHaveBeenCalledTimes(2);
+
+    const snapshot = await lease.readAll();
+    expect(snapshot.status).toBe("found");
+    if (snapshot.status === "found") {
+      expect(snapshot.active).toHaveLength(2);
+      expect(snapshot.active.map((entry) => entry.sessionId).sort()).toEqual([first.sessionId, second.sessionId].sort());
+      expect(snapshot.waiting).toHaveLength(0);
+    }
+  });
+  it("cancels an exact queued session input without dispatching it to CoS", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root, 1, 1);
+    const send = vi.fn(async (input: { id: string; sessionId?: string }) => ({
+      id: input.id,
+      sessionId: input.sessionId ?? input.id,
+      delivery: "sent" as const,
+    }));
+    const ids = [sessionId, secondSessionId];
+    const bridge = runtime(controller({ send }), store, lease, () => ids.shift() ?? "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    const first = bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    const second = bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+
+    await bridge.prompt({ sessionId: first.sessionId, prompt: [{ type: "text", text: "first turn" }] });
+    const queuedPromptOutcome = bridge.prompt({ sessionId: second.sessionId, prompt: [{ type: "text", text: "queued turn" }] })
+      .then(() => ({ fulfilled: true as const }), (error: unknown) => ({ fulfilled: false as const, error }));
+    const deadline = Date.now() + 4_000;
+    let queued = false;
+    while (Date.now() < deadline) {
+      const snapshot = await lease.readAll();
+      if (snapshot.status === "found" && snapshot.waiting.some((entry) => entry.lease.sessionId === second.sessionId)) {
+        queued = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(queued).toBe(true);
+
+    await bridge.cancel(second.sessionId);
+    await expect(queuedPromptOutcome).resolves.toMatchObject({ fulfilled: false, error: { code: "cancelled" } });
+    expect(send).toHaveBeenCalledTimes(1);
+    const cancelledSession = await store.readSession(second.sessionId);
+    expect(cancelledSession).toMatchObject({ status: "found", value: { generation: 1, cancelIntent: "none" } });
+    if (cancelledSession.status === "found") {
+      expect(cancelledSession.value).not.toHaveProperty("inputDispatchState");
+      expect(cancelledSession.value).not.toHaveProperty("activeInputId");
+      expect(cancelledSession.value).not.toHaveProperty("providerTranslation");
+    }
+    const finalLeaseState = await lease.readAll();
+    expect(finalLeaseState.status).toBe("found");
+    if (finalLeaseState.status === "found") {
+      expect(finalLeaseState.active.map((entry) => entry.sessionId)).toEqual([first.sessionId]);
+      expect(finalLeaseState.waiting).toHaveLength(0);
+    }
+  });
   it("reconciles an exact promote_mode commit that reports a post-write state-lock failure", async () => {
     const root = await tempRoot();
     const { store: baseStore, lease } = durable(root);

@@ -84,10 +84,14 @@ export {
 export type {
   DurableAdmissionLeaseOptions,
   DurableLeaseAcquireResult,
+  DurableLeaseCollectionReadResult,
+  DurableLeaseLookupResult,
   DurableLeaseReadResult,
   DurableLeaseRecord,
+  DurableQueuedLeaseRecord,
   LeaseReleaseProof,
   LeaseReleaseResult,
+  QueuedLeaseCancelResult,
 } from "./lease.js";
 export { createProductionStateContext } from "./production.js";
-export type { ProductionStateContext } from "./production.js";
+export type { ProductionStateContext, ProductionStateContextOptions } from "./production.js";

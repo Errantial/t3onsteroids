@@ -99,6 +99,17 @@ switch (command) {
     line(await lease.acquire({ sessionId, inputId, generation: Number(generationRaw), ownerId }));
     break;
   }
+  case "lease-acquire-capacity": {
+    const [hash, sessionId, inputId, generationRaw, ownerId, capacityRaw] = args;
+    if (!hash || !sessionId || !inputId || !generationRaw || !ownerId || !capacityRaw) throw new Error("missing lease capacity args");
+    const lease = new DurableAdmissionLease(root, hash, {
+      mutex: { timeoutMs: 5_000, pollMs: 10 },
+      maxConcurrentTurns: Number(capacityRaw),
+      maxQueuedTurns: 0,
+    });
+    line(await lease.acquire({ sessionId, inputId, generation: Number(generationRaw), ownerId }));
+    break;
+  }
   case "lease-wait-acquire": {
     const [hash, sessionId, inputId, generationRaw, ownerId] = args;
     if (!hash || !sessionId || !inputId || !generationRaw || !ownerId) throw new Error("missing lease wait args");

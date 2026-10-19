@@ -156,6 +156,11 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
         await persistMetrics();
         return { stopReason: result.terminal.stopReason };
       } catch (error) {
+        if (error instanceof BridgeError && error.code === "cancelled") {
+          metrics.increment("acpTerminalSent");
+          await persistMetrics();
+          return { stopReason: "cancelled" };
+        }
         return safeRequestError(error);
       }
     })

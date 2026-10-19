@@ -2,7 +2,7 @@
 
 The codebase is pinned to T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`, CoS `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`, controller protocol 1, ACP SDK 1.9.0, Node 24, Windows x64.
 
-**Current state: version `1.0.0`, but not release-qualified.** The bridge has the production ACP stdio entrypoint, drain-aware event translator, durable/cross-process state and lease implementation, restart/cancellation recovery, hardened controller/SSE/privacy boundary, and metadata-only metrics/logging. The release manifest records the deterministic Steps 1–6 gates, but each PASS is valid only for the implementation identity named by its evidence; any later implementation-input change must be requalified before live evidence can count. Steps 7–9 remain pending and therefore `releaseQualified` remains false.
+**Current state: version `1.0.0`, but not release-qualified.** The bridge has the production ACP stdio entrypoint, drain-aware event translator, durable/cross-process state and lease implementation, restart/cancellation recovery, hardened controller/SSE/privacy boundary, and metadata-only metrics/logging. Steps 1–7 are recorded PASS for the current implementation/provenance tuple. The pinned live acceptance matrix (Step 8) and current-T3-HEAD drift/release cut (Step 9) remain pending, so `releaseQualified` remains false.
 
 ## Supported launcher
 
@@ -28,7 +28,6 @@ For real prompts, pending-input cancel and exact-turn Stop, both CoS **Local con
 
 Before v1 can be called finished/release-qualified, the project still needs:
 
-- live single-turn latency/browser/memory/reconnect qualification;
 - the pinned live T3→ACP→CoS acceptance matrix;
 - a separate current-T3-HEAD drift run and final clean-checkout release record.
 
@@ -38,7 +37,7 @@ Current upstream T3 HEAD drift is a separate compatibility lane and does not cha
 
 V1 intentionally supports one active bridged turn per stable CoS controller identity. **2–4 concurrent chats are a desired post-v1 feature** and have their own measured qualification gates in `PLAN.md`; they do not block the first release.
 
-The pinned release tuple remains T3 `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`, CoS base `87ae9d631f82d8da2f462d910410031ad8f97ac5`, provider-extension build `0893fbdfe35192f5784f07fc03f97d2ccc235425`, ACP SDK `1.9.0`, Node 24 and Windows x64. A current-T3-HEAD result is recorded separately as compatible or incompatible; it does not silently widen this tuple.
+The pinned release tuple remains T3 `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`, CoS base `87ae9d631f82d8da2f462d910410031ad8f97ac5`, provider-extension build `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`, ACP SDK `1.9.0`, Node 24 and Windows x64. A current-T3-HEAD result is recorded separately as compatible or incompatible; it does not silently widen this tuple.
 
 For live qualification, the preferred lane while the active CoS installation remains in use is a side-by-side candidate launched from the exact clean extension build with its own isolated user-data/profile directory and isolated bridge state root. The active installation/profile must remain untouched, and candidate/active executable identities plus the extension build id are recorded as provenance before mutating cases.
 

@@ -4,7 +4,7 @@ Status: PASS
 
 # V1 Step 6 — toolchain audit and pre-live implementation freeze
 
-`bridgeImplementationCommit`: `3cb315830850305fc7c772b497d70c1c8249a1cc`.
+`bridgeImplementationCommit`: `336c701c7fb3da967ef11c6b167da8a266becc46`.
 
 Pinned runtime tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc` (browser-extension file stamp separately `a35dccb10b05`); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
@@ -25,7 +25,7 @@ npm audit --json
 git diff --check
 ```
 
-Current validation: bridge `npm run verify` PASS with `25/25` test files and `233/233` tests; fresh `npm audit --json` exits `0` with `0` vulnerabilities at every severity; fresh `git diff --check` PASS; package smoke reports `bridgeVersion:1.0.0`, supported concurrency `1`, and `releaseQualified:false`. Live `--diagnose` against the isolated profile reports `ready:true` with `providerExtension` `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`, actions/routes ready, and exact project resolution OK. The exact CoS `73e52028` source validation is: targeted timed-out terminal-only regression `1/1` PASS; `test/provider-turn-drain.test.ts` + `test/projects.test.ts` + `test/control-api-reads.test.ts` `101/101` PASS; `npm run typecheck` PASS; `npm run build` PASS; `git diff --check` PASS. Full CoS `npm run verify` is explicitly **not claimed as PASS**.
+Current validation: bridge `npm run verify` PASS with `25/25` test files and `234/234` tests; fresh `npm audit --json` exits `0` with `0` vulnerabilities at every severity; fresh `git diff --check` PASS; package smoke reports `bridgeVersion:1.0.0`, supported concurrency `1`, and `releaseQualified:false`. Live `--diagnose` against the isolated profile reports `ready:true` with `providerExtension` `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`, actions/routes ready, and exact project resolution OK. The exact CoS `73e52028` source validation is: targeted timed-out terminal-only regression `1/1` PASS; `test/provider-turn-drain.test.ts` + `test/projects.test.ts` + `test/control-api-reads.test.ts` `101/101` PASS; `npm run typecheck` PASS; `npm run build` PASS; `git diff --check` PASS. Full CoS `npm run verify` is explicitly **not claimed as PASS**.
 
 Package smoke reports bridge version `1.0.0`, supported concurrency `1`, and `releaseQualified:false`. Metrics/privacy qualification remains content-safe and metadata-only, including hashed identifiers, bounded timing receipts, controller/SSE/backoff/queue/RSS counters, and explicit redaction coverage.
 

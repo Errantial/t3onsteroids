@@ -4,7 +4,7 @@ Status: PASS
 
 # V1 Step 3 — durable state, recovery and admission lease
 
-`bridgeImplementationCommit`: `3cb315830850305fc7c772b497d70c1c8249a1cc`.
+`bridgeImplementationCommit`: `336c701c7fb3da967ef11c6b167da8a266becc46`.
 
 Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc` (browser-extension file stamp separately `a35dccb10b05`); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
@@ -17,7 +17,7 @@ Deterministic Step-8 built-stdio coverage now exercises recovery through the com
 Current-machine bridge validation from this exact implementation tuple:
 
 ```text
-npm run verify                              PASS — 25/25 test files, 233/233 tests
+npm run verify                              PASS — 25/25 test files, 234/234 tests
 npm audit --json                            PASS — exit 0; 0 vulnerabilities at every severity
 git diff --check                            PASS
 package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false

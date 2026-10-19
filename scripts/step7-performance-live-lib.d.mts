@@ -10,6 +10,7 @@ export interface DirectTurnAnalysis {
 }
 
 export interface ProviderTurnAnalysis {
+  authoritativeInputProof: true;
   turnId: string;
   finalAssistantSeq: number;
   nativeDrainMs: number;

@@ -80,14 +80,25 @@ export async function controllerMetadata(discovery) {
   return { ...status, inputCount: inputs.length };
 }
 
-export async function sessionInputCount(discovery, sessionId) {
-  const response = await fetch(`${discovery.baseUrl}/v1/inputs?limit=500`, {
-    headers: { Authorization: `Bearer ${discovery.token}`, Accept: "application/json" },
-  });
-  if (!response.ok) throw new Error("controller input read failed");
-  const value = asObject(await response.json());
-  const inputs = Array.isArray(value.inputs) ? value.inputs : [];
-  return inputs.filter((entry) => asObject(entry).sessionId === sessionId).length;
+export function proveProviderSessionInputs(eventsValue, expectedCount) {
+  if (!Array.isArray(eventsValue)) return false;
+  if (!Number.isInteger(expectedCount) || expectedCount < 1) return false;
+  const confirmed = eventsValue.filter((event) =>
+    event?.kind === "user_message"
+    && event?.inputDelivery === "confirmed"
+    && typeof event?.inputId === "string"
+    && event.inputId.length > 0,
+  );
+  const ids = confirmed.map((event) => event.inputId);
+  if (confirmed.length !== expectedCount || new Set(ids).size !== expectedCount) return false;
+  return ids.every((inputId) => eventsValue.some((event) =>
+    event?.kind === "turn_drained"
+    && event?.inputId === inputId
+    && typeof event?.turnId === "string"
+    && event.turnId.length > 0
+    && Number.isInteger(event?.seq)
+    && event.highWaterSeq === event.seq,
+  ));
 }
 
 export function aggregateBridgeMetrics(...snapshots) {
@@ -129,7 +140,7 @@ export function evaluateRestartEvidence(evidence) {
     firstTurn: evidence.firstTurn?.stopReason === "end_turn" && evidence.firstTurn?.finalMatched === true && evidence.firstTurn?.toolLikeCount === 0,
     secondTurn: evidence.secondTurn?.stopReason === "end_turn" && evidence.secondTurn?.finalMatched === true && evidence.secondTurn?.toolLikeCount === 0,
     sameSession: evidence.sameSession === true,
-    exactInputDelta: evidence.sessionInputDelta === 2,
+    exactInputProof: evidence.authoritativeInputProof === true,
     policyBefore: evidence.policyBefore === true,
     policyAfter: evidence.policyAfter === true,
     browserBefore: browserHealthy(evidence.browserBefore),

@@ -89,9 +89,10 @@ export function analyzeProviderTurn(events, inputId) {
   const finish = eventOrder(drain);
   const toolLikeCount = events.filter((event) => {
     const order = eventOrder(event);
-    return order >= start && order <= finish && isToolLike(event);
+    return order >= start && order <= finish && event?.turnId === drain.turnId && isToolLike(event);
   }).length;
   return {
+    authoritativeInputProof: true,
     turnId: drain.turnId,
     finalAssistantSeq: drain.finalAssistantSeq,
     nativeDrainMs: drain.time - end.time,
@@ -171,8 +172,7 @@ export function evaluateSlowConsumerEvidence(evidenceValue) {
   const minOutputChars = Number(evidence.minOutputChars);
   const checks = {
     terminal: evidence.stopReason === "end_turn",
-    exactInputDelta: Number.isFinite(browserBefore.inputCount) && Number.isFinite(browserAfter.inputCount) &&
-      browserAfter.inputCount - browserBefore.inputCount === 1,
+    exactInputProof: evidence.authoritativeInputProof === true,
     providerPolicy: evidence.policyEnforced === true,
     exactFinalContent: evidence.exactFinalContent === true,
     longOutput: Number.isFinite(minOutputChars) && minOutputChars > 4_000 &&

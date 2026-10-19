@@ -189,6 +189,7 @@ const evidence = {
   browserAfter,
   sessionId,
   stopReason,
+  authoritativeInputProof: turn.authoritativeInputProof,
   policyEnforced,
   assistantChars,
   controllerChars,

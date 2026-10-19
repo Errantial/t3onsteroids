@@ -5,6 +5,7 @@ import {
   evaluateSseReconnectEvidence,
   isRestartCheckpointLifecycleUpdate,
   parseOptions,
+  proveProviderSessionInputs,
   summarizeStatus,
 } from "../scripts/step7-live-smoke-lib.mjs";
 
@@ -57,7 +58,7 @@ describe("Step 7 live-smoke harness evaluation", () => {
       firstTurn: { stopReason: "end_turn", finalMatched: true, toolLikeCount: 0 },
       secondTurn: { stopReason: "end_turn", finalMatched: true, toolLikeCount: 0 },
       sameSession: true,
-      sessionInputDelta: 2,
+      authoritativeInputProof: true,
       policyBefore: true,
       policyAfter: true,
       browserBefore: healthyBrowser,
@@ -79,6 +80,18 @@ describe("Step 7 live-smoke harness evaluation", () => {
       tokenChanged: false,
       metrics: { controllerActionCount: 9, backoffCount: 8, sseReconnectCount: 3 },
     }).pass).toBe(false);
+  });
+
+  it("proves restart inputs from confirmed session events without relying on retained global input lists", () => {
+    const events = [
+      { seq: 1, kind: "user_message", inputId: "input-a", inputDelivery: "confirmed" },
+      { seq: 2, kind: "turn_drained", inputId: "input-a", turnId: "turn-a", highWaterSeq: 2 },
+      { seq: 3, kind: "user_message", inputId: "input-b", inputDelivery: "confirmed" },
+      { seq: 4, kind: "turn_drained", inputId: "input-b", turnId: "turn-b", highWaterSeq: 4 },
+    ];
+    expect(proveProviderSessionInputs(events, 2)).toBe(true);
+    expect(proveProviderSessionInputs(events.slice(0, 3), 2)).toBe(false);
+    expect(proveProviderSessionInputs([...events, { seq: 5, kind: "user_message", inputId: "input-c", inputDelivery: "confirmed" }], 2)).toBe(false);
   });
 
   it("ignores only the exact extension restart-checkpoint page-tool projection", () => {

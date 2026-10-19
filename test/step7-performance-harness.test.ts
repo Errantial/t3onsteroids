@@ -68,7 +68,21 @@ describe("Step 7 live performance harness", () => {
       { seq: 2, position: 2, time: 200, kind: "turn_end", turnId: "turn-b" },
       { seq: 3, position: 3, time: 260, kind: "assistant_message", final: true },
       { seq: 4, position: 4, time: 275, kind: "turn_drained", inputId, turnId: "turn-b", highWaterSeq: 4, finalAssistantSeq: 3 },
-    ], inputId)).toEqual({ turnId: "turn-b", finalAssistantSeq: 3, nativeDrainMs: 75, toolLikeCount: 0 });
+    ], inputId)).toEqual({ authoritativeInputProof: true, turnId: "turn-b", finalAssistantSeq: 3, nativeDrainMs: 75, toolLikeCount: 0 });
+  });
+
+  it("counts only exact provider-turn tools and ignores extension lifecycle page-tool rows without a turn id", () => {
+    const inputId = "22222222-2222-4222-8222-222222222222";
+    const events = [
+      { seq: 1, position: 1, time: 100, kind: "user_message", inputId, inputDelivery: "confirmed" },
+      { seq: 2, position: 2, time: 150, kind: "page_tool", turnId: "turn-b", label: "Clicked Save" },
+      { seq: 3, position: 3, time: 180, kind: "assistant_message", turnId: "turn-b", final: true },
+      { seq: 4, position: 4, time: 200, kind: "turn_end", turnId: "turn-b" },
+      { seq: 5, position: 5, time: 210, kind: "page_tool", source: "extension", label: "Wrote a guide" },
+      { seq: 6, position: 6, time: 220, kind: "turn_drained", inputId, turnId: "turn-b", highWaterSeq: 6, finalAssistantSeq: 3 },
+    ];
+    expect(analyzeProviderTurn(events, inputId).toolLikeCount).toBe(1);
+    expect(analyzeProviderTurn(events.filter((event) => event.seq !== 2), inputId).toolLikeCount).toBe(0);
   });
 
   it("evaluates direct and slow-consumer evidence without retaining response text", () => {
@@ -107,6 +121,7 @@ describe("Step 7 live performance harness", () => {
     }, 900);
     expect(evaluateSlowConsumerEvidence({
       stopReason: "end_turn",
+      authoritativeInputProof: true,
       policyEnforced: true,
       exactFinalContent: true,
       minOutputChars: 5_000,
@@ -114,9 +129,22 @@ describe("Step 7 live performance harness", () => {
       toolLikeCount: 0,
       projectedToolLikeCount: 0,
       slowConsumer,
-      browserBefore: { ...healthyBrowser, inputCount: 20 },
-      browserAfter: { ...healthyBrowser, inputCount: 21 },
+      browserBefore: { ...healthyBrowser, inputCount: 51 },
+      browserAfter: { ...healthyBrowser, inputCount: 51 },
     }).pass).toBe(true);
+    expect(evaluateSlowConsumerEvidence({
+      stopReason: "end_turn",
+      authoritativeInputProof: false,
+      policyEnforced: true,
+      exactFinalContent: true,
+      minOutputChars: 5_000,
+      assistantChars: 5_500,
+      toolLikeCount: 0,
+      projectedToolLikeCount: 0,
+      slowConsumer,
+      browserBefore: { ...healthyBrowser, inputCount: 51 },
+      browserAfter: { ...healthyBrowser, inputCount: 51 },
+    }).checks.exactInputProof).toBe(false);
   });
 
   it("preserves the watchdog reason when timeout cleanup closes the ACP operation", async () => {

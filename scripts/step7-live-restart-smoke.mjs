@@ -13,9 +13,9 @@ import {
   evaluateRestartEvidence,
   isRestartCheckpointLifecycleUpdate,
   parseOptions,
+  proveProviderSessionInputs,
   readJson,
   requiredOption,
-  sessionInputCount,
   writeEvidence,
 } from "./step7-live-smoke-lib.mjs";
 
@@ -283,7 +283,8 @@ const freshClient = new CosControllerClient(() => discoverCosController(profile)
 const session = await freshClient.session(sessionId);
 const discoveryAfter = await discoverCosController(profile);
 const browserAfter = await controllerMetadata(discoveryAfter);
-const inputsForSession = await sessionInputCount(discoveryAfter, sessionId);
+const sessionEvents = await freshClient.events(sessionId, 0);
+const authoritativeInputProof = proveProviderSessionInputs(sessionEvents, 2);
 const evidence = {
   schemaVersion: 1,
   kind: "step7-live-restart-smoke",
@@ -291,7 +292,7 @@ const evidence = {
   firstTurn,
   secondTurn,
   sameSession: true,
-  sessionInputDelta: inputsForSession,
+  authoritativeInputProof,
   policyBefore,
   policyAfter: policyOk(session),
   browserBefore,

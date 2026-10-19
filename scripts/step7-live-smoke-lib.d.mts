@@ -7,7 +7,7 @@ export function browserHealthy(snapshot: unknown): boolean;
 export function summarizeStatus(status: unknown): { connectionState: string | null; bridgePaired: boolean; bridgePresent: boolean };
 export function isRestartCheckpointLifecycleUpdate(update: unknown): boolean;
 export function controllerMetadata(discovery: { baseUrl: string; token: string }): Promise<{ connectionState: string | null; bridgePaired: boolean; bridgePresent: boolean; inputCount: number }>;
-export function sessionInputCount(discovery: { baseUrl: string; token: string }, sessionId: string): Promise<number>;
+export function proveProviderSessionInputs(events: readonly unknown[], expectedCount: number): boolean;
 export function aggregateBridgeMetrics(...snapshots: unknown[]): Record<string, number>;
 export function evaluateSseReconnectEvidence(evidence: unknown): { pass: boolean; checks: Record<string, boolean> };
 export function evaluateRestartEvidence(evidence: unknown): { pass: boolean; checks: Record<string, boolean> };

@@ -4,7 +4,7 @@ Status: PASS
 
 # V1 Step 2 — event translator and terminal semantics
 
-`bridgeImplementationCommit`: `5e5643a25508beb6ca2dfdfdce47a4a28592b91b`.
+`bridgeImplementationCommit`: `dc29f989590750f25752dbd6f7f2cacfc7cf2851`.
 
 Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS provider extension `0893fbdfe35192f5784f07fc03f97d2ccc235425`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
@@ -16,7 +16,7 @@ Current-machine validation from this qualification run:
 
 ```text
 npm ci                                      PASS
-npm run verify                              PASS — 25 files / 226 tests
+npm run verify                              PASS — 25 files / 228 tests
 npm audit --json                            PASS — 0 vulnerabilities at every severity
 git diff --check                            PASS
 package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false

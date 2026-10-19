@@ -6,6 +6,8 @@ import {
   buildStep7PerformanceInput,
   directInputProof,
   directNoToolPrompt,
+  directProviderInput,
+  directVisibleAssistantText,
   evaluateDirectPairedEvidence,
   evaluateSlowConsumerEvidence,
   slowConsumerPerformanceSample,
@@ -19,6 +21,44 @@ describe("Step 7 live performance harness", () => {
     expect(directNoToolPrompt("STEP7-DIRECT-01-token")).toBe(
       "Do not use tools. Reply exactly: STEP7-DIRECT-01-token",
     );
+  });
+
+  it("uses the same enforced no-background-work provider policy as bridged first input", () => {
+    expect(directProviderInput({
+      inputId: "11111111-1111-4111-8111-111111111111",
+      expectedText: "STEP7-DIRECT-01-token",
+      projectId: "22222222-2222-4222-8222-222222222222",
+    })).toEqual({
+      id: "11111111-1111-4111-8111-111111111111",
+      text: "Do not use tools. Reply exactly: STEP7-DIRECT-01-token",
+      projectId: "22222222-2222-4222-8222-222222222222",
+      providerPolicy: { backgroundWork: "disabled" },
+    });
+  });
+
+  it("treats only one exact trailing Core app reference as presentation metadata", () => {
+    const expected = "STEP7-DIRECT-01-token";
+    const suffix = " [$chat-on-steroids-core](app://asdk_app_6aaf2b885780819194a6848835cc6115)";
+    expect(directVisibleAssistantText(expected + suffix)).toBe(expected);
+    expect(directVisibleAssistantText(expected + " extra")).toBe(expected + " extra");
+    expect(directVisibleAssistantText(expected + " [$chat-on-steroids-core](https://example.com)")).not.toBe(expected);
+    expect(directVisibleAssistantText(expected + " [$other-app](app://asdk_app_6aaf2b885780819194a6848835cc6115)")).not.toBe(expected);
+
+    const inputId = "11111111-1111-4111-8111-111111111111";
+    const base = [
+      { position: 1, kind: "user_message", inputId, inputDelivery: "confirmed" },
+      { position: 3, kind: "turn_end", turnId: "turn-a" },
+    ];
+    expect(analyzeDirectTurn([
+      base[0],
+      { position: 2, kind: "assistant_message", final: true, message: { text: expected + suffix } },
+      base[1],
+    ], { inputId, expectedText: expected, endToEndMs: 10 }).finalMatched).toBe(true);
+    expect(analyzeDirectTurn([
+      base[0],
+      { position: 2, kind: "assistant_message", final: true, message: { text: expected + " extra" } },
+      base[1],
+    ], { inputId, expectedText: expected, endToEndMs: 10 }).finalMatched).toBe(false);
   });
 
   it("proves each direct send from its exact send response and confirmed session event", () => {

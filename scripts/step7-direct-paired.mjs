@@ -13,8 +13,8 @@ import {
 } from "./step7-live-smoke-lib.mjs";
 import {
   analyzeDirectTurn,
+  directProviderInput,
   directInputProof,
-  directNoToolPrompt,
   evaluateDirectPairedEvidence,
 } from "./step7-performance-live-lib.mjs";
 
@@ -36,7 +36,7 @@ async function runSample(client, projectId, index, timeoutMs, settleMs) {
   const inputId = randomUUID();
   const expected = `STEP7-DIRECT-${String(index).padStart(2, "0")}-${randomUUID()}`;
   const started = performance.now();
-  const sent = await client.send({ id: inputId, text: directNoToolPrompt(expected), projectId });
+  const sent = await client.send(directProviderInput({ inputId, expectedText: expected, projectId }));
   if (sent.delivery === "not_sent" || sent.delivery === "unconfirmed") throw new Error("direct CoS input was not authoritatively delivered");
   const sessionId = sent.sessionId ?? inputId;
   const abort = new AbortController();

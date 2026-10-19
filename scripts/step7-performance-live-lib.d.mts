@@ -18,6 +18,17 @@ export interface ProviderTurnAnalysis {
 }
 
 export function directNoToolPrompt(expectedText: string): string;
+export function directVisibleAssistantText(text: string): string;
+export function directProviderInput(options: {
+  inputId: string;
+  expectedText: string;
+  projectId: string;
+}): {
+  id: string;
+  text: string;
+  projectId: string;
+  providerPolicy: { backgroundWork: "disabled" };
+};
 export function directInputProof(sendRecord: unknown, options: {
   inputId: string;
   sessionId: string;

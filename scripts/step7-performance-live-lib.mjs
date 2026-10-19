@@ -25,6 +25,23 @@ function isToolLike(event) {
   return event?.kind === "tool_call" || event?.kind === "page_tool" || event?.kind === "agent_message";
 }
 
+export function directNoToolPrompt(expectedText) {
+  if (typeof expectedText !== "string" || expectedText.length === 0) {
+    throw new TypeError("expectedText must be a non-empty string");
+  }
+  return `Do not use tools. Reply exactly: ${expectedText}`;
+}
+
+export function directInputProof(sendRecordValue, { inputId, sessionId, inputDelivered }) {
+  const sendRecord = asObject(sendRecordValue);
+  return typeof inputId === "string"
+    && typeof sessionId === "string"
+    && sendRecord.id === inputId
+    && sendRecord.sessionId === sessionId
+    && (sendRecord.delivery === "pending" || sendRecord.delivery === "sent")
+    && inputDelivered === true;
+}
+
 export function analyzeDirectTurn(events, { inputId, expectedText, endToEndMs }) {
   if (!Array.isArray(events)) throw new TypeError("events must be an array");
   const user = events.find((event) => event?.kind === "user_message" && event?.inputId === inputId);
@@ -126,10 +143,15 @@ export function evaluateDirectPairedEvidence(evidenceValue) {
   const browserBefore = asObject(evidence.browserBefore);
   const browserAfter = asObject(evidence.browserAfter);
   const healthy = (row) => row.connectionState === "connected" && row.bridgePaired === true && row.bridgePresent === true;
+  const inputIds = samples.map((sample) => sample?.inputId).filter((value) => typeof value === "string");
+  const sessionIds = samples.map((sample) => sample?.sessionId).filter((value) => typeof value === "string");
   const checks = {
     sampleCount: samples.length >= 10 && direct.length === samples.length,
-    exactInputDelta: Number.isFinite(browserBefore.inputCount) && Number.isFinite(browserAfter.inputCount) &&
-      browserAfter.inputCount - browserBefore.inputCount === samples.length,
+    exactInputProof: samples.every((sample) => sample?.authoritativeInputProof === true)
+      && inputIds.length === samples.length
+      && sessionIds.length === samples.length
+      && new Set(inputIds).size === samples.length
+      && new Set(sessionIds).size === samples.length,
     everyTurnDelivered: samples.every((sample) => sample?.inputDelivered === true && sample?.turnEndObserved === true),
     everyFinalMatched: samples.every((sample) => sample?.finalObserved === true && sample?.finalMatched === true),
     noToolActivity: samples.every((sample) => sample?.toolLikeCount === 0),

@@ -11,7 +11,12 @@ import {
   requiredOption,
   writeEvidence,
 } from "./step7-live-smoke-lib.mjs";
-import { analyzeDirectTurn, evaluateDirectPairedEvidence } from "./step7-performance-live-lib.mjs";
+import {
+  analyzeDirectTurn,
+  directInputProof,
+  directNoToolPrompt,
+  evaluateDirectPairedEvidence,
+} from "./step7-performance-live-lib.mjs";
 
 function moduleSpecifier(value) {
   return value.startsWith("file:") ? value : pathToFileURL(resolve(value)).href;
@@ -31,7 +36,7 @@ async function runSample(client, projectId, index, timeoutMs, settleMs) {
   const inputId = randomUUID();
   const expected = `STEP7-DIRECT-${String(index).padStart(2, "0")}-${randomUUID()}`;
   const started = performance.now();
-  const sent = await client.send({ id: inputId, text: `Reply exactly: ${expected}`, projectId });
+  const sent = await client.send({ id: inputId, text: directNoToolPrompt(expected), projectId });
   if (sent.delivery === "not_sent" || sent.delivery === "unconfirmed") throw new Error("direct CoS input was not authoritatively delivered");
   const sessionId = sent.sessionId ?? inputId;
   const abort = new AbortController();
@@ -52,10 +57,12 @@ async function runSample(client, projectId, index, timeoutMs, settleMs) {
   await delay(settleMs);
   const events = await client.events(sessionId, 0);
   const analysis = analyzeDirectTurn(events, { inputId, expectedText: expected, endToEndMs });
+  const authoritativeInputProof = directInputProof(sent, { inputId, sessionId, inputDelivered: analysis.inputDelivered });
   return {
     index,
     sessionId,
     inputId,
+    authoritativeInputProof,
     ...analysis,
   };
 }
@@ -82,7 +89,7 @@ const browserAfter = await controllerMetadata(await discoverCosController(profil
 const evidence = {
   schemaVersion: 1,
   kind: "step7-direct-cos-paired",
-  promptClass: "short-exact-reply",
+  promptClass: "short-exact-no-tool-reply",
   browserBefore,
   browserAfter,
   samples,

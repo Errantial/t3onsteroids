@@ -4,6 +4,8 @@ import {
   analyzeDirectTurn,
   analyzeProviderTurn,
   buildStep7PerformanceInput,
+  directInputProof,
+  directNoToolPrompt,
   evaluateDirectPairedEvidence,
   evaluateSlowConsumerEvidence,
   slowConsumerPerformanceSample,
@@ -13,6 +15,20 @@ import {
 const healthyBrowser = { connectionState: "connected", bridgePaired: true, bridgePresent: true };
 
 describe("Step 7 live performance harness", () => {
+  it("uses an explicit no-tool exact-reply prompt for the paired direct baseline", () => {
+    expect(directNoToolPrompt("STEP7-DIRECT-01-token")).toBe(
+      "Do not use tools. Reply exactly: STEP7-DIRECT-01-token",
+    );
+  });
+
+  it("proves each direct send from its exact send response and confirmed session event", () => {
+    const options = { inputId: "input-1", sessionId: "session-1", inputDelivered: true };
+    expect(directInputProof({ id: "input-1", sessionId: "session-1", delivery: "sent" }, options)).toBe(true);
+    expect(directInputProof({ id: "input-1", sessionId: "other", delivery: "sent" }, options)).toBe(false);
+    expect(directInputProof({ id: "input-1", sessionId: "session-1", delivery: "unconfirmed" }, options)).toBe(false);
+    expect(directInputProof({ id: "input-1", sessionId: "session-1", delivery: "sent" }, { ...options, inputDelivered: false })).toBe(false);
+  });
+
   it("reduces a fresh direct CoS session to content-free timing evidence", () => {
     const inputId = "11111111-1111-4111-8111-111111111111";
     const analysis = analyzeDirectTurn([
@@ -57,6 +73,9 @@ describe("Step 7 live performance harness", () => {
 
   it("evaluates direct and slow-consumer evidence without retaining response text", () => {
     const directSamples = Array.from({ length: 10 }, (_, index) => ({
+      inputId: `input-${index}`,
+      sessionId: `session-${index}`,
+      authoritativeInputProof: true,
       inputDelivered: true,
       turnEndObserved: true,
       finalObserved: true,
@@ -67,9 +86,16 @@ describe("Step 7 live performance harness", () => {
     expect(evaluateDirectPairedEvidence({
       samples: directSamples,
       direct: directSamples.map(({ endToEndMs }) => ({ endToEndMs })),
-      browserBefore: { ...healthyBrowser, inputCount: 10 },
-      browserAfter: { ...healthyBrowser, inputCount: 20 },
+      browserBefore: { ...healthyBrowser, inputCount: 51 },
+      browserAfter: { ...healthyBrowser, inputCount: 51 },
     }).pass).toBe(true);
+
+    expect(evaluateDirectPairedEvidence({
+      samples: directSamples.map((sample, index) => index === 9 ? { ...sample, authoritativeInputProof: false } : sample),
+      direct: directSamples.map(({ endToEndMs }) => ({ endToEndMs })),
+      browserBefore: { ...healthyBrowser, inputCount: 51 },
+      browserAfter: { ...healthyBrowser, inputCount: 51 },
+    }).checks.exactInputProof).toBe(false);
 
     const slowConsumer = slowConsumerPerformanceSample({
       rssHighWaterBytes: 100 * 1024 * 1024,

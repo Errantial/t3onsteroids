@@ -16,6 +16,12 @@ export interface ProviderTurnAnalysis {
   toolLikeCount: number;
 }
 
+export function directNoToolPrompt(expectedText: string): string;
+export function directInputProof(sendRecord: unknown, options: {
+  inputId: string;
+  sessionId: string;
+  inputDelivered: boolean;
+}): boolean;
 export function analyzeDirectTurn(events: readonly unknown[], options: { inputId: string; expectedText: string; endToEndMs: number }): DirectTurnAnalysis;
 export function analyzeProviderTurn(events: readonly unknown[], inputId: string): ProviderTurnAnalysis;
 export function slowConsumerPerformanceSample(metrics: unknown, drainedWithinMs: number | null): Record<string, number | null>;

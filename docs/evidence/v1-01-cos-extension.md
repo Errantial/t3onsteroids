@@ -4,7 +4,7 @@ Status: PASS
 
 # V1 Step 1 — CoS provider extension
 
-Bridge implementation identity for this qualification tuple: `7017351e9de2947ba180b52401652d89fffa002f`.
+Bridge implementation identity for this qualification tuple: `23d385d0d62dc7fefbbf5dc702f70115af644453`.
 
 Final provider-extension build identity: `0893fbdfe35192f5784f07fc03f97d2ccc235425`, produced from a clean committed CoS tree based on CoS `2.1.39` / upstream source `87ae9d631f82d8da2f462d910410031ad8f97ac5`.
 

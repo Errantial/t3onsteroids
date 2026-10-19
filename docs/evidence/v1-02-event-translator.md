@@ -4,7 +4,7 @@ Status: PASS
 
 # V1 Step 2 — event translator and terminal semantics
 
-`bridgeImplementationCommit`: `7017351e9de2947ba180b52401652d89fffa002f`. Evidence HEAD at draft: `7017351e9de2947ba180b52401652d89fffa002f`; `evidenceCommit` is intentionally pending because this summary is not yet committed.
+`bridgeImplementationCommit`: `23d385d0d62dc7fefbbf5dc702f70115af644453`. Evidence HEAD at draft: `23d385d0d62dc7fefbbf5dc702f70115af644453`; `evidenceCommit` is intentionally pending because this summary is not yet committed.
 
 Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS provider extension `0893fbdfe35192f5784f07fc03f97d2ccc235425`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
@@ -14,7 +14,7 @@ Current-machine validation from this qualification run:
 
 ```text
 npm ci                                      PASS
-npm run verify                              PASS — 23 files / 206 tests
+npm run verify                              PASS — 23 files / 208 tests
 test/translate-events.test.ts               PASS — 19 tests
 test/translate-driver.test.ts               PASS — 6 tests
 test/cos-provider-extension.test.ts         PASS — 11 tests

@@ -818,7 +818,31 @@ export class AcpBridgeRuntime {
           current = exact.translation;
           await this.requireInputIdentity(session, input, inputId);
         }
-        if (input?.delivery === "sent") sentInputProven = true;
+        if (input?.delivery === "sent") {
+          // `pending` is only admission authority, not proof that CoS created/accepted the
+          // provider session. Keep first-session binding and interaction-mode promotion
+          // provisional until an exact input read proves `sent`. This matters when ACP cancel
+          // wins while the input is still pending: authoritative `not_sent` must be able to
+          // unwind the create_pending binding and discard the pending mode transition.
+          if (session.bindingState === "create_pending") {
+            if (!session.canonicalCwd || !session.cosProjectId) {
+              throw new BridgeError("session_broken", "Sent provider input lacks its tentative project binding");
+            }
+            session = await this.applyDurableTransition(sessionId, {
+              kind: "binding",
+              inputId,
+              generation,
+              bindingState: "bound",
+              canonicalCwd: session.canonicalCwd,
+              cosProjectId: session.cosProjectId,
+            });
+          }
+          session = await this.applyDurableTransition(sessionId, { kind: "promote_mode", inputId, generation });
+          const exact = await this.refreshExactDurableGeneration(sessionId, inputId, generation);
+          session = exact.session;
+          current = exact.translation;
+          sentInputProven = true;
+        }
       }
 
       if (sentInputProven) {
@@ -1325,17 +1349,19 @@ export class AcpBridgeRuntime {
       }
       this.options.metrics?.increment("cosInputAcceptedOrReconciled");
       this.options.metrics?.markTurn(session.sessionId, generation, "cos_input_accepted");
-      if (first) {
-        session = await this.applyDurableTransition(session.sessionId, {
-          kind: "binding",
-          inputId,
-          generation,
-          bindingState: "bound",
-          canonicalCwd: canonicalRoot,
-          cosProjectId: project.projectId,
-        });
+      if (input.delivery === "sent") {
+        if (first) {
+          session = await this.applyDurableTransition(session.sessionId, {
+            kind: "binding",
+            inputId,
+            generation,
+            bindingState: "bound",
+            canonicalCwd: canonicalRoot,
+            cosProjectId: project.projectId,
+          });
+        }
+        session = await this.applyDurableTransition(session.sessionId, { kind: "promote_mode", inputId, generation });
       }
-      session = await this.applyDurableTransition(session.sessionId, { kind: "promote_mode", inputId, generation });
     } else {
       if (input.delivery === "sent" || input.delivery === "pending") {
         this.options.metrics?.increment("cosInputAcceptedOrReconciled");

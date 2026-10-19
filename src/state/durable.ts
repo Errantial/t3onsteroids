@@ -211,6 +211,35 @@ async function writeAndSync(file: string, contents: string): Promise<void> {
   }
 }
 
+const WINDOWS_RENAME_SHARING_ERRORS = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+async function replaceSyncedFile(temp: string, target: string, contents: string): Promise<void> {
+  const maxAttempts = process.platform === "win32" ? 8 : 1;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      await fs.rename(temp, target);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || !code || !WINDOWS_RENAME_SHARING_ERRORS.has(code)) throw error;
+
+      // A Windows replace can race a lock-free reader/virus scanner that temporarily holds the
+      // destination open. Never unlink the authoritative journal and never replay the state
+      // transition: retry only this already-written+fsynced temp replacement. If the syscall
+      // actually committed before surfacing a sharing error, exact byte equality proves it.
+      try {
+        if (await fs.readFile(target, "utf8") === contents) return;
+      } catch {
+        // Missing or temporarily unreadable target is not proof of commit; keep the old journal
+        // intact and retry the same temp file below.
+      }
+      if (attempt + 1 >= maxAttempts) throw error;
+      const delayMs = Math.min(5 * (2 ** attempt), 40);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 function withoutUndefined<T extends object>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T;
 }
@@ -611,9 +640,10 @@ export class DurableSessionStore {
   private async writeRecord(record: DurableSessionRecord): Promise<void> {
     const target = this.sessionPath(record.sessionId);
     const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    const contents = JSON.stringify(withoutUndefined(record));
     try {
-      await writeAndSync(temp, JSON.stringify(withoutUndefined(record)));
-      await fs.rename(temp, target);
+      await writeAndSync(temp, contents);
+      await replaceSyncedFile(temp, target, contents);
     } finally {
       await fs.rm(temp, { force: true }).catch(() => undefined);
     }

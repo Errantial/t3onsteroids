@@ -118,7 +118,7 @@ describe("durable ACP runtime boundaries", () => {
     const send = vi.fn(async (input: { id: string; sessionId?: string }) => ({
       id: input.id,
       sessionId: input.sessionId ?? input.id,
-      delivery: "pending" as const,
+      delivery: "sent" as const,
     }));
     const bridge = runtime(controller({ send }), store, lease);
     bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
@@ -365,17 +365,41 @@ describe("durable ACP runtime boundaries", () => {
     });
     const bridge = runtime(ctrl, store, lease);
     bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
-    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "cancel me before turn" }] });
+    await bridge.prompt({
+      sessionId,
+      prompt: [{
+        type: "text",
+        text: "<t3_code_instructions>\nmode plan\n</t3_code_instructions>\n\n<user_request>\ncancel me before turn\n</user_request>",
+      }],
+    });
+
+    const provisional = await store.readSession(sessionId);
+    expect(provisional).toMatchObject({
+      status: "found",
+      value: {
+        bindingState: "create_pending",
+        interactionMode: "default",
+        pendingInteractionMode: "plan",
+        modeTransitionInputId: sessionId,
+      },
+    });
 
     await bridge.cancel(sessionId);
     const pending = bridge.awaitDurableProviderTurnOrCancelledNotSent(sessionId, { pollMs: 1 });
     await expect(pending).resolves.toEqual({ kind: "cancelled_not_sent" });
     await expect(lease.read()).resolves.toEqual({ status: "missing" });
     const settled = await store.readSession(sessionId);
-    expect(settled).toMatchObject({ status: "found", value: { generation: 1, cancelIntent: "none" } });
+    expect(settled).toMatchObject({
+      status: "found",
+      value: { generation: 1, bindingState: "unbound", interactionMode: "default", cancelIntent: "none" },
+    });
     if (settled.status !== "found") throw new Error("expected settled session");
     expect(settled.value).not.toHaveProperty("providerTranslation");
     expect(settled.value).not.toHaveProperty("activeInputId");
+    expect(settled.value).not.toHaveProperty("canonicalCwd");
+    expect(settled.value).not.toHaveProperty("cosProjectId");
+    expect(settled.value).not.toHaveProperty("pendingInteractionMode");
+    expect(settled.value).not.toHaveProperty("modeTransitionInputId");
   });
 
   it("re-reads durable cancellation after controller input I/O before accepting authoritative not_sent", async () => {

@@ -198,6 +198,73 @@ describe("Windows hard-link state mutex", () => {
 });
 
 describe("durable tagged session state", () => {
+  it.runIf(process.platform === "win32")("retries an atomic session-journal replace after a transient Windows sharing error", async () => {
+    const root = await tempRoot();
+    const durable = store(root);
+    await durable.updateSession(sessionId, { kind: "create", state: initial() });
+
+    const originalRename = fs.rename.bind(fs);
+    let injected = false;
+    const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (...args: Parameters<typeof fs.rename>) => {
+      const [, target] = args;
+      if (!injected && String(target).endsWith(`${sessionId}.json`)) {
+        injected = true;
+        throw Object.assign(new Error("fixture sharing violation"), { code: "EPERM" });
+      }
+      return originalRename(...args);
+    });
+
+    try {
+      await expect(durable.updateSession(sessionId, {
+        kind: "begin_input",
+        inputId,
+        generation: 1,
+      })).resolves.toMatchObject({ status: "updated", value: { revision: 2, activeInputId: inputId } });
+    } finally {
+      renameSpy.mockRestore();
+    }
+
+    expect(injected).toBe(true);
+    await expect(durable.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { revision: 2, activeInputId: inputId, generation: 1 },
+    });
+  });
+
+  it.runIf(process.platform === "win32")("keeps the old journal intact when Windows sharing errors persist past the bounded replace retry", async () => {
+    const root = await tempRoot();
+    const durable = store(root);
+    await durable.updateSession(sessionId, { kind: "create", state: initial() });
+    const target = path.join(root, "sessions", `${sessionId}.json`);
+    const before = await fs.readFile(target, "utf8");
+
+    const originalRename = fs.rename.bind(fs);
+    const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (...args: Parameters<typeof fs.rename>) => {
+      const [, destination] = args;
+      if (String(destination) === target) {
+        throw Object.assign(new Error("fixture persistent sharing violation"), { code: "EPERM" });
+      }
+      return originalRename(...args);
+    });
+
+    try {
+      await expect(durable.updateSession(sessionId, {
+        kind: "begin_input",
+        inputId,
+        generation: 1,
+      })).rejects.toMatchObject({ code: "EPERM" });
+    } finally {
+      renameSpy.mockRestore();
+    }
+
+    await expect(fs.readFile(target, "utf8")).resolves.toBe(before);
+    await expect(durable.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { revision: 1, bindingState: "unbound", interactionMode: "default" },
+    });
+    await expect(fs.readdir(path.join(root, "sessions"))).resolves.toEqual([`${sessionId}.json`]);
+  });
+
   it("queues same-process overlapping mutations before the hard-link mutex timeout", async () => {
     const root = await tempRoot();
     const identity = new FakeIdentity(1001, "638962560000000001");

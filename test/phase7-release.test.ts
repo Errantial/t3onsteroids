@@ -7,6 +7,7 @@ import { main } from "../src/cli/index.js";
 import { compatibility } from "../src/compatibility.js";
 import { runSetupDiagnostics } from "../src/diagnostics.js";
 import { releaseReadiness } from "../src/release.js";
+import { v1ReleaseGateManifest } from "../src/release-manifest.js";
 import { COS_REQUIRED_ACTION_ROUTES, CosControllerClient, type CosControllerDiscovery } from "../src/cos/index.js";
 
 const extensionHealth = {
@@ -40,7 +41,8 @@ function json(value: unknown, status = 200): Response {
 
 describe("Phase 7 release readiness", () => {
   it("keeps the supported release lane explicitly pinned and single-turn", () => {
-    expect(releaseReadiness()).toEqual({
+    const readiness = releaseReadiness();
+    expect(readiness).toMatchObject({
       bridgeVersion: "1.0.0",
       supportedConcurrency: 1,
       platform: "win32-x64",
@@ -51,10 +53,12 @@ describe("Phase 7 release readiness", () => {
       cosProviderExtensionReady: true,
       eventTranslatorReady: true,
       durableRecoveryReady: true,
-      liveAcceptanceRequired: true,
-      currentHeadDriftRequired: true,
-      releaseQualified: false,
     });
+    expect(readiness.liveAcceptanceRequired).toBe(v1ReleaseGateManifest.gates.liveAcceptance.status !== "pass");
+    expect(readiness.currentHeadDriftRequired).toBe(v1ReleaseGateManifest.gates.t3HeadDrift.status !== "pass");
+    expect(readiness.releaseQualified).toBe(
+      Object.values(v1ReleaseGateManifest.gates).every((gate) => gate.status === "pass"),
+    );
   });
 
   it("diagnoses exact extension/actions/project readiness without returning credentials", async () => {

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AcpBridgeRuntime, type BridgeController } from "../src/acp/index.js";
 import { compatibility } from "../src/compatibility.js";
-import type { CosControllerReadiness } from "../src/cos/index.js";
+import { COS_REQUIRED_ACTION_ROUTES, type CosControllerReadiness } from "../src/cos/index.js";
 import type { SessionState } from "../src/session/index.js";
 import { MemoryAdmissionLease, MemoryStateStore } from "../src/state/index.js";
 
@@ -14,7 +14,7 @@ const readiness: CosControllerReadiness = {
   protocol: 1,
   app: "chat-on-steroids",
   actionsEnabled: true,
-  actionRoutes: ["POST /v1/inputs"],
+  actionRoutes: [...COS_REQUIRED_ACTION_ROUTES],
   features: {
     "provider-project-resolve-v1": 1,
     "provider-assistant-content-v1": 1,
@@ -50,6 +50,26 @@ describe("Phase 5 lifecycle and recovery hardening", () => {
     runtime.newSession({ cwd: "C:\\repo", mcpServers: [] });
     await expect(runtime.prompt({ sessionId, prompt: [{ type: "text", text: "hello" }] })).rejects.toMatchObject({ code: "actions_disabled" });
     expect(ctrl.send).not.toHaveBeenCalled();
+  });
+
+  it("takes a new readiness snapshot at each prompt admission boundary", async () => {
+    const snapshots = [readiness, { ...readiness, actionsEnabled: false }];
+    const requireProviderExtension = vi.fn(async () => snapshots.shift() ?? readiness);
+    const ctrl = controller({ requireProviderExtension });
+    const ids = [sessionId, secondSessionId];
+    const runtime = new AcpBridgeRuntime({
+      controller: ctrl,
+      store: new MemoryStateStore<SessionState>(),
+      makeUuid: () => ids.shift()!,
+      canonicalize: async (path) => path,
+    });
+    runtime.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    runtime.newSession({ cwd: "C:\\repo", mcpServers: [] });
+
+    await expect(runtime.prompt({ sessionId, prompt: [{ type: "text", text: "first" }] })).resolves.toBeDefined();
+    await expect(runtime.prompt({ sessionId: secondSessionId, prompt: [{ type: "text", text: "second" }] })).rejects.toMatchObject({ code: "actions_disabled" });
+    expect(requireProviderExtension).toHaveBeenCalledTimes(2);
+    expect(ctrl.send).toHaveBeenCalledTimes(1);
   });
 
   it("revalidates backgroundWork policy before each bound prompt and marks the session broken on loss", async () => {

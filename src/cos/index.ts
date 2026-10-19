@@ -11,6 +11,11 @@ export const COS_PROVIDER_EXTENSION_FEATURES = {
   sessionPolicy: "provider-session-policy-v1",
   turnDrain: "provider-turn-drain-v1",
 } as const;
+export const COS_REQUIRED_ACTION_ROUTES = [
+  "POST /v1/inputs",
+  "POST /v1/inputs/{id}/cancel",
+  "POST /v1/sessions/{id}/stop",
+] as const;
 
 export interface CosProviderExtensionIdentity {
   readonly apiVersion: 1;
@@ -150,7 +155,6 @@ const DEFAULT_RETRY_POLICY: RetryPolicy = {
   maxDelayMs: 500,
 };
 const PROVIDER_EXTENSION_READINESS_TTL_MS = 1_000;
-
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function asRecord(value: unknown, context: string): Record<string, unknown> {
@@ -267,6 +271,34 @@ export function parseHealth(value: unknown): CosControllerReadiness {
     features: parseFeatureMap(row.features),
     providerExtension: parseProviderExtensionIdentity(row.providerExtension),
   };
+}
+
+export function validateProviderExtensionReadiness(readiness: CosControllerReadiness): CosControllerReadiness {
+  for (const [feature, version] of Object.entries(compatibility.cos.providerExtension.features)) {
+    if (readiness.features[feature] !== version) {
+      throw new CosControllerError("provider_extension_unavailable", `Required CoS provider extension feature is unavailable: ${feature}`);
+    }
+  }
+  if (!readiness.providerExtension
+    || readiness.providerExtension.apiVersion !== compatibility.cos.providerExtension.apiVersion
+    || readiness.providerExtension.buildId !== compatibility.cos.providerExtension.buildId) {
+    throw new CosControllerError("provider_extension_unavailable", "Required CoS provider extension build identity is unavailable");
+  }
+  return readiness;
+}
+
+export function missingRequiredActionRoutes(readiness: CosControllerReadiness): readonly (typeof COS_REQUIRED_ACTION_ROUTES)[number][] {
+  return COS_REQUIRED_ACTION_ROUTES.filter((route) => !readiness.actionRoutes.includes(route));
+}
+
+export function validateProductionControllerReadiness(readiness: CosControllerReadiness): CosControllerReadiness {
+  validateProviderExtensionReadiness(readiness);
+  for (const route of COS_REQUIRED_ACTION_ROUTES) {
+    if (!readiness.actionRoutes.includes(route)) {
+      throw new CosControllerError("provider_extension_unavailable", `Required CoS controller action route is unavailable: ${route}`);
+    }
+  }
+  return readiness;
 }
 
 export async function discoverCosController(userDataDir: string): Promise<CosControllerDiscovery> {
@@ -438,30 +470,28 @@ export class CosControllerClient {
   }
 
   async requireProviderExtension(): Promise<CosControllerReadiness> {
-    const now = Date.now();
-    if (this.providerExtensionReadiness && this.providerExtensionReadiness.expiresAt > now) {
-      return this.providerExtensionReadiness.value;
-    }
-    const readiness = await this.health();
-    for (const [feature, version] of Object.entries(compatibility.cos.providerExtension.features)) {
-      if (readiness.features[feature] !== version) {
-        throw new CosControllerError("provider_extension_unavailable", `Required CoS provider extension feature is unavailable: ${feature}`);
-      }
-    }
-    if (!readiness.providerExtension
-      || readiness.providerExtension.apiVersion !== compatibility.cos.providerExtension.apiVersion
-      || readiness.providerExtension.buildId !== compatibility.cos.providerExtension.buildId) {
-      throw new CosControllerError("provider_extension_unavailable", "Required CoS provider extension build identity is unavailable");
-    }
+    // This is the production admission readiness boundary. Never reuse a previous success:
+    // actions, action-route surface and extension provenance can all change after a CoS restart
+    // or token rotation even when a prior health snapshot is still recent.
+    this.providerExtensionReadiness = undefined;
+    const readiness = validateProductionControllerReadiness(await this.health());
     this.providerExtensionReadiness = {
       value: readiness,
-      expiresAt: now + PROVIDER_EXTENSION_READINESS_TTL_MS,
+      expiresAt: Date.now() + PROVIDER_EXTENSION_READINESS_TTL_MS,
     };
     return readiness;
   }
 
+  private async requireProviderExtensionWithinAdmission(): Promise<CosControllerReadiness> {
+    const now = Date.now();
+    if (this.providerExtensionReadiness && this.providerExtensionReadiness.expiresAt > now) {
+      return this.providerExtensionReadiness.value;
+    }
+    return this.requireProviderExtension();
+  }
+
   async resolveProject(path: string): Promise<CosResolvedProject> {
-    await this.requireProviderExtension();
+    await this.requireProviderExtensionWithinAdmission();
     const response = await this.request("/v1/projects/resolve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -482,7 +512,7 @@ export class CosControllerClient {
   }
 
   async assistantContentChunk(sessionId: string, seq: number, offset = 0, limit = 16_384): Promise<CosAssistantContentChunk> {
-    await this.requireProviderExtension();
+    await this.requireProviderExtensionWithinAdmission();
     if (!Number.isInteger(seq) || seq < 1 || !Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 2 || limit > 65_536) {
       throw new CosControllerError("schema_mismatch", "assistant content range is invalid");
     }
@@ -553,7 +583,7 @@ export class CosControllerClient {
   }
 
   async requireBackgroundWorkDisabled(sessionId: string): Promise<CosProviderSessionPolicyAttestation> {
-    await this.requireProviderExtension();
+    await this.requireProviderExtensionWithinAdmission();
     const session = await this.session(sessionId);
     if (!session.providerPolicy) {
       throw new CosControllerError("provider_policy_unavailable", "CoS session does not attest enforced backgroundWork=disabled");

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { compatibility } from "../src/compatibility.js";
 import {
+  COS_REQUIRED_ACTION_ROUTES,
   CosControllerClient,
   CosControllerError,
   discoverCosController,
@@ -79,10 +80,11 @@ describe("CoS protocol-1 controller client", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  it("reuses a recent successful provider-extension readiness attestation", async () => {
+  it("does not reuse a successful provider-extension readiness snapshot inside the former TTL", async () => {
     let healthReads = 0;
     const extensionHealth = {
       ...health,
+      actions: { enabled: true, routes: [...COS_REQUIRED_ACTION_ROUTES] },
       features: {
         "provider-project-resolve-v1": 1,
         "provider-assistant-content-v1": 1,
@@ -94,7 +96,9 @@ describe("CoS protocol-1 controller client", () => {
     const fetch = vi.fn(async (url: string | URL | Request) => {
       if (String(url).endsWith("/v1/health")) {
         healthReads += 1;
-        return jsonResponse(extensionHealth);
+        return jsonResponse(healthReads === 1
+          ? extensionHealth
+          : { ...extensionHealth, providerExtension: { apiVersion: 1, buildId: "development" } });
       }
       throw new Error(`unexpected ${String(url)}`);
     });
@@ -104,9 +108,39 @@ describe("CoS protocol-1 controller client", () => {
     );
 
     await expect(client.requireProviderExtension()).resolves.toMatchObject({ actionsEnabled: true });
+    await expect(client.requireProviderExtension()).rejects.toMatchObject({ code: "provider_extension_unavailable" });
+    expect(healthReads).toBe(2);
+  });
+
+  it("re-discovers after controller restart/token rotation and validates the changed health snapshot", async () => {
+    const oldDiscovery: CosControllerDiscovery = { baseUrl: "http://127.0.0.1:1", token: "old" };
+    const newDiscovery: CosControllerDiscovery = { baseUrl: "http://127.0.0.1:2", token: "new" };
+    const extensionHealth = {
+      ...health,
+      actions: { enabled: true, routes: [...COS_REQUIRED_ACTION_ROUTES] },
+      features: compatibility.cos.providerExtension.features,
+      providerExtension: { apiVersion: 1, buildId: compatibility.cos.providerExtension.buildId },
+    };
+    let discoveryReads = 0;
+    let oldHealthReads = 0;
+    const discover = vi.fn(async () => {
+      discoveryReads += 1;
+      return discoveryReads === 1 ? oldDiscovery : newDiscovery;
+    });
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get("Authorization");
+      if (auth === "Bearer old") {
+        oldHealthReads += 1;
+        return oldHealthReads === 1 ? jsonResponse(extensionHealth) : jsonResponse({ code: "unauthorized" }, 401);
+      }
+      return jsonResponse({ ...extensionHealth, actions: { enabled: true, routes: ["POST /v1/inputs"] } });
+    });
+    const client = new CosControllerClient(discover, { fetch });
+
     await expect(client.requireProviderExtension()).resolves.toMatchObject({ actionsEnabled: true });
-    await expect(client.requireProviderExtension()).resolves.toMatchObject({ actionsEnabled: true });
-    expect(healthReads).toBe(1);
+    await expect(client.requireProviderExtension()).rejects.toMatchObject({ code: "provider_extension_unavailable" });
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it("reconciles an ambiguous send before deciding whether to retry", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { compatibility } from "../src/compatibility.js";
 import {
   COS_PROVIDER_EXTENSION_FEATURES,
+  COS_REQUIRED_ACTION_ROUTES,
   CosControllerClient,
   CosControllerError,
   parseHealth,
@@ -12,7 +13,7 @@ const providerBuildId = compatibility.cos.providerExtension.buildId;
 const extensionHealth = {
   protocol: 1,
   app: "chat-on-steroids",
-  actions: { enabled: true, routes: ["POST /v1/inputs"] },
+  actions: { enabled: true, routes: [...COS_REQUIRED_ACTION_ROUTES] },
   features: extensionFeatures,
   providerExtension: { apiVersion: 1, buildId: providerBuildId },
 };
@@ -59,6 +60,17 @@ describe("CoS provider extension contract", () => {
     });
     await expect(exactClient.requireProviderExtension()).resolves.toMatchObject({ providerExtension: { apiVersion: 1, buildId: providerBuildId } });
     expect(parseHealth(extensionHealth).providerExtension).toEqual({ apiVersion: 1, buildId: providerBuildId });
+  });
+
+  it("requires every production send/cancel/Stop action route projected by protocol 1 health", async () => {
+    const missingStop = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), {
+      fetch: vi.fn(async () => jsonResponse({
+        ...extensionHealth,
+        actions: { enabled: true, routes: COS_REQUIRED_ACTION_ROUTES.filter((route) => route !== "POST /v1/sessions/{id}/stop") },
+      })),
+    });
+
+    await expect(missingStop.requireProviderExtension()).rejects.toMatchObject({ code: "provider_extension_unavailable" });
   });
 
   it("resolves only the single exact canonical project returned by the controller", async () => {

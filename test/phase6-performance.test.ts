@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { compatibility } from "../src/compatibility.js";
-import { CosControllerClient } from "../src/cos/index.js";
+import { COS_REQUIRED_ACTION_ROUTES, CosControllerClient } from "../src/cos/index.js";
 import { BridgeMetrics } from "../src/metrics.js";
 import { BoundedAsyncQueue } from "../src/translate/queue.js";
 
 const extensionHealth = {
   protocol: 1,
   app: "chat-on-steroids",
-  actions: { enabled: true, routes: ["POST /v1/inputs"] },
+  actions: { enabled: true, routes: [...COS_REQUIRED_ACTION_ROUTES] },
   features: {
     "provider-project-resolve-v1": 1,
     "provider-assistant-content-v1": 1,

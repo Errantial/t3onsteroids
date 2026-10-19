@@ -5,8 +5,10 @@ import { compatibility } from "./compatibility.js";
 import {
   CosControllerClient,
   discoverCosController,
+  missingRequiredActionRoutes,
   type CosControllerReadiness,
   type CosResolvedProject,
+  validateProviderExtensionReadiness,
 } from "./cos/index.js";
 
 export type DiagnosticStatus = "ok" | "warn" | "error";
@@ -64,7 +66,7 @@ export async function runSetupDiagnostics(options: SetupDiagnosticsOptions): Pro
   }
 
   try {
-    await client.requireProviderExtension();
+    validateProviderExtensionReadiness(readiness);
     items.push({
       id: "provider-extension",
       status: "ok",
@@ -81,6 +83,14 @@ export async function runSetupDiagnostics(options: SetupDiagnosticsOptions): Pro
     id: "actions",
     status: readiness.actionsEnabled ? "ok" : "error",
     message: readiness.actionsEnabled ? "CoS controller actions are enabled." : "CoS controller actions are disabled.",
+  });
+  const missingActionRoutes = missingRequiredActionRoutes(readiness);
+  items.push({
+    id: "action-routes",
+    status: missingActionRoutes.length === 0 ? "ok" : "error",
+    message: missingActionRoutes.length === 0
+      ? "All required CoS production action routes are available."
+      : `Missing required CoS production action routes: ${missingActionRoutes.join(", ")}.`,
   });
 
   if (!options.cwd) {

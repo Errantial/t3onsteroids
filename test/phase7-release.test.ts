@@ -7,12 +7,12 @@ import { main } from "../src/cli/index.js";
 import { compatibility } from "../src/compatibility.js";
 import { runSetupDiagnostics } from "../src/diagnostics.js";
 import { releaseReadiness } from "../src/release.js";
-import { CosControllerClient, type CosControllerDiscovery } from "../src/cos/index.js";
+import { COS_REQUIRED_ACTION_ROUTES, CosControllerClient, type CosControllerDiscovery } from "../src/cos/index.js";
 
 const extensionHealth = {
   protocol: 1,
   app: "chat-on-steroids",
-  actions: { enabled: true, routes: ["POST /v1/inputs"] },
+  actions: { enabled: true, routes: [...COS_REQUIRED_ACTION_ROUTES] },
   features: {
     "provider-project-resolve-v1": 1,
     "provider-assistant-content-v1": 1,
@@ -96,6 +96,35 @@ describe("Phase 7 release readiness", () => {
     expect(result.ready).toBe(expectedReady);
     expect(result.items.find((item) => item.id === "provider-extension")?.status).toBe(expectedReady ? "ok" : "error");
     expect(JSON.stringify(result)).not.toContain("diagnostic-secret");
+  });
+
+  it("derives extension, actions and required routes from one health snapshot without stale mixing", async () => {
+    const root = await diagnosticRoot();
+    const discovery: CosControllerDiscovery = { baseUrl: "http://127.0.0.1:9", token: "diagnostic-secret" };
+    let healthReads = 0;
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      if (!String(url).endsWith("/v1/health")) throw new Error(`unexpected ${String(url)}`);
+      healthReads += 1;
+      return json(healthReads === 1
+        ? extensionHealth
+        : {
+            ...extensionHealth,
+            actions: { enabled: false, routes: [] },
+            providerExtension: { apiVersion: 1, buildId: "development" },
+          });
+    });
+
+    const result = await runSetupDiagnostics({
+      userDataDir: root,
+      discover: vi.fn(async () => discovery),
+      clientFactory: (discover) => new CosControllerClient(discover, { fetch }),
+    });
+
+    expect(healthReads).toBe(1);
+    expect(result.ready).toBe(true);
+    expect(result.items.find((item) => item.id === "provider-extension")?.status).toBe("ok");
+    expect(result.items.find((item) => item.id === "actions")?.status).toBe("ok");
+    expect(result.items.find((item) => item.id === "action-routes")?.status).toBe("ok");
   });
 
   it("keeps diagnostics explicit when user-data is unavailable", async () => {

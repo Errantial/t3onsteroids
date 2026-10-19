@@ -41,4 +41,20 @@ describe("implementation commit identity", () => {
     const next = await commit(root, "scripts/helper.mjs", "export const b = 2;\n", "implementation script");
     expect(implementationCommit(root)).toBe(next);
   });
+
+  it("ignores implementation commits that are reachable only from unrelated refs", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "t3os-implementation-commit-ref-"));
+    roots.push(root);
+    git(root, ["init"]);
+    git(root, ["config", "user.email", "fixture@example.invalid"]);
+    git(root, ["config", "user.name", "fixture"]);
+
+    const mainImplementation = await commit(root, "src/runtime.ts", "export const main = 1;\n", "main implementation");
+    const mainBranch = git(root, ["branch", "--show-current"]);
+    git(root, ["switch", "-c", "unrelated"]);
+    await commit(root, "src/unrelated.ts", "export const unrelated = 1;\n", "unrelated implementation");
+    git(root, ["switch", mainBranch]);
+
+    expect(implementationCommit(root)).toBe(mainImplementation);
+  });
 });

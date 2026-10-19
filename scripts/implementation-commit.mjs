@@ -20,7 +20,7 @@ function git(args, cwd) {
 }
 
 export function implementationCommit(cwd = process.cwd()) {
-  const commits = git(["rev-list", "--all", "--", ...IMPLEMENTATION_PATHS], cwd)
+  const commits = git(["rev-list", "HEAD", "--", ...IMPLEMENTATION_PATHS], cwd)
     .split(/\r?\n/)
     .filter(Boolean);
   for (const commit of commits) {

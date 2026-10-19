@@ -16,8 +16,9 @@
     "package:smoke": "node dist/cli/index.js --release-readiness",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
-    "test": "vitest run",
-    "verify": "npm run typecheck && npm run lint && npm test && npm run build && npm run package:smoke",
+    "pretest": "npm run build",
+    "test": "vitest run --maxWorkers=1",
+    "verify": "npm run typecheck && npm run lint && npm test && npm run package:smoke",
     "step7:evaluate": "node scripts/evaluate-step7-performance.mjs",
     "dev": "node --enable-source-maps dist/cli/index.js"
   },

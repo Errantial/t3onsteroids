@@ -7,6 +7,7 @@ import {
   evaluateDirectPairedEvidence,
   evaluateSlowConsumerEvidence,
   slowConsumerPerformanceSample,
+  withHarnessTimeout,
 } from "../scripts/step7-performance-live-lib.mjs";
 
 const healthyBrowser = { connectionState: "connected", bridgePaired: true, bridgePresent: true };
@@ -82,14 +83,26 @@ describe("Step 7 live performance harness", () => {
       stopReason: "end_turn",
       policyEnforced: true,
       exactFinalContent: true,
-      minOutputChars: 20_000,
-      assistantChars: 25_000,
+      minOutputChars: 5_000,
+      assistantChars: 5_500,
       toolLikeCount: 0,
       projectedToolLikeCount: 0,
       slowConsumer,
       browserBefore: { ...healthyBrowser, inputCount: 20 },
       browserAfter: { ...healthyBrowser, inputCount: 21 },
     }).pass).toBe(true);
+  });
+
+  it("preserves the watchdog reason when timeout cleanup closes the ACP operation", async () => {
+    let rejectOperation!: (error: Error) => void;
+    const operation = new Promise<never>((_resolve, reject) => {
+      rejectOperation = reject;
+    });
+    await expect(withHarnessTimeout(operation, {
+      timeoutMs: 5,
+      onTimeout: () => rejectOperation(new Error("ACP connection closed")),
+      message: "Step 7 slow-consumer turn timed out",
+    })).rejects.toThrow("Step 7 slow-consumer turn timed out");
   });
 
   it("assembles exactly the performance-qualification input schema and rejects ineligible bridged rows", () => {

@@ -1,3 +1,5 @@
+/* global clearTimeout, setTimeout */
+
 function asObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -93,6 +95,28 @@ export function slowConsumerPerformanceSample(metricsValue, drainedWithinMs) {
     controllerActionCount: asFiniteNonNegative(metrics.controllerActionCount, "metrics.controllerActionCount"),
     drainedWithinMs: drainedWithinMs === null ? null : asFiniteNonNegative(drainedWithinMs, "drainedWithinMs"),
   };
+}
+
+export async function withHarnessTimeout(operation, { timeoutMs, onTimeout, message }) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError("timeoutMs must be a positive finite number");
+  if (typeof message !== "string" || message.length === 0) throw new TypeError("message must be a non-empty string");
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      // Reject first so a connection-close caused by cleanup cannot mask the timeout reason.
+      reject(new Error(message));
+      try {
+        onTimeout?.();
+      } catch {
+        // Cleanup is secondary once the watchdog has fired.
+      }
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export function evaluateDirectPairedEvidence(evidenceValue) {

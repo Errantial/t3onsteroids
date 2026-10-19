@@ -19,6 +19,11 @@ export interface ProviderTurnAnalysis {
 export function analyzeDirectTurn(events: readonly unknown[], options: { inputId: string; expectedText: string; endToEndMs: number }): DirectTurnAnalysis;
 export function analyzeProviderTurn(events: readonly unknown[], inputId: string): ProviderTurnAnalysis;
 export function slowConsumerPerformanceSample(metrics: unknown, drainedWithinMs: number | null): Record<string, number | null>;
+export function withHarnessTimeout<T>(operation: Promise<T>, options: {
+  timeoutMs: number;
+  onTimeout?: (() => void) | undefined;
+  message: string;
+}): Promise<T>;
 export function evaluateDirectPairedEvidence(evidence: unknown): { pass: boolean; checks: Record<string, boolean> };
 export function evaluateSlowConsumerEvidence(evidence: unknown): { pass: boolean; checks: Record<string, boolean> };
 export function buildStep7PerformanceInput(options: {

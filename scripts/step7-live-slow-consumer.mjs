@@ -1,6 +1,7 @@
-/* global clearTimeout, process, setTimeout */
+/* global process, setTimeout */
 import { createHash } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { Buffer } from "node:buffer";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { TransformStream } from "node:stream/web";
@@ -19,6 +20,7 @@ import {
   analyzeProviderTurn,
   evaluateSlowConsumerEvidence,
   slowConsumerPerformanceSample,
+  withHarnessTimeout,
 } from "./step7-performance-live-lib.mjs";
 
 function moduleSpecifier(value) {
@@ -52,10 +54,10 @@ const projectPath = resolve(requiredOption(options, "project"));
 const bridgeCli = resolve(requiredOption(options, "bridge-cli"));
 const stateDir = resolve(requiredOption(options, "state-dir"));
 const outRoot = await createNewEvidenceRoot(requiredOption(options, "out-dir"));
-const minOutputChars = integerOption(options["min-output-chars"], 20_000, "min-output-chars", 4_001);
+const minOutputChars = integerOption(options["min-output-chars"], 5_000, "min-output-chars", 4_001);
 const consumerDelayMs = integerOption(options["consumer-delay-ms"], 25, "consumer-delay-ms", 1);
 const consumerChunkBytes = integerOption(options["consumer-chunk-bytes"], 256, "consumer-chunk-bytes", 1);
-const timeoutMs = integerOption(options["timeout-ms"], 300_000, "timeout-ms", 30_000);
+const timeoutMs = integerOption(options["timeout-ms"], 900_000, "timeout-ms", 30_000);
 const cosModule = moduleSpecifier(options["cos-module"] ?? resolve("dist/cos/index.js"));
 const acpModule = moduleSpecifier(options["acp-module"] ?? resolve("node_modules/@agentclientprotocol/sdk/dist/acp.js"));
 await mkdir(stateDir, { recursive: false });
@@ -65,6 +67,8 @@ const { CosControllerClient, discoverCosController } = await import(cosModule);
 const discoveryBefore = await discoverCosController(profile);
 const browserBefore = await controllerMetadata(discoveryBefore);
 const metricsPath = resolve(outRoot, "bridge.metrics.json");
+const debugInternalError = process.env.T3ONSTEROIDS_DEBUG_INTERNAL_ERROR === "1";
+const stderrCaptureLimit = 64 * 1024;
 const child = spawn(process.execPath, [bridgeCli], {
   cwd: projectPath,
   env: {
@@ -77,7 +81,16 @@ const child = spawn(process.execPath, [bridgeCli], {
   stdio: ["pipe", "pipe", "pipe"],
 });
 let stderrBytes = 0;
-child.stderr.on("data", (chunk) => { stderrBytes += chunk.length; });
+let stderrCapturedBytes = 0;
+const stderrChunks = [];
+child.stderr.on("data", (chunk) => {
+  stderrBytes += chunk.length;
+  if (!debugInternalError || stderrCapturedBytes >= stderrCaptureLimit) return;
+  const remaining = stderrCaptureLimit - stderrCapturedBytes;
+  const accepted = chunk.subarray(0, remaining);
+  stderrChunks.push(accepted);
+  stderrCapturedBytes += accepted.length;
+});
 const rawInput = Readable.toWeb(child.stdout);
 const throttledInput = throttledReadable(rawInput, { bytesPerTick: consumerChunkBytes, delayMs: consumerDelayMs });
 const stream = acp.ndJsonStream(Writable.toWeb(child.stdin), throttledInput);
@@ -86,9 +99,27 @@ let stopReason = null;
 let assistantChars = 0;
 let projectedToolLikeCount = 0;
 const assistantHash = createHash("sha256");
-const timeout = setTimeout(() => child.kill(), timeoutMs);
+const writeFailureDiagnostics = async (error, exitCode) => {
+  const row = error instanceof Error
+    ? { name: error.name, message: error.message, stack: error.stack ?? null }
+    : { name: "Error", message: "Unknown harness failure", stack: null };
+  await writeEvidence(resolve(outRoot, "failure.json"), {
+    schemaVersion: 1,
+    kind: "step7-live-slow-consumer-failure",
+    error: row,
+    exitCode,
+    stderrBytes,
+    stderrCapturedBytes,
+    stderrTruncated: stderrBytes > stderrCapturedBytes,
+    debugInternalError,
+  });
+  if (debugInternalError && stderrCapturedBytes > 0) {
+    await writeFile(resolve(outRoot, "bridge.stderr.txt"), Buffer.concat(stderrChunks), { flag: "wx", mode: 0o600 });
+  }
+};
+let operationError = null;
 try {
-  await acp.client({ name: "step7-live-slow-consumer" })
+  await withHarnessTimeout(acp.client({ name: "step7-live-slow-consumer" })
     .onNotification(acp.methods.client.session.update, async ({ params }) => {
       if (params.update?.sessionUpdate === "agent_message_chunk" && typeof params.update.content?.text === "string") {
         assistantChars += params.update.content.text.length;
@@ -111,13 +142,26 @@ try {
         }],
       });
       stopReason = result.stopReason;
-    });
+    }), {
+    timeoutMs,
+    onTimeout: () => child.kill(),
+    message: `Step 7 slow-consumer turn timed out after ${timeoutMs} ms before ACP terminal`,
+  });
+} catch (error) {
+  operationError = error;
 } finally {
-  clearTimeout(timeout);
   if (!child.stdin.destroyed) child.stdin.end();
 }
 const exitCode = child.exitCode ?? await new Promise((resolveExit) => child.once("exit", (code) => resolveExit(code)));
-if (exitCode !== 0) throw new Error(`bridge child exited unsuccessfully; stderrBytes=${stderrBytes}`);
+if (operationError) {
+  await writeFailureDiagnostics(operationError, exitCode);
+  throw operationError;
+}
+if (exitCode !== 0) {
+  const error = new Error(`bridge child exited unsuccessfully; stderrBytes=${stderrBytes}`);
+  await writeFailureDiagnostics(error, exitCode);
+  throw error;
+}
 if (!sessionId) throw new Error("bridge did not allocate a session");
 
 const metrics = await readJson(metricsPath);

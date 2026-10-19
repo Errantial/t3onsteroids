@@ -4,13 +4,15 @@ Status: PASS
 
 # V1 Step 6 — toolchain audit and pre-live implementation freeze
 
-Bridge evidence HEAD at execution: `e751b4e74f9a16f485c1cb6d157929de782f0357` plus the uncommitted Step-1–6 implementation changes represented by this evidence summary. Stable `bridgeImplementationCommit` is intentionally not claimed until those implementation inputs are committed.
+`bridgeImplementationCommit`: `7017351e9de2947ba180b52401652d89fffa002f`.
 
-Pinned runtime tuple remains T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; ACP SDK `1.9.0`; Node `24.14.0`; Windows x64.
+Pinned runtime tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS provider extension buildId `0893fbdfe35192f5784f07fc03f97d2ccc235425`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
-Development-only toolchain was upgraded without changing the runtime dependency lane: Vitest `5.0.5`, vite-node `6.0.0`, typescript-eslint `8.71.2`, ESLint / @eslint/js `9.39.5`. The cross-process fixture now depends explicitly on vite-node instead of an accidental Vitest transitive path. TypeScript remains `5.9.3` and ACP SDK remains `1.9.0`.
+The runtime dependency lane remains deliberately narrow: `@agentclientprotocol/sdk` is pinned at `1.9.0` and Node requires `>=24`. Development tooling is pinned to TypeScript `5.9.3`, Vitest `5.0.5`, vite-node `6.0.0`, typescript-eslint `8.71.2`, and ESLint / @eslint/js `9.39.5`. The cross-process fixture uses the explicit vite-node dependency rather than relying on an accidental Vitest transitive path.
 
-`package.json.version` is exactly `1.0.0`, with lockfile consistency. ACP `agentInfo.version`, compatibility output and release-readiness output derive from package metadata. `scripts/implementation-commit.mjs` implements the plan's implementation-input history rule and has a fixture test proving evidence-only and `src/release-manifest.ts` commits do not advance the implementation identity while runtime/test/script changes do.
+`package.json.version` is exactly `1.0.0`, with lockfile consistency proven by a clean `npm ci`. ACP `agentInfo.version`, compatibility output, and release-readiness output derive from package metadata. The recorded implementation identity above follows the implementation-input history rule; evidence-only refreshes and release-manifest-only changes are not themselves treated as new bridge implementation inputs.
+
+Current readiness hardening is included in this frozen implementation identity: production admission takes a fresh health snapshot, requires the exact pinned CoS extension build plus all four v1 feature versions and all three production mutation routes, rejects actions-disabled, and retains bound-session provider-policy attestation. Diagnostics check extension/actions/routes coherently from one health snapshot. These are source/test qualifications only; they do not convert deterministic readiness into live GUI acceptance.
 
 Freeze verification commands:
 
@@ -21,8 +23,8 @@ npm audit --json
 git diff --check
 ```
 
-Final Step-6 result: `18` files / `152` tests PASS; typecheck, lint, build and package smoke PASS. `npm audit --json` reports `0` vulnerabilities at every severity. `git diff --check` PASS.
+Current validation: clean `npm ci` PASS; `npm run verify` PASS with `23` files / `206` tests, including typecheck, lint, build-backed tests, and package smoke; `npm audit --json` reports `0` vulnerabilities at every severity; `git diff --check` PASS. Focused Step-7 smoke/eligibility checks: `5/5` PASS.
 
-Package smoke reports bridge version `1.0.0`. The implementation-readiness booleans remain deliberately false and `releaseQualified:false`; this evidence does not promote source/test completion into live/provenance readiness.
+Package smoke reports bridge version `1.0.0`. Metrics/privacy qualification remains content-safe and metadata-only, including hashed identifiers, bounded timing receipts, controller/SSE/backoff/queue/RSS counters, and explicit redaction coverage. The focused Step-7 result is deterministic smoke/eligibility evidence, not the pinned-T3 GUI fallback/live acceptance proof.
 
-No live CoS installation/replacement, release, tag, push, or live acceptance run was performed. Steps 7–9 remain pending.
+This evidence supports promoting only the `toolchainAudit` gate for this exact tuple. It does not claim release qualification from source/test completion alone; performance, live acceptance, current-head drift and release preparation remain pending.

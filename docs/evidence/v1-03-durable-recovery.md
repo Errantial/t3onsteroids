@@ -4,27 +4,24 @@ Status: PASS
 
 # V1 Step 3 — durable state, recovery and admission lease
 
-`bridgeImplementationCommit`: `23d385d0d62dc7fefbbf5dc702f70115af644453`. Evidence HEAD at draft: `23d385d0d62dc7fefbbf5dc702f70115af644453`; `evidenceCommit` is intentionally pending because this summary is not yet committed.
+`bridgeImplementationCommit`: `5e5643a25508beb6ca2dfdfdce47a4a28592b91b`.
 
 Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS provider extension `0893fbdfe35192f5784f07fc03f97d2ccc235425`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
-Validated production durability covers the Windows hard-link mutation mutex and capability probe; tagged/quarantined session reads; bounded retry of the same fsynced journal replacement across transient Windows `EPERM`/`EACCES`/`EBUSY` sharing failures without unlinking the authoritative journal; persistent-replace failure preserving the old parseable journal; guarded narrow transitions preserving concurrent cursor/cancel/mode state; provisional first-session binding/mode state while CoS delivery is only `pending`; exact unwind to unbound/prior mode when cancellation proves `not_sent`; exact generation/input/turn checks; stable profile-derived admission identity; one long-lived cross-process lease; stale-owner and PID-reuse handling without heartbeat-only stealing; crash-safe create/send/cancel/Stop recovery; lease retention through `turn_end`; release only after authoritative drain/final persistence proof; exact cancellation-target persistence; safe unknown/corrupt resume quarantine; and prevention of stale reconciler deletion of replacement leases.
+Validated production durability covers the Windows hard-link mutation mutex and capability probe; tagged/quarantined session reads; guarded narrow transitions preserving concurrent cursor/cancel/mode state; provisional first-session binding/mode state while CoS delivery is only `pending`; exact unwind to unbound/prior mode when cancellation proves `not_sent`; exact generation/input/turn checks; stable profile-derived admission identity; one long-lived cross-process lease; stale-owner and PID-reuse handling without heartbeat-only stealing; crash-safe create/send/cancel/Stop recovery; lease retention through `turn_end`; release only after authoritative drain/final persistence proof; exact cancellation-target persistence; safe unknown/corrupt resume quarantine; and prevention of stale reconciler deletion of replacement leases.
+
+Durable Windows journal I/O now has an explicit typed `StateIoError` with public code `state_io_error`. Lock-free journal reads and fsynced temp-file replacement retry only transient Windows `EPERM`/`EACCES`/`EBUSY` sharing failures within a bounded retry budget. Replacement retries reuse the same already-written temp file, never unlink the authoritative journal and never replay the state transition; persistent replace failure preserves the old parseable journal. Persistent/raw read, write and replace failures fail closed as typed state I/O errors instead of degrading to a generic internal error at the ACP boundary.
+
+Deterministic Step-8 built-stdio coverage now exercises recovery through the compiled ACP child: ambiguous input response loss without duplicate POST, restarted accepted-send reconciliation without replay, persisted exact-Stop replay, broken/cwd/additional-directory/corrupt/future-state quarantine without provider mutation, and the existing cancellation/restart boundaries. This is deterministic production-path evidence only; it does not claim Step 7 or Step 8 live/browser pass.
 
 Current-machine validation from this qualification run:
 
 ```text
 npm ci                                      PASS
-npm run verify                              PASS — 23 files / 208 tests
-test/state-process.test.ts                  PASS — 20 tests
-test/state-durable.test.ts                  PASS — 33 tests
-test/acp-durable-runtime.test.ts             PASS — 33 tests
-test/phase5-recovery.test.ts                PASS — 8 tests
-test/translate-events.test.ts               PASS — 19 tests
-test/translate-driver.test.ts               PASS — 6 tests
-test/integration/acp-stdio.test.ts           PASS — 6 tests
-test/phase7-release.test.ts                 PASS — 8 tests
-test/release-manifest.test.ts               PASS — 3 tests
-Step-7 focused repository harness checks     PASS — 5/5
+npm run verify                              PASS — 25 files / 226 tests
+npm audit --json                            PASS — 0 vulnerabilities at every severity
+git diff --check                            PASS
+package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false
 ```
 
-The deterministic recovery gate is green for this exact implementation tuple. Browser-live Step 7 and the browser-live portions of Step 8 remain pending; this evidence supports promoting only the `durableRecovery` gate and does not claim live or overall release qualification.
+The deterministic recovery gate is green for this exact implementation tuple. Step 7 and Step 8 live/browser acceptance are not claimed here, and overall release qualification remains false.

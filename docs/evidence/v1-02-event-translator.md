@@ -4,25 +4,22 @@ Status: PASS
 
 # V1 Step 2 — event translator and terminal semantics
 
-`bridgeImplementationCommit`: `23d385d0d62dc7fefbbf5dc702f70115af644453`. Evidence HEAD at draft: `23d385d0d62dc7fefbbf5dc702f70115af644453`; `evidenceCommit` is intentionally pending because this summary is not yet committed.
+`bridgeImplementationCommit`: `5e5643a25508beb6ca2dfdfdce47a4a28592b91b`.
 
 Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS provider extension `0893fbdfe35192f5784f07fc03f97d2ccc235425`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
 Validated production translator behavior includes monotonic cursor/dedupe handling; no assistant prose before authoritative drain; exact `finalAssistantSeq` selection with bounded ranged full-content delivery and resumable chunk acknowledgement; UTF-16-safe range advancement; tool/page projection without raw bodies; late old-turn activity before terminal; handoff continuity; stale-generation and malformed/post-drain fail-closed handling; cancellation-through-drain; and fresh background-policy attestation before terminal acceptance. The controller driver completes the same lifecycle through the typed production controller surface and resumes safely across delivery/persistence interruption points.
 
+The frozen implementation also has deterministic built-stdio Step-8 coverage that drives the real compiled ACP child through response-loss reconciliation, exact SSE cursor resume, cancellation/Stop boundaries, terminal provider failure, large final-assistant reconstruction, and a deliberately slow ACP consumer. These tests exercise translator/terminal semantics through the shipped stdio path; they are deterministic qualification only and are not a claim that Step 7 or Step 8 browser/live acceptance has passed.
+
 Current-machine validation from this qualification run:
 
 ```text
 npm ci                                      PASS
-npm run verify                              PASS — 23 files / 208 tests
-test/translate-events.test.ts               PASS — 19 tests
-test/translate-driver.test.ts               PASS — 6 tests
-test/cos-provider-extension.test.ts         PASS — 11 tests
-test/acp-phase3.test.ts                     PASS — 12 tests
-test/phase6-performance.test.ts             PASS — 9 tests
-test/phase7-release.test.ts                 PASS — 8 tests
-test/release-manifest.test.ts               PASS — 3 tests
-Step-7 focused repository harness checks     PASS — 5/5
+npm run verify                              PASS — 25 files / 226 tests
+npm audit --json                            PASS — 0 vulnerabilities at every severity
+git diff --check                            PASS
+package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false
 ```
 
-The Step-7 focused result above is deterministic repository/harness validation only; browser-live Step 7 and the browser-live portions of Step 8 remain pending. This evidence supports promoting only the `eventTranslator` gate for this exact tuple; it does not claim live acceptance or overall release qualification.
+This evidence supports only the deterministic `eventTranslator` gate for this exact implementation tuple. Step 7 and Step 8 live/browser acceptance are not claimed here, and `releaseQualified` remains false.

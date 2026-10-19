@@ -2,7 +2,7 @@
 
 The codebase is pinned to T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`, CoS `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`, controller protocol 1, ACP SDK 1.9.0, Node 24, Windows x64.
 
-**Current state: pre-v1, not release-qualified.** Steps 1–6 are source-complete and locally verified: the bridge has a production ACP stdio entrypoint, drain-aware event translator, durable/cross-process state and lease implementation, hardened controller/SSE/privacy boundary, metadata-only metrics/logging, and an audited development toolchain. The authoritative remaining sequence is in `PLAN.md` under **Remaining work to finished v1**; live performance/acceptance, current-head drift and final release preparation are still pending.
+**Current state: pre-v1, not release-qualified.** The bridge has the Step 1–6 implementation lineage, including the production ACP stdio entrypoint, drain-aware event translator, durable/cross-process state and lease implementation, hardened controller/SSE/privacy boundary, and metadata-only metrics/logging. The migrated checkout is requalifying those source gates against one exact current implementation tuple before any Step-7 live evidence can count. The authoritative remaining sequence is in `PLAN.md` under **Remaining work to finished v1**; do not treat historical local verification from another machine as a current PASS.
 
 ## Supported launcher
 
@@ -36,4 +36,4 @@ V1 intentionally supports one active bridged turn per stable CoS controller iden
 
 ## Dependency audit disposition
 
-The Step-6 development-toolchain audit is complete. The bridge now uses Vitest `5.0.5`, vite-node `6.0.0`, typescript-eslint `8.71.2`, ESLint / @eslint/js `9.39.5`, TypeScript `5.9.3`, and runtime `@agentclientprotocol/sdk@1.9.0`. A fresh `npm ci` followed by `npm audit --json` reports zero vulnerabilities; the full suite/build/package smoke also pass. See `docs/evidence/v1-06-toolchain-audit.md`.
+The bridge uses Vitest `5.0.5`, vite-node `6.0.0`, typescript-eslint `8.71.2`, ESLint / @eslint/js `9.39.5`, TypeScript `5.9.3`, and runtime `@agentclientprotocol/sdk@1.9.0`. On this migrated machine a fresh `npm ci` and `npm audit --json` report zero vulnerabilities. Step-6 evidence is refreshed only after the final pre-live implementation identity passes the complete clean verification lane; the older `docs/evidence/v1-06-toolchain-audit.md` remains provenance, not a current-tuple PASS, until then.

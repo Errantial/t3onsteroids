@@ -104,6 +104,13 @@ describe("Step 7 live-smoke harness evaluation", () => {
     })).toBe(true);
     expect(isRestartCheckpointLifecycleUpdate({
       sessionUpdate: "tool_call",
+      toolCallId: "cos-event:10",
+      title: "Restarted the development workflow",
+      kind: "other",
+      status: "completed",
+    })).toBe(true);
+    expect(isRestartCheckpointLifecycleUpdate({
+      sessionUpdate: "tool_call",
       toolCallId: "cos-event:12",
       title: "Clicked Save",
       kind: "other",

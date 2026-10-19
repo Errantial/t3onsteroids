@@ -101,7 +101,8 @@ async function bridgeConnection({ acp, bridgeCli, projectPath, profile, stateDir
         if (params.update?.sessionUpdate === "agent_message_chunk" && typeof params.update.content?.text === "string") {
           assistant += params.update.content.text;
         }
-        if (params.update?.sessionUpdate === "tool_call" || params.update?.sessionUpdate === "tool_call_update") toolLikeCount += 1;
+        if ((params.update?.sessionUpdate === "tool_call" || params.update?.sessionUpdate === "tool_call_update")
+          && !isRestartCheckpointLifecycleUpdate(params.update)) toolLikeCount += 1;
       })
       .connectWith(stream, async (ctx) => {
         const initialized = await ctx.request(acp.methods.agent.initialize, { protocolVersion: 2, clientCapabilities: {} });

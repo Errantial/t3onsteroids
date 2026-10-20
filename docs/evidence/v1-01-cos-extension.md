@@ -4,7 +4,7 @@ Status: PASS
 
 # V1 Step 1 — CoS provider extension
 
-Bridge implementation identity for this qualification tuple: `336c701c7fb3da967ef11c6b167da8a266becc46`.
+The original CoS source/build qualification was recorded alongside bridge implementation `336c701c7fb3da967ef11c6b167da8a266becc46` (historical). This gate qualifies the external CoS provider-extension build below; it remains valid for current bridge implementation `9f6a70c589ac1ac4831ebde4f3f6d45bc493e3be` because the pinned provider-extension build id and all four feature versions are unchanged. Steps 2–9 record the current bridge implementation identity separately.
 
 Final CoS `providerExtension` build identity: `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`, produced from the repaired CoS `2.1.39` lineage based on upstream source `87ae9d631f82d8da2f462d910410031ad8f97ac5`. This server/provider-extension build id is intentionally distinct from the browser-extension file stamp, which remains `a35dccb10b05` for the qualified candidate.
 

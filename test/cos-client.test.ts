@@ -202,6 +202,104 @@ describe("CoS protocol-1 controller client", () => {
     await expect(client.stopExactTurn("session", "target-turn", { timeoutMs: 200, pollMs: 1 })).resolves.toMatchObject({ seq: 2, turnId: "target-turn" });
   });
 
+  it("re-discovers endpoint and token before sending exact Stop after a controller restart", async () => {
+    const discoveries: CosControllerDiscovery[] = [
+      { baseUrl: "http://127.0.0.1:1", token: "old" },
+      { baseUrl: "http://127.0.0.1:2", token: "new" },
+    ];
+    const discover = vi.fn(async () => discoveries[Math.min(discover.mock.calls.length - 1, 1)]!);
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const text = String(url);
+      const auth = new Headers(init?.headers).get("Authorization");
+      if (text.endsWith("/v1/health") && text.startsWith("http://127.0.0.1:1")) return jsonResponse(health);
+      if (text === "http://127.0.0.1:2/v1/sessions/session/stop" && auth === "Bearer new" && init?.method === "POST") {
+        return jsonResponse({ live: {} }, 202);
+      }
+      throw new Error(`unexpected ${text} with ${auth}`);
+    });
+    const client = new CosControllerClient(discover, { fetch });
+
+    await expect(client.health()).resolves.toMatchObject({ protocol: 1 });
+    await expect(client.requestStopExactTurn("session", "turn")).resolves.toBeUndefined();
+
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      "http://127.0.0.1:1/v1/health",
+      "http://127.0.0.1:2/v1/sessions/session/stop",
+    ]);
+    expect(new Headers(fetch.mock.calls[1]?.[1]?.headers).get("Authorization")).toBe("Bearer new");
+  });
+
+  it("wakes a heartbeat-live session stream after exact Stop and resumes from its cursor", async () => {
+    const discoveries: CosControllerDiscovery[] = [
+      { baseUrl: "http://127.0.0.1:1", token: "old" },
+      { baseUrl: "http://127.0.0.1:2", token: "new" },
+    ];
+    const discover = vi.fn(async () => discoveries[Math.min(discover.mock.calls.length - 1, 1)]!);
+    const seen: Array<{ url: string; auth: string | null; body?: string }> = [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const text = String(url);
+      seen.push({ url: text, auth: new Headers(init?.headers).get("Authorization"), ...(typeof init?.body === "string" ? { body: init.body } : {}) });
+      if (text === "http://127.0.0.1:1/v1/sessions/s/events/stream") {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            const send = (value: string): void => controller.enqueue(new TextEncoder().encode(value));
+            send('id: 5\nevent: assistant_message\ndata: {"seq":5,"position":5,"time":5,"kind":"assistant_message","source":"extension"}\n\n');
+            const heartbeat = setInterval(() => {
+              try { send(": keep-alive\n\n"); } catch { clearInterval(heartbeat); }
+            }, 5);
+            const stop = (): void => { clearInterval(heartbeat); controller.error(new DOMException("aborted", "AbortError")); };
+            init?.signal?.addEventListener("abort", stop, { once: true });
+          },
+          cancel() { /* the abort listener clears the heartbeat interval */ },
+        });
+        return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
+      if (text === "http://127.0.0.1:2/v1/sessions/s/stop" && init?.method === "POST") return jsonResponse({ live: {} }, 202);
+      if (text === "http://127.0.0.1:2/v1/sessions/s/events/stream?from=6") {
+        return new Response(
+          'id: 6\nevent: turn_end\ndata: {"seq":6,"position":6,"time":6,"kind":"turn_end","source":"extension","turnId":"t"}\n\n' +
+          'id: 7\nevent: turn_drained\ndata: {"seq":7,"position":7,"time":7,"kind":"turn_drained","source":"app","turnId":"t","inputId":"11111111-1111-4111-8111-111111111111","highWaterSeq":7,"finalAssistantSeq":5}\n\n',
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        );
+      }
+      throw new Error(`unexpected ${text}`);
+    });
+    const abort = new AbortController();
+    const client = new CosControllerClient(discover, { fetch }, { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 });
+    const stream = client.streamEvents("s", { signal: abort.signal, idleTimeoutMs: 1_000, rolloverMs: 10_000 })[Symbol.asyncIterator]();
+
+    await expect(stream.next()).resolves.toMatchObject({ value: { seq: 5 }, done: false });
+    await expect(client.requestStopExactTurn("s", "t")).resolves.toBeUndefined();
+    await expect(stream.next()).resolves.toMatchObject({ value: { seq: 6, kind: "turn_end", turnId: "t" }, done: false });
+    await expect(stream.next()).resolves.toMatchObject({ value: { seq: 7, kind: "turn_drained", turnId: "t" }, done: false });
+    abort.abort();
+    await expect(stream.next()).resolves.toMatchObject({ done: true });
+
+    expect(seen).toEqual([
+      { url: "http://127.0.0.1:1/v1/sessions/s/events/stream", auth: "Bearer old" },
+      { url: "http://127.0.0.1:2/v1/sessions/s/stop", auth: "Bearer new", body: JSON.stringify({ turnId: "t" }) },
+      { url: "http://127.0.0.1:2/v1/sessions/s/events/stream?from=6", auth: "Bearer new" },
+    ]);
+  });
+
+  it("retries only the same exact Stop after an ambiguous transport failure", async () => {
+    const seen: Array<{ url: string; body?: string }> = [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push({ url: String(url), ...(typeof init?.body === "string" ? { body: init.body } : {}) });
+      if (fetch.mock.calls.length === 1) throw new TypeError("response lost after dispatch");
+      if (String(url).endsWith("/v1/sessions/s/stop")) return jsonResponse({ live: {} }, 202);
+      throw new Error(`unexpected ${String(url)}`);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch }, { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 });
+
+    await expect(client.requestStopExactTurn("s", "exact-turn")).resolves.toBeUndefined();
+    expect(seen).toEqual([
+      { url: "http://127.0.0.1:9/v1/sessions/s/stop", body: JSON.stringify({ turnId: "exact-turn" }) },
+      { url: "http://127.0.0.1:9/v1/sessions/s/stop", body: JSON.stringify({ turnId: "exact-turn" }) },
+    ]);
+  });
+
   it("uses bounded retry/backoff for safe reads", async () => {
     const fetch = vi.fn(async () => {
       if (fetch.mock.calls.length < 3) throw new TypeError("refused");
@@ -338,6 +436,79 @@ describe("CoS protocol-1 controller client", () => {
     }
     expect(rows).toEqual([8, 9]);
     expect(seen[1]).toContain("from=9");
+  });
+
+  it("re-discovers after a silent stale SSE connection and resumes from the last cursor", async () => {
+    const discoveries: CosControllerDiscovery[] = [
+      { baseUrl: "http://127.0.0.1:1", token: "old" },
+      { baseUrl: "http://127.0.0.1:2", token: "new" },
+    ];
+    const discover = vi.fn(async () => {
+      if (discover.mock.calls.length === 2) throw new Error("discovery files are being republished");
+      return discoveries[Math.min(discover.mock.calls.length - 1, 1)]!;
+    });
+    const seen: Array<{ url: string; auth: string | null }> = [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const text = String(url);
+      seen.push({ url: text, auth: new Headers(init?.headers).get("Authorization") });
+      if (text.startsWith("http://127.0.0.1:1")) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('id: 5\nevent: assistant_message\ndata: {"seq":5,"position":5,"time":5,"kind":"assistant_message","source":"extension"}\n\n'));
+            init?.signal?.addEventListener("abort", () => controller.error(new DOMException("aborted", "AbortError")), { once: true });
+          },
+        });
+        return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
+      return new Response('id: 6\nevent: turn_end\ndata: {"seq":6,"position":6,"time":6,"kind":"turn_end","source":"extension","turnId":"t"}\n\n', {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    });
+    const abort = new AbortController();
+    const client = new CosControllerClient(discover, { fetch }, { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 });
+    const rows: number[] = [];
+
+    for await (const event of client.streamEvents("s", { signal: abort.signal, idleTimeoutMs: 10, rolloverMs: 1_000 })) {
+      rows.push(event.seq);
+      if (event.seq === 6) abort.abort();
+    }
+
+    expect(rows).toEqual([5, 6]);
+    expect(discover).toHaveBeenCalledTimes(3);
+    expect(seen).toEqual([
+      { url: "http://127.0.0.1:1/v1/sessions/s/events/stream", auth: "Bearer old" },
+      { url: "http://127.0.0.1:2/v1/sessions/s/events/stream?from=6", auth: "Bearer new" },
+    ]);
+  });
+
+  it("treats SSE heartbeat bytes as activity so a healthy quiet stream does not reconnect", async () => {
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const timers: ReturnType<typeof setTimeout>[] = [];
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const send = (value: string): void => controller.enqueue(new TextEncoder().encode(value));
+          send('id: 5\nevent: assistant_message\ndata: {"seq":5,"position":5,"time":5,"kind":"assistant_message","source":"extension"}\n\n');
+          timers.push(setTimeout(() => send(": keep-alive\n\n"), 10));
+          timers.push(setTimeout(() => send(": keep-alive\n\n"), 20));
+          timers.push(setTimeout(() => send('id: 6\nevent: turn_end\ndata: {"seq":6,"position":6,"time":6,"kind":"turn_end","source":"extension","turnId":"t"}\n\n'), 30));
+          init?.signal?.addEventListener("abort", () => controller.error(new DOMException("aborted", "AbortError")), { once: true });
+        },
+        cancel() { for (const timer of timers) clearTimeout(timer); },
+      });
+      return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    });
+    const abort = new AbortController();
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch });
+    const rows: number[] = [];
+
+    for await (const event of client.streamEvents("s", { signal: abort.signal, idleTimeoutMs: 40, rolloverMs: 1_000 })) {
+      rows.push(event.seq);
+      if (event.seq === 6) abort.abort();
+    }
+
+    expect(rows).toEqual([5, 6]);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("reconnects after a controller end frame and resumes from the exact cursor", async () => {

@@ -387,6 +387,7 @@ function sleep(ms: number): Promise<void> {
 export class CosControllerClient {
   private discovery: CosControllerDiscovery | undefined;
   private providerExtensionReadiness: { readonly value: CosControllerReadiness; readonly expiresAt: number } | undefined;
+  private readonly activeEventStreams = new Map<string, Set<AbortController>>();
   private metricsState = {
     readAttempts: 0,
     readRetries: 0,
@@ -405,7 +406,10 @@ export class CosControllerClient {
   ) {}
 
   private async getDiscovery(force = false): Promise<CosControllerDiscovery> {
-    if (force) this.providerExtensionReadiness = undefined;
+    if (force) {
+      this.discovery = undefined;
+      this.providerExtensionReadiness = undefined;
+    }
     if (force || !this.discovery) this.discovery = await this.discover();
     return this.discovery;
   }
@@ -681,19 +685,56 @@ export class CosControllerClient {
   }
 
   async requestStopExactTurn(sessionId: string, turnId: string): Promise<void> {
-    const response = await this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/stop`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ turnId }),
-    });
-    if (response.status !== 202) throw new CosControllerError("schema_mismatch", "Stop response status must be 202");
-    let value: unknown;
-    try {
-      value = await response.json();
-    } catch {
-      throw new CosControllerError("schema_mismatch", "Stop response is malformed JSON");
+    // Stop is commonly the first action after a long-running turn. CoS can restart and rotate
+    // both controller discovery files while the bridge process stays alive, so do not let a
+    // cached endpoint/token send an exact-turn Stop to the retired controller instance. Repeating
+    // Stop for the same exact turn is safe; never substitute a new turn or replay its input.
+    const maxAttempts = Math.max(1, Math.min(3, this.retryPolicy.maxAttempts));
+    let lastError: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      this.discovery = undefined;
+      this.providerExtensionReadiness = undefined;
+      try {
+        const response = await this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/stop`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ turnId }),
+        });
+        if (response.status !== 202) throw new CosControllerError("schema_mismatch", "Stop response status must be 202");
+        let value: unknown;
+        try {
+          value = await response.json();
+        } catch {
+          throw new CosControllerError("schema_mismatch", "Stop response is malformed JSON");
+        }
+        asRecord(value, "Stop response");
+        // The stream reader may currently be blocked waiting for its next event. Wake only this
+        // session's stream after the controller has accepted Stop; it reconnects internally from
+        // the saved cursor and does not terminate the ACP request or release its lease.
+        this.reconnectEventStreams(sessionId, "sse_stop_reconnect");
+        return;
+      } catch (cause) {
+        lastError = cause;
+        this.discovery = undefined;
+        this.providerExtensionReadiness = undefined;
+        // Even an ambiguous/non-retryable Stop response may follow a dispatched action. Wake the
+        // stream to reconcile recorded events, but keep the error visible and never infer success.
+        this.reconnectEventStreams(sessionId, "sse_stop_retry_reconnect");
+        if (cause instanceof CosControllerError && !cause.retryable) throw cause;
+        // A failed action may have reached the controller before its response was lost. Retry only
+        // the same exact turn id; Stop is idempotent for that target and never sends another input.
+        if (attempt + 1 >= maxAttempts) throw cause;
+        const delay = Math.min(this.retryPolicy.baseDelayMs * 2 ** attempt, this.retryPolicy.maxDelayMs);
+        await sleep(delay);
+      }
     }
-    asRecord(value, "Stop response");
+    throw lastError instanceof Error ? lastError : new CosControllerError("controller_unavailable", "CoS controller Stop failed", { retryable: true });
+  }
+
+  private reconnectEventStreams(sessionId: string, reason: string): void {
+    for (const controller of this.activeEventStreams.get(sessionId) ?? []) {
+      if (!controller.signal.aborted) controller.abort(new Error(reason));
+    }
   }
 
   async stopExactTurn(sessionId: string, turnId: string, options: { timeoutMs?: number; pollMs?: number } = {}): Promise<CosEvent> {
@@ -714,29 +755,62 @@ export class CosControllerClient {
     throw new CosControllerError("turn_cancel_requested", `Stop was requested for turn ${turnId}, but matching turn_end was not observed`, { retryable: true });
   }
 
-  async *streamEvents(sessionId: string, options: { from?: number; signal?: AbortSignal; rolloverMs?: number } = {}): AsyncGenerator<CosEvent> {
+  async *streamEvents(sessionId: string, options: {
+    from?: number;
+    signal?: AbortSignal;
+    rolloverMs?: number;
+    idleTimeoutMs?: number;
+  } = {}): AsyncGenerator<CosEvent> {
     let cursor = options.from;
     let connectedOnce = false;
     let reconnectAttempt = 0;
     const rolloverMs = options.rolloverMs ?? 29 * 60_000;
+    // The CoS server sends an SSE comment heartbeat every 15 seconds. If its process dies while
+    // a socket remains half-open, those heartbeats stop but reader.read() may not reject promptly.
+    // Bound that dead connection so a long-lived bridge can discover the restarted endpoint/token.
+    const idleTimeoutMs = options.idleTimeoutMs ?? 45_000;
     while (!options.signal?.aborted) {
-      const discovery = await this.getDiscovery();
-      const headers = new Headers({ Accept: "text/event-stream", Authorization: `Bearer ${discovery.token}` });
-      if (cursor !== undefined) headers.set("Last-Event-ID", String(Math.max(0, cursor - 1)));
       let streamController: AbortController | undefined;
       let onAbort: (() => void) | undefined;
-      let timer: ReturnType<typeof setTimeout> | undefined;
+      let rolloverTimer: ReturnType<typeof setTimeout> | undefined;
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
       let reader: ReadableStreamDefaultReader<string> | undefined;
       try {
+        // Every reconnect is a new controller boundary: the app may have restarted and rotated its
+        // endpoint/token even when the previous stream ended without an HTTP error. Discovery can
+        // also be briefly unavailable while the restarted process republishes its files; retry it
+        // under the same bounded backoff instead of terminating the provider driver.
+        const discovery = await this.getDiscovery(connectedOnce);
+        const headers = new Headers({ Accept: "text/event-stream", Authorization: `Bearer ${discovery.token}` });
+        if (cursor !== undefined) headers.set("Last-Event-ID", String(Math.max(0, cursor - 1)));
         this.metricsState.sseConnectAttempts += 1;
         if (connectedOnce) this.metricsState.sseReconnects += 1;
         this.bridgeMetrics?.increment("sseConnectCount");
         if (connectedOnce) this.bridgeMetrics?.increment("sseReconnectCount");
         const suffix = cursor === undefined ? "" : `?from=${encodeURIComponent(String(cursor))}`;
         streamController = new AbortController();
+        let sessionStreams = this.activeEventStreams.get(sessionId);
+        if (!sessionStreams) {
+          sessionStreams = new Set<AbortController>();
+          this.activeEventStreams.set(sessionId, sessionStreams);
+        }
+        sessionStreams.add(streamController);
         onAbort = () => streamController!.abort(options.signal?.reason);
         options.signal?.addEventListener("abort", onAbort, { once: true });
-        timer = setTimeout(() => streamController!.abort(new Error("sse_rollover")), rolloverMs);
+        rolloverTimer = setTimeout(() => {
+          this.discovery = undefined;
+          this.providerExtensionReadiness = undefined;
+          streamController!.abort(new Error("sse_rollover"));
+        }, rolloverMs);
+        const resetIdleTimer = (): void => {
+          if (idleTimer !== undefined) clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => {
+            this.discovery = undefined;
+            this.providerExtensionReadiness = undefined;
+            streamController!.abort(new Error("sse_idle_timeout"));
+          }, idleTimeoutMs);
+        };
+        resetIdleTimer();
         const requestInit: RequestInit = { headers, signal: streamController.signal };
         const response = await this.transport.fetch(`${discovery.baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/events/stream${suffix}`, requestInit);
         if (!response.ok) throw mapHttpError(response.status, undefined);
@@ -748,6 +822,7 @@ export class CosControllerClient {
         for (;;) {
           const { value, done } = await reader.read();
           if (done) break;
+          if (value.length > 0) resetIdleTimer();
           buffer += value;
           let boundary: number;
           for (;;) {
@@ -794,7 +869,8 @@ export class CosControllerClient {
             yield event;
           }
         }
-        clearTimeout(timer);
+        if (rolloverTimer !== undefined) clearTimeout(rolloverTimer);
+        if (idleTimer !== undefined) clearTimeout(idleTimer);
         options.signal?.removeEventListener("abort", onAbort);
         if (options.signal?.aborted) return;
         reconnectAttempt = sawEvent ? 0 : reconnectAttempt + 1;
@@ -805,15 +881,12 @@ export class CosControllerClient {
         await sleep(Math.min(this.retryPolicy.maxDelayMs, exponential + jitter));
       } catch (cause) {
         if (options.signal?.aborted) return;
-        if (cause instanceof CosControllerError && cause.code === "controller_auth_changed") this.discovery = undefined;
-        else if (!(cause instanceof CosControllerError) && cause instanceof Error && cause.name === "AbortError") {
-          reconnectAttempt += 1;
-        }
-        else if (!(cause instanceof CosControllerError) || !cause.retryable) {
-          if (cause instanceof CosControllerError) throw cause;
-          this.discovery = undefined;
-        }
-        else reconnectAttempt += 1;
+        if (cause instanceof CosControllerError && cause.code !== "controller_auth_changed" && !cause.retryable) throw cause;
+        // Every failed stream attempt must discard discovery: even a clean-looking transport
+        // failure may be the old controller disappearing during a restart/token rotation.
+        this.discovery = undefined;
+        this.providerExtensionReadiness = undefined;
+        reconnectAttempt += 1;
         this.metricsState.sseBackoffs += 1;
         this.bridgeMetrics?.increment("backoffCount");
         const exponential = Math.min(
@@ -823,7 +896,8 @@ export class CosControllerClient {
         const jitter = Math.floor(exponential * 0.2 * Math.random());
         await sleep(Math.min(this.retryPolicy.maxDelayMs, exponential + jitter));
       } finally {
-        if (timer !== undefined) clearTimeout(timer);
+        if (rolloverTimer !== undefined) clearTimeout(rolloverTimer);
+        if (idleTimer !== undefined) clearTimeout(idleTimer);
         if (onAbort) options.signal?.removeEventListener("abort", onAbort);
         // A provider-turn consumer normally returns as soon as the authoritative drain has been
         // emitted and acknowledged. Async-generator return does not automatically cancel this
@@ -834,6 +908,11 @@ export class CosControllerClient {
         if (reader) {
           try { await reader.cancel(); } catch { /* the abort above may already have closed it */ }
           try { reader.releaseLock(); } catch { /* an already-closed reader may have no lock */ }
+        }
+        if (streamController) {
+          const sessionStreams = this.activeEventStreams.get(sessionId);
+          sessionStreams?.delete(streamController);
+          if (sessionStreams?.size === 0) this.activeEventStreams.delete(sessionId);
         }
       }
     }

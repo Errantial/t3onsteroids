@@ -4,7 +4,7 @@ Status: PASS
 
 # V1 Step 4 — production ACP stdio provider
 
-`bridgeImplementationCommit`: `336c701c7fb3da967ef11c6b167da8a266becc46`.
+`bridgeImplementationCommit`: `9f6a70c589ac1ac4831ebde4f3f6d45bc493e3be`.
 
 Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc` (browser-extension file stamp separately `a35dccb10b05`); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
@@ -15,10 +15,10 @@ The final freeze adds deterministic Step-8 built-stdio scenarios for input-respo
 Current-machine bridge validation from this exact implementation tuple:
 
 ```text
-npm run verify                              PASS — 25/25 test files, 234/234 tests
+npm run verify                              PASS — 25/25 test files, 241/241 tests
 npm audit --json                            PASS — exit 0; 0 vulnerabilities at every severity
 git diff --check                            PASS
 package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false
 ```
 
-This Step-4 result and the Step-8 scenarios above are deterministic production-path evidence against the repaired `providerExtension` build, not browser/live acceptance. The Step-1 summary explicitly does not claim a full-CoS-verify PASS. No Step 7 or Step 8 live pass is claimed, and overall `releaseQualified` remains false.
+This Step-4 result and the Step-8 scenarios above are deterministic production-path evidence against the repaired `providerExtension` build, not browser/live acceptance. The Step-1 summary explicitly does not claim a full-CoS-verify PASS. Live Step 7/8 evidence remains invalidated for this implementation identity; these deterministic scenarios do not promote it. Overall `releaseQualified` remains false.

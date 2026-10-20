@@ -46,7 +46,7 @@ export const v1ReleaseGateManifest: V1ReleaseGateManifest = {
     acpStdio: { status: "pass", evidencePath: "docs/evidence/v1-04-acp-stdio.md" },
     controllerPrivacy: { status: "pass", evidencePath: "docs/evidence/v1-05-controller-privacy.md" },
     toolchainAudit: { status: "pass", evidencePath: "docs/evidence/v1-06-toolchain-audit.md" },
-    performance: { status: "pass", evidencePath: "docs/evidence/v1-07-performance.md" },
+    performance: { status: "pending", evidencePath: "docs/evidence/v1-07-performance.md" },
     liveAcceptance: { status: "pending", evidencePath: "docs/evidence/v1-08-acceptance.md" },
     t3HeadDrift: { status: "pending", evidencePath: "docs/evidence/v1-09-release.md", outcome: null },
     releasePreparation: { status: "pending", evidencePath: "docs/evidence/v1-09-release.md" },

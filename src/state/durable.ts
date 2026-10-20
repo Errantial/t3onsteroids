@@ -638,12 +638,28 @@ export class DurableSessionStore {
   }
 
   private async writeQuarantine(sessionId: string, record: QuarantineRecord): Promise<void> {
-    const temp = `${this.quarantinePath(sessionId)}.${process.pid}.${randomUUID()}.tmp`;
+    const target = this.quarantinePath(sessionId);
+    const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      await fs.mkdir(path.dirname(this.quarantinePath(sessionId)), { recursive: true });
+      await fs.mkdir(path.dirname(target), { recursive: true });
       if (await this.activeQuarantine(sessionId)) return;
-      await writeAndSync(temp, JSON.stringify(record));
-      await fs.rename(temp, this.quarantinePath(sessionId));
+      const contents = JSON.stringify(record);
+      await writeAndSync(temp, contents);
+      const maxAttempts = stateIoAttempts();
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        try {
+          await fs.rename(temp, target);
+          return;
+        } catch (error) {
+          if (!isWindowsSharingError(error)) throw new StateIoError("write", error);
+
+          // Quarantine is create-once: after a competing reader publishes its marker, never
+          // replace it with this reader's timestamp. Retry only while no marker is present.
+          if (await this.activeQuarantine(sessionId)) return;
+          if (attempt + 1 >= maxAttempts) throw new StateIoError("write", error);
+          await new Promise((resolve) => setTimeout(resolve, stateIoRetryDelayMs(attempt)));
+        }
+      }
     } catch (error) {
       if (await this.activeQuarantine(sessionId)) return;
       if (error instanceof StateIoError) throw error;

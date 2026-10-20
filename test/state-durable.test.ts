@@ -328,6 +328,76 @@ describe("durable tagged session state", () => {
     await expect(fs.readdir(path.join(root, "sessions"))).resolves.toEqual([`${sessionId}.json`]);
   });
 
+  it.runIf(process.platform === "win32")("retries a transient Windows sharing error when publishing a quarantine marker", async () => {
+    const root = await tempRoot();
+    const durable = store(root);
+    await durable.init();
+    const sourcePath = path.join(root, "sessions", `${sessionId}.json`);
+    const quarantinePath = path.join(root, "quarantine", `${sessionId}.json`);
+    const source = Buffer.from('{"schemaVersion":1,');
+    await fs.writeFile(sourcePath, source);
+
+    const originalRename = fs.rename.bind(fs);
+    let renameAttempts = 0;
+    const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (...args: Parameters<typeof fs.rename>) => {
+      if (String(args[1]) === quarantinePath) {
+        renameAttempts += 1;
+        if (renameAttempts === 1) throw Object.assign(new Error("fixture sharing violation"), { code: "EPERM" });
+      }
+      return originalRename(...args);
+    });
+
+    try {
+      await expect(durable.readSession(sessionId)).resolves.toMatchObject({ status: "corrupt" });
+    } finally {
+      renameSpy.mockRestore();
+    }
+
+    expect(renameAttempts).toBe(2);
+    expect(await fs.readFile(sourcePath)).toEqual(source);
+    expect(JSON.parse(await fs.readFile(quarantinePath, "utf8"))).toMatchObject({
+      schemaVersion: 1,
+      reason: "state_corrupt",
+      sourceSha256: createHash("sha256").update(source).digest("hex"),
+    });
+  });
+
+  it.runIf(process.platform === "win32")("fails a persistently shared quarantine-marker rename with typed state I/O and preserves the source", async () => {
+    const root = await tempRoot();
+    const durable = store(root);
+    await durable.init();
+    const sourcePath = path.join(root, "sessions", `${sessionId}.json`);
+    const quarantinePath = path.join(root, "quarantine", `${sessionId}.json`);
+    const source = Buffer.from('{"schemaVersion":1,');
+    await fs.writeFile(sourcePath, source);
+
+    const originalRename = fs.rename.bind(fs);
+    let renameAttempts = 0;
+    const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (...args: Parameters<typeof fs.rename>) => {
+      if (String(args[1]) === quarantinePath) {
+        renameAttempts += 1;
+        throw Object.assign(new Error("fixture persistent sharing violation"), { code: "EPERM" });
+      }
+      return originalRename(...args);
+    });
+
+    try {
+      await expect(durable.readSession(sessionId)).rejects.toMatchObject({
+        name: "StateIoError",
+        code: "state_io_error",
+        operation: "write",
+        syscallCode: "EPERM",
+      });
+    } finally {
+      renameSpy.mockRestore();
+    }
+
+    expect(renameAttempts).toBe(12);
+    expect(await fs.readFile(sourcePath)).toEqual(source);
+    await expect(fs.readFile(quarantinePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readdir(path.join(root, "quarantine"))).resolves.toEqual([]);
+  });
+
   it("types non-sharing journal I/O failures instead of leaking raw filesystem errors", async () => {
     const root = await tempRoot();
     const durable = store(root);

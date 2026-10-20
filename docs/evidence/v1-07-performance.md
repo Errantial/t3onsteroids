@@ -4,11 +4,11 @@ Status: PENDING
 
 # V1 Step 7 — live single-turn performance qualification
 
-`bridgeImplementationCommit`: `336c701c7fb3da967ef11c6b167da8a266becc46`.
+`bridgeImplementationCommit`: `ef2548b817fe9318ac238e84d0ab39fd65258940`.
 
-**Historical result only — invalidated.** The measurements below were recorded against the prior implementation commit `336c701c7fb3da967ef11c6b167da8a266becc46`. The CoS restart/cancellation recovery implementation changed at `9f6a70c589ac1ac4831ebde4f3f6d45bc493e3be`; under `PLAN.md`'s implementation-input invalidation rule, this previous PASS does not satisfy the current Step-7 gate. Keep the raw measurements as history, but rerun the current implementation tuple before restoring `Status: PASS`.
+**Historical result only — invalidated.** The measurements below were recorded against prior implementation commit `336c701c7fb3da967ef11c6b167da8a266becc46`. Exact-Stop recovery changed at `9f6a70c589ac1ac4831ebde4f3f6d45bc493e3be` and was further hardened for in-flight discovery races and stalled response bodies at `ef2548b817fe9318ac238e84d0ab39fd65258940`. Under `PLAN.md`'s implementation-input invalidation rule, the old PASS does not satisfy the current Step-7 gate. Keep the raw measurements as history, but rerun the current implementation tuple before restoring `Status: PASS`.
 
-Pinned runtime tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc` (browser-extension file stamp separately `a35dccb10b05`); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64. Live turns were exercised through the Chat On Steroids browser conversation named `T3 Code`, not by sending test prompts through the desktop app UI. The paired controller and bridge instrumentation used the isolated qualification profile and state root for run `20261019T215853Z`.
+Pinned runtime tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc` (browser-extension file stamp is tracked separately in Step-1/live-candidate provenance); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64. Live turns were exercised through the Chat On Steroids browser conversation named `T3 Code`, not by sending test prompts through the desktop app UI. The paired controller and bridge instrumentation used the isolated qualification profile and state root for run `20261019T215853Z`.
 
 ## Short-turn measurements
 
@@ -32,6 +32,8 @@ The secondary end-to-end comparison recorded bridged median/p95 `6,421.5 / 13,40
 
 ## Validation and gate boundary
 
+Historical validation from the old measurement run (`336c701c7fb3da967ef11c6b167da8a266becc46`):
+
 ```text
 npm run verify                              PASS — 25/25 test files, 234/234 tests
 npm exec vitest run -- test/cos-provider-extension.test.ts --maxWorkers=1
@@ -41,4 +43,4 @@ git diff --check                            PASS
 Step-7 combined evaluator                   PASS — 10 bridged + 10 direct
 ```
 
-The combined evaluator output is preserved as `step7-input-isolated.json`; its checks all pass. Package smoke reports bridge version `1.0.0`, supported concurrency `1`, pinned T3/CoS, and `releaseQualified:false`. This evidence closes only the Step-7 live performance gate. The pinned V1-01…V1-19 acceptance matrix and Step-9 current-T3-HEAD drift/release preparation remain separate gates; overall release qualification remains false.
+Current implementation validation at `ef2548b817fe9318ac238e84d0ab39fd65258940`: `npm run verify` PASS — 25/25 test files, 243/243 tests, including typecheck, lint, build and package smoke; `git diff --check` PASS. This is deterministic source/build evidence only and does not refresh the older live measurements. The combined evaluator output remains historical; Step 7 stays pending until a fresh live run is safe. The pinned V1-01…V1-19 acceptance matrix and Step-9 current-T3-HEAD drift/release preparation remain separate gates; overall release qualification remains false.

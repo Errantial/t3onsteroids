@@ -4,9 +4,9 @@ Status: PASS
 
 # V1 Step 4 — production ACP stdio provider
 
-`bridgeImplementationCommit`: `9f6a70c589ac1ac4831ebde4f3f6d45bc493e3be`.
+`bridgeImplementationCommit`: `ef2548b817fe9318ac238e84d0ab39fd65258940`.
 
-Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc` (browser-extension file stamp separately `a35dccb10b05`); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
+Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc` (browser-extension file stamp is tracked separately in Step-1/live-candidate provenance); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
 The shipped built `node.exe + dist/cli/index.js` lane is covered through the real stdio ACP path against the deterministic protocol-1+extension controller boundary. Validation covers stable ACP v1 negotiation, side-effect-free initialize/session allocation and provider validation, lazy exact-session creation, prompt/update/terminal flow held open through authoritative `turn_drained`, late activity ordering, exact active-turn Stop, pending-cancel race conversion, first-input `pending` remaining provisional until exact `sent`/turn proof, cancellation settlement only after authoritative non-delivery/drain proof, healthy durable restart/resume without replacement input, and unknown/corrupt resume quarantine without CoS mutation.
 
@@ -15,7 +15,7 @@ The final freeze adds deterministic Step-8 built-stdio scenarios for input-respo
 Current-machine bridge validation from this exact implementation tuple:
 
 ```text
-npm run verify                              PASS — 25/25 test files, 241/241 tests
+npm run verify                              PASS — 25/25 test files, 243/243 tests
 npm audit --json                            PASS — exit 0; 0 vulnerabilities at every severity
 git diff --check                            PASS
 package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false

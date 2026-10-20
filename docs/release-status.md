@@ -2,7 +2,7 @@
 
 The codebase is pinned to T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`, CoS `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`, controller protocol 1, ACP SDK 1.9.0, Node 24, Windows x64.
 
-**Current state: version `1.0.0`, but not release-qualified.** The bridge has the production ACP stdio entrypoint, drain-aware event translator, durable/cross-process state and lease implementation, restart/cancellation recovery, hardened controller/SSE/privacy boundary, and metadata-only metrics/logging. Steps 1–7 are recorded PASS for the current implementation/provenance tuple. The pinned live acceptance matrix (Step 8) and current-T3-HEAD drift/release cut (Step 9) remain pending, so `releaseQualified` remains false.
+**Current state: version `1.0.0`, but not release-qualified.** The bridge has the production ACP stdio entrypoint, drain-aware event translator, durable/cross-process state and lease implementation, restart/cancellation recovery, hardened controller/SSE/privacy boundary, and metadata-only metrics/logging. Deterministic Steps 1–6 are recorded PASS for bridge implementation `9f6a70c589ac1ac4831ebde4f3f6d45bc493e3be`. The previous Step-7 live performance PASS was recorded against an earlier implementation and is invalidated pending requalification; Step 8 remains incomplete, including a prior V1-05 failure and V1-11 restart/cancellation failure that must be retested against the fix. The current-T3-HEAD drift/release cut (Step 9) also remains pending, so `releaseQualified` remains false.
 
 ## Supported launcher
 

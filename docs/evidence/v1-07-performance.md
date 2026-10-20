@@ -1,10 +1,12 @@
 Evidence-Schema: 1
 Gate: performance
-Status: PASS
+Status: PENDING
 
 # V1 Step 7 — live single-turn performance qualification
 
 `bridgeImplementationCommit`: `336c701c7fb3da967ef11c6b167da8a266becc46`.
+
+**Historical result only — invalidated.** The measurements below were recorded against the prior implementation commit `336c701c7fb3da967ef11c6b167da8a266becc46`. The CoS restart/cancellation recovery implementation changed at `9f6a70c589ac1ac4831ebde4f3f6d45bc493e3be`; under `PLAN.md`'s implementation-input invalidation rule, this previous PASS does not satisfy the current Step-7 gate. Keep the raw measurements as history, but rerun the current implementation tuple before restoring `Status: PASS`.
 
 Pinned runtime tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc` (browser-extension file stamp separately `a35dccb10b05`); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64. Live turns were exercised through the Chat On Steroids browser conversation named `T3 Code`, not by sending test prompts through the desktop app UI. The paired controller and bridge instrumentation used the isolated qualification profile and state root for run `20261019T215853Z`.
 

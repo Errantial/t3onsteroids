@@ -8,7 +8,7 @@ The first v1 support tuple is:
 
 - T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`;
 - CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`;
-- CoS provider-extension build `0893fbdfe35192f5784f07fc03f97d2ccc235425`;
+- CoS provider-extension build `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`;
 - controller protocol 1 with `provider-project-resolve-v1`, `provider-assistant-content-v1`, `provider-session-policy-v1`, and `provider-turn-drain-v1` all at version 1;
 - `@agentclientprotocol/sdk@1.9.0`;
 - Node 24, Windows x64.
@@ -120,4 +120,4 @@ An installed-candidate lane is also defined in `PLAN.md`, but it is a separate e
 
 The deterministic implementation/source gates are not the final release claim. Steps 7–9 remain responsible for live single-turn performance, the pinned live V1-01…V1-19 matrix, current-T3-HEAD drift, fresh-checkout/package/install verification, final evidence/readiness, and the `v1.0.0` tag.
 
-Until those gates are complete, do not describe the bridge as release-qualified even though its package version is `1.0.0` and the production ACP path is implemented.
+The prior Step-7 PASS was invalidated by bridge implementation commit `9f6a70c589ac1ac4831ebde4f3f6d45bc493e3be`, which changes CoS restart/cancellation recovery; Step 7 must be rerun on this implementation. Steps 8 and 9 remain incomplete. Until those gates are complete, do not describe the bridge as release-qualified even though its package version is `1.0.0` and the production ACP path is implemented.

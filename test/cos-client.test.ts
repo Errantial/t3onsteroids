@@ -300,6 +300,83 @@ describe("CoS protocol-1 controller client", () => {
     ]);
   });
 
+  it("does not open a stale SSE connection when exact Stop races pending discovery", async () => {
+    let resolveOldDiscovery!: (value: CosControllerDiscovery) => void;
+    let signalFirstDiscovery!: () => void;
+    const oldDiscovery = new Promise<CosControllerDiscovery>((resolve) => { resolveOldDiscovery = resolve; });
+    const firstDiscoveryStarted = new Promise<void>((resolve) => { signalFirstDiscovery = resolve; });
+    const discover = vi.fn(async () => {
+      if (discover.mock.calls.length === 1) {
+        signalFirstDiscovery();
+        return oldDiscovery;
+      }
+      return { baseUrl: "http://127.0.0.1:2", token: "new" };
+    });
+    const seen: string[] = [];
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      const text = String(url);
+      seen.push(text);
+      if (text === "http://127.0.0.1:2/v1/sessions/s/stop") return jsonResponse({ live: {} }, 202);
+      if (text === "http://127.0.0.1:2/v1/sessions/s/events/stream") {
+        return new Response('id: 1\nevent: turn_end\ndata: {"seq":1,"position":1,"time":1,"kind":"turn_end","source":"extension","turnId":"t"}\n\n', {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      throw new Error(`unexpected controller endpoint: ${text}`);
+    });
+    const abort = new AbortController();
+    const client = new CosControllerClient(discover, { fetch }, { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 });
+    const stream = client.streamEvents("s", { signal: abort.signal, idleTimeoutMs: 1_000, rolloverMs: 5_000 })[Symbol.asyncIterator]();
+    const firstEvent = stream.next();
+
+    await firstDiscoveryStarted;
+    await expect(client.requestStopExactTurn("s", "t")).resolves.toBeUndefined();
+    resolveOldDiscovery({ baseUrl: "http://127.0.0.1:1", token: "old" });
+    await expect(firstEvent).resolves.toMatchObject({ value: { seq: 1, kind: "turn_end", turnId: "t" }, done: false });
+    abort.abort();
+    await expect(stream.next()).resolves.toMatchObject({ done: true });
+
+    expect(seen).toEqual([
+      "http://127.0.0.1:2/v1/sessions/s/stop",
+      "http://127.0.0.1:2/v1/sessions/s/events/stream",
+    ]);
+    expect(seen.some((url) => url.startsWith("http://127.0.0.1:1/"))).toBe(false);
+  });
+
+  it("bounds a stalled exact-Stop response body and retries only that same target", async () => {
+    const seen: Array<{ url: string; body?: string }> = [];
+    let firstRequestAborted = false;
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push({ url: String(url), ...(typeof init?.body === "string" ? { body: init.body } : {}) });
+      if (fetch.mock.calls.length === 1) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () => {
+              firstRequestAborted = true;
+              try { controller.error(new DOMException("aborted", "AbortError")); } catch { /* already closed */ }
+            }, { once: true });
+          },
+        });
+        return new Response(body, { status: 202, headers: { "Content-Type": "application/json" } });
+      }
+      return jsonResponse({ live: {} }, 202);
+    });
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1, stopRequestTimeoutMs: 10 },
+    );
+
+    await expect(client.requestStopExactTurn("s", "exact-turn")).resolves.toBeUndefined();
+
+    expect(firstRequestAborted).toBe(true);
+    expect(seen).toEqual([
+      { url: "http://127.0.0.1:9/v1/sessions/s/stop", body: JSON.stringify({ turnId: "exact-turn" }) },
+      { url: "http://127.0.0.1:9/v1/sessions/s/stop", body: JSON.stringify({ turnId: "exact-turn" }) },
+    ]);
+  });
+
   it("uses bounded retry/backoff for safe reads", async () => {
     const fetch = vi.fn(async () => {
       if (fetch.mock.calls.length < 3) throw new TypeError("refused");

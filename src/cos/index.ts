@@ -137,6 +137,8 @@ export interface RetryPolicy {
   readonly maxAttempts: number;
   readonly baseDelayMs: number;
   readonly maxDelayMs: number;
+  /** Bounds an exact Stop request including response-body parsing, not just the HTTP headers. */
+  readonly stopRequestTimeoutMs?: number;
 }
 
 export interface CosClientMetrics {
@@ -153,6 +155,7 @@ const DEFAULT_RETRY_POLICY: RetryPolicy = {
   maxAttempts: 3,
   baseDelayMs: 50,
   maxDelayMs: 500,
+  stopRequestTimeoutMs: 10_000,
 };
 const PROVIDER_EXTENSION_READINESS_TTL_MS = 1_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -388,6 +391,8 @@ export class CosControllerClient {
   private discovery: CosControllerDiscovery | undefined;
   private providerExtensionReadiness: { readonly value: CosControllerReadiness; readonly expiresAt: number } | undefined;
   private readonly activeEventStreams = new Map<string, Set<AbortController>>();
+  private readonly eventStreamEpochs = new Map<string, number>();
+  private readonly pendingEventStreams = new Map<string, number>();
   private metricsState = {
     readAttempts: 0,
     readRetries: 0,
@@ -690,24 +695,37 @@ export class CosControllerClient {
     // cached endpoint/token send an exact-turn Stop to the retired controller instance. Repeating
     // Stop for the same exact turn is safe; never substitute a new turn or replay its input.
     const maxAttempts = Math.max(1, Math.min(3, this.retryPolicy.maxAttempts));
+    const timeoutMs = Math.max(1, this.retryPolicy.stopRequestTimeoutMs ?? DEFAULT_RETRY_POLICY.stopRequestTimeoutMs!);
     let lastError: unknown;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       this.discovery = undefined;
       this.providerExtensionReadiness = undefined;
+      const requestController = new AbortController();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        const response = await this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/stop`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ turnId }),
+        const request = (async (): Promise<void> => {
+          const response = await this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/stop`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ turnId }),
+            signal: requestController.signal,
+          });
+          if (response.status !== 202) throw new CosControllerError("schema_mismatch", "Stop response status must be 202");
+          let value: unknown;
+          try {
+            value = await response.json();
+          } catch {
+            throw new CosControllerError("schema_mismatch", "Stop response is malformed JSON");
+          }
+          asRecord(value, "Stop response");
+        })();
+        const timedOut = new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            requestController.abort(new Error("sse_stop_request_timeout"));
+            reject(new CosControllerError("controller_unavailable", "CoS controller Stop request timed out", { retryable: true }));
+          }, timeoutMs);
         });
-        if (response.status !== 202) throw new CosControllerError("schema_mismatch", "Stop response status must be 202");
-        let value: unknown;
-        try {
-          value = await response.json();
-        } catch {
-          throw new CosControllerError("schema_mismatch", "Stop response is malformed JSON");
-        }
-        asRecord(value, "Stop response");
+        await Promise.race([request, timedOut]);
         // The stream reader may currently be blocked waiting for its next event. Wake only this
         // session's stream after the controller has accepted Stop; it reconnects internally from
         // the saved cursor and does not terminate the ACP request or release its lease.
@@ -726,12 +744,19 @@ export class CosControllerClient {
         if (attempt + 1 >= maxAttempts) throw cause;
         const delay = Math.min(this.retryPolicy.baseDelayMs * 2 ** attempt, this.retryPolicy.maxDelayMs);
         await sleep(delay);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
       }
     }
     throw lastError instanceof Error ? lastError : new CosControllerError("controller_unavailable", "CoS controller Stop failed", { retryable: true });
   }
 
   private reconnectEventStreams(sessionId: string, reason: string): void {
+    // Increment even when no reader is registered yet. A stream can be suspended in controller
+    // discovery before it creates its AbortController; its captured epoch prevents it opening a
+    // connection to the endpoint it discovered before this Stop/reconnect boundary.
+    if (!this.activeEventStreams.has(sessionId) && !this.pendingEventStreams.has(sessionId)) return;
+    this.eventStreamEpochs.set(sessionId, (this.eventStreamEpochs.get(sessionId) ?? 0) + 1);
     for (const controller of this.activeEventStreams.get(sessionId) ?? []) {
       if (!controller.signal.aborted) controller.abort(new Error(reason));
     }
@@ -769,151 +794,173 @@ export class CosControllerClient {
     // a socket remains half-open, those heartbeats stop but reader.read() may not reject promptly.
     // Bound that dead connection so a long-lived bridge can discover the restarted endpoint/token.
     const idleTimeoutMs = options.idleTimeoutMs ?? 45_000;
-    while (!options.signal?.aborted) {
-      let streamController: AbortController | undefined;
-      let onAbort: (() => void) | undefined;
-      let rolloverTimer: ReturnType<typeof setTimeout> | undefined;
-      let idleTimer: ReturnType<typeof setTimeout> | undefined;
-      let reader: ReadableStreamDefaultReader<string> | undefined;
-      try {
-        // Every reconnect is a new controller boundary: the app may have restarted and rotated its
-        // endpoint/token even when the previous stream ended without an HTTP error. Discovery can
-        // also be briefly unavailable while the restarted process republishes its files; retry it
-        // under the same bounded backoff instead of terminating the provider driver.
-        const discovery = await this.getDiscovery(connectedOnce);
-        const headers = new Headers({ Accept: "text/event-stream", Authorization: `Bearer ${discovery.token}` });
-        if (cursor !== undefined) headers.set("Last-Event-ID", String(Math.max(0, cursor - 1)));
-        this.metricsState.sseConnectAttempts += 1;
-        if (connectedOnce) this.metricsState.sseReconnects += 1;
-        this.bridgeMetrics?.increment("sseConnectCount");
-        if (connectedOnce) this.bridgeMetrics?.increment("sseReconnectCount");
-        const suffix = cursor === undefined ? "" : `?from=${encodeURIComponent(String(cursor))}`;
-        streamController = new AbortController();
-        let sessionStreams = this.activeEventStreams.get(sessionId);
-        if (!sessionStreams) {
-          sessionStreams = new Set<AbortController>();
-          this.activeEventStreams.set(sessionId, sessionStreams);
-        }
-        sessionStreams.add(streamController);
-        onAbort = () => streamController!.abort(options.signal?.reason);
-        options.signal?.addEventListener("abort", onAbort, { once: true });
-        rolloverTimer = setTimeout(() => {
-          this.discovery = undefined;
-          this.providerExtensionReadiness = undefined;
-          streamController!.abort(new Error("sse_rollover"));
-        }, rolloverMs);
-        const resetIdleTimer = (): void => {
-          if (idleTimer !== undefined) clearTimeout(idleTimer);
-          idleTimer = setTimeout(() => {
+    this.pendingEventStreams.set(sessionId, (this.pendingEventStreams.get(sessionId) ?? 0) + 1);
+    try {
+      while (!options.signal?.aborted) {
+        let streamController: AbortController | undefined;
+        let onAbort: (() => void) | undefined;
+        let rolloverTimer: ReturnType<typeof setTimeout> | undefined;
+        let idleTimer: ReturnType<typeof setTimeout> | undefined;
+        let reader: ReadableStreamDefaultReader<string> | undefined;
+        try {
+          // Every reconnect is a new controller boundary: the app may have restarted and rotated its
+          // endpoint/token even when the previous stream ended without an HTTP error. Discovery can
+          // also be briefly unavailable while the restarted process republishes its files; retry it
+          // under the same bounded backoff instead of terminating the provider driver.
+          const connectionEpoch = this.eventStreamEpochs.get(sessionId) ?? 0;
+          const discovery = await this.getDiscovery(connectedOnce);
+          if (options.signal?.aborted) return;
+          if (connectionEpoch !== (this.eventStreamEpochs.get(sessionId) ?? 0)) {
             this.discovery = undefined;
             this.providerExtensionReadiness = undefined;
-            streamController!.abort(new Error("sse_idle_timeout"));
-          }, idleTimeoutMs);
-        };
-        resetIdleTimer();
-        const requestInit: RequestInit = { headers, signal: streamController.signal };
-        const response = await this.transport.fetch(`${discovery.baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/events/stream${suffix}`, requestInit);
-        if (!response.ok) throw mapHttpError(response.status, undefined);
-        if (!response.body) throw new CosControllerError("controller_unavailable", "SSE response has no body", { retryable: true });
-        connectedOnce = true;
-        reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-        let buffer = "";
-        let sawEvent = false;
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (value.length > 0) resetIdleTimer();
-          buffer += value;
-          let boundary: number;
+            continue;
+          }
+          const headers = new Headers({ Accept: "text/event-stream", Authorization: `Bearer ${discovery.token}` });
+          if (cursor !== undefined) headers.set("Last-Event-ID", String(Math.max(0, cursor - 1)));
+          this.metricsState.sseConnectAttempts += 1;
+          if (connectedOnce) this.metricsState.sseReconnects += 1;
+          this.bridgeMetrics?.increment("sseConnectCount");
+          if (connectedOnce) this.bridgeMetrics?.increment("sseReconnectCount");
+          const suffix = cursor === undefined ? "" : `?from=${encodeURIComponent(String(cursor))}`;
+          streamController = new AbortController();
+          let sessionStreams = this.activeEventStreams.get(sessionId);
+          if (!sessionStreams) {
+            sessionStreams = new Set<AbortController>();
+            this.activeEventStreams.set(sessionId, sessionStreams);
+          }
+          sessionStreams.add(streamController);
+          onAbort = () => streamController!.abort(options.signal?.reason);
+          options.signal?.addEventListener("abort", onAbort, { once: true });
+          rolloverTimer = setTimeout(() => {
+            this.discovery = undefined;
+            this.providerExtensionReadiness = undefined;
+            streamController!.abort(new Error("sse_rollover"));
+          }, rolloverMs);
+          const resetIdleTimer = (): void => {
+            if (idleTimer !== undefined) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+              this.discovery = undefined;
+              this.providerExtensionReadiness = undefined;
+              streamController!.abort(new Error("sse_idle_timeout"));
+            }, idleTimeoutMs);
+          };
+          resetIdleTimer();
+          const requestInit: RequestInit = { headers, signal: streamController.signal };
+          const response = await this.transport.fetch(`${discovery.baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/events/stream${suffix}`, requestInit);
+          if (streamController.signal.aborted || connectionEpoch !== (this.eventStreamEpochs.get(sessionId) ?? 0)) {
+            try { await response.body?.cancel(); } catch { /* the invalidated connection is not consumed */ }
+            continue;
+          }
+          if (!response.ok) throw mapHttpError(response.status, undefined);
+          if (!response.body) throw new CosControllerError("controller_unavailable", "SSE response has no body", { retryable: true });
+          connectedOnce = true;
+          reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+          let buffer = "";
+          let sawEvent = false;
           for (;;) {
-            const lf = buffer.indexOf("\n\n");
-            const crlf = buffer.indexOf("\r\n\r\n");
-            if (lf < 0 && crlf < 0) break;
-            const useCrlf = crlf >= 0 && (lf < 0 || crlf < lf);
-            boundary = useCrlf ? crlf : lf;
-            const separatorLength = useCrlf ? 4 : 2;
-            const frame = buffer.slice(0, boundary).replace(/\r/g, "");
-            buffer = buffer.slice(boundary + separatorLength);
-            let id: number | undefined;
-            let eventName: string | undefined;
-            const dataLines: string[] = [];
-            for (const line of frame.split("\n")) {
-              if (line.startsWith("id:")) id = Number(line.slice(3).trim());
-              else if (line.startsWith("event:")) eventName = line.slice(6).trim();
-              else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value.length > 0) resetIdleTimer();
+            buffer += value;
+            let boundary: number;
+            for (;;) {
+              const lf = buffer.indexOf("\n\n");
+              const crlf = buffer.indexOf("\r\n\r\n");
+              if (lf < 0 && crlf < 0) break;
+              const useCrlf = crlf >= 0 && (lf < 0 || crlf < lf);
+              boundary = useCrlf ? crlf : lf;
+              const separatorLength = useCrlf ? 4 : 2;
+              const frame = buffer.slice(0, boundary).replace(/\r/g, "");
+              buffer = buffer.slice(boundary + separatorLength);
+              let id: number | undefined;
+              let eventName: string | undefined;
+              const dataLines: string[] = [];
+              for (const line of frame.split("\n")) {
+                if (line.startsWith("id:")) id = Number(line.slice(3).trim());
+                else if (line.startsWith("event:")) eventName = line.slice(6).trim();
+                else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+              }
+              if (dataLines.length === 0) continue;
+              // CoS uses an unnumbered `event: end` control frame to retire an SSE connection
+              // (max lifetime, controller stop/error, slow consumer, etc.). It is not a session
+              // event and therefore has no seq/position/time/kind/source fields. Treat it as a
+              // reconnect boundary; the next request resumes from the exact last event cursor.
+              if (eventName === "end") continue;
+              let parsed: unknown;
+              try {
+                parsed = JSON.parse(dataLines.join("\n"));
+              } catch {
+                throw new CosControllerError("schema_mismatch", "SSE event data is malformed JSON");
+              }
+              const row = asRecord(parsed, "SSE event");
+              const event: CosEvent = {
+                ...row,
+                seq: asNumber(row.seq ?? id, "SSE event.seq"),
+                position: asNumber(row.position, "SSE event.position"),
+                time: asNumber(row.time, "SSE event.time"),
+                kind: asString(row.kind, "SSE event.kind"),
+                source: asString(row.source, "SSE event.source"),
+                turnId: optionalString(row.turnId, "SSE event.turnId"),
+              };
+              cursor = event.seq + 1;
+              sawEvent = true;
+              yield event;
             }
-            if (dataLines.length === 0) continue;
-            // CoS uses an unnumbered `event: end` control frame to retire an SSE connection
-            // (max lifetime, controller stop/error, slow consumer, etc.). It is not a session
-            // event and therefore has no seq/position/time/kind/source fields. Treat it as a
-            // reconnect boundary; the next request resumes from the exact last event cursor.
-            if (eventName === "end") continue;
-            let parsed: unknown;
-            try {
-              parsed = JSON.parse(dataLines.join("\n"));
-            } catch {
-              throw new CosControllerError("schema_mismatch", "SSE event data is malformed JSON");
-            }
-            const row = asRecord(parsed, "SSE event");
-            const event: CosEvent = {
-              ...row,
-              seq: asNumber(row.seq ?? id, "SSE event.seq"),
-              position: asNumber(row.position, "SSE event.position"),
-              time: asNumber(row.time, "SSE event.time"),
-              kind: asString(row.kind, "SSE event.kind"),
-              source: asString(row.source, "SSE event.source"),
-              turnId: optionalString(row.turnId, "SSE event.turnId"),
-            };
-            cursor = event.seq + 1;
-            sawEvent = true;
-            yield event;
+          }
+          if (rolloverTimer !== undefined) clearTimeout(rolloverTimer);
+          if (idleTimer !== undefined) clearTimeout(idleTimer);
+          options.signal?.removeEventListener("abort", onAbort);
+          if (options.signal?.aborted) return;
+          reconnectAttempt = sawEvent ? 0 : reconnectAttempt + 1;
+          this.metricsState.sseBackoffs += 1;
+          this.bridgeMetrics?.increment("backoffCount");
+          const exponential = Math.min(this.retryPolicy.baseDelayMs * 2 ** Math.max(0, reconnectAttempt - 1), this.retryPolicy.maxDelayMs);
+          const jitter = Math.floor(exponential * 0.2 * Math.random());
+          await sleep(Math.min(this.retryPolicy.maxDelayMs, exponential + jitter));
+        } catch (cause) {
+          if (options.signal?.aborted) return;
+          if (cause instanceof CosControllerError && cause.code !== "controller_auth_changed" && !cause.retryable) throw cause;
+          // Every failed stream attempt must discard discovery: even a clean-looking transport
+          // failure may be the old controller disappearing during a restart/token rotation.
+          this.discovery = undefined;
+          this.providerExtensionReadiness = undefined;
+          reconnectAttempt += 1;
+          this.metricsState.sseBackoffs += 1;
+          this.bridgeMetrics?.increment("backoffCount");
+          const exponential = Math.min(
+            this.retryPolicy.baseDelayMs * 2 ** Math.max(0, reconnectAttempt - 1),
+            this.retryPolicy.maxDelayMs,
+          );
+          const jitter = Math.floor(exponential * 0.2 * Math.random());
+          await sleep(Math.min(this.retryPolicy.maxDelayMs, exponential + jitter));
+        } finally {
+          if (rolloverTimer !== undefined) clearTimeout(rolloverTimer);
+          if (idleTimer !== undefined) clearTimeout(idleTimer);
+          if (onAbort) options.signal?.removeEventListener("abort", onAbort);
+          // A provider-turn consumer normally returns as soon as the authoritative drain has been
+          // emitted and acknowledged. Async-generator return does not automatically cancel this
+          // nested fetch body, so without an explicit finally every completed turn can leave one
+          // held CoS event stream behind until its 30-minute server lifetime expires. Closing both
+          // sides here frees the controller's bounded stream slot immediately on terminal return.
+          if (streamController && !streamController.signal.aborted) streamController.abort(new Error("sse_consumer_closed"));
+          if (reader) {
+            try { await reader.cancel(); } catch { /* the abort above may already have closed it */ }
+            try { reader.releaseLock(); } catch { /* an already-closed reader may have no lock */ }
+          }
+          if (streamController) {
+            const sessionStreams = this.activeEventStreams.get(sessionId);
+            sessionStreams?.delete(streamController);
+            if (sessionStreams?.size === 0) this.activeEventStreams.delete(sessionId);
           }
         }
-        if (rolloverTimer !== undefined) clearTimeout(rolloverTimer);
-        if (idleTimer !== undefined) clearTimeout(idleTimer);
-        options.signal?.removeEventListener("abort", onAbort);
-        if (options.signal?.aborted) return;
-        reconnectAttempt = sawEvent ? 0 : reconnectAttempt + 1;
-        this.metricsState.sseBackoffs += 1;
-        this.bridgeMetrics?.increment("backoffCount");
-        const exponential = Math.min(this.retryPolicy.baseDelayMs * 2 ** Math.max(0, reconnectAttempt - 1), this.retryPolicy.maxDelayMs);
-        const jitter = Math.floor(exponential * 0.2 * Math.random());
-        await sleep(Math.min(this.retryPolicy.maxDelayMs, exponential + jitter));
-      } catch (cause) {
-        if (options.signal?.aborted) return;
-        if (cause instanceof CosControllerError && cause.code !== "controller_auth_changed" && !cause.retryable) throw cause;
-        // Every failed stream attempt must discard discovery: even a clean-looking transport
-        // failure may be the old controller disappearing during a restart/token rotation.
-        this.discovery = undefined;
-        this.providerExtensionReadiness = undefined;
-        reconnectAttempt += 1;
-        this.metricsState.sseBackoffs += 1;
-        this.bridgeMetrics?.increment("backoffCount");
-        const exponential = Math.min(
-          this.retryPolicy.baseDelayMs * 2 ** Math.max(0, reconnectAttempt - 1),
-          this.retryPolicy.maxDelayMs,
-        );
-        const jitter = Math.floor(exponential * 0.2 * Math.random());
-        await sleep(Math.min(this.retryPolicy.maxDelayMs, exponential + jitter));
-      } finally {
-        if (rolloverTimer !== undefined) clearTimeout(rolloverTimer);
-        if (idleTimer !== undefined) clearTimeout(idleTimer);
-        if (onAbort) options.signal?.removeEventListener("abort", onAbort);
-        // A provider-turn consumer normally returns as soon as the authoritative drain has been
-        // emitted and acknowledged. Async-generator return does not automatically cancel this
-        // nested fetch body, so without an explicit finally every completed turn can leave one
-        // held CoS event stream behind until its 30-minute server lifetime expires. Closing both
-        // sides here frees the controller's bounded stream slot immediately on terminal return.
-        if (streamController && !streamController.signal.aborted) streamController.abort(new Error("sse_consumer_closed"));
-        if (reader) {
-          try { await reader.cancel(); } catch { /* the abort above may already have closed it */ }
-          try { reader.releaseLock(); } catch { /* an already-closed reader may have no lock */ }
-        }
-        if (streamController) {
-          const sessionStreams = this.activeEventStreams.get(sessionId);
-          sessionStreams?.delete(streamController);
-          if (sessionStreams?.size === 0) this.activeEventStreams.delete(sessionId);
-        }
+      }
+    } finally {
+      const remaining = (this.pendingEventStreams.get(sessionId) ?? 1) - 1;
+      if (remaining > 0) {
+        this.pendingEventStreams.set(sessionId, remaining);
+      } else {
+        this.pendingEventStreams.delete(sessionId);
+        if ((this.activeEventStreams.get(sessionId)?.size ?? 0) === 0) this.eventStreamEpochs.delete(sessionId);
       }
     }
   }

@@ -49,10 +49,10 @@ describe("Phase 7 release readiness", () => {
       t3Pinned: true,
       cosPinned: true,
       controllerProtocol: 1,
-      productionAcpEntrypoint: true,
-      cosProviderExtensionReady: true,
-      eventTranslatorReady: true,
-      durableRecoveryReady: true,
+      productionAcpEntrypoint: v1ReleaseGateManifest.gates.acpStdio.status === "pass",
+      cosProviderExtensionReady: v1ReleaseGateManifest.gates.cosProviderExtension.status === "pass",
+      eventTranslatorReady: v1ReleaseGateManifest.gates.eventTranslator.status === "pass",
+      durableRecoveryReady: v1ReleaseGateManifest.gates.durableRecovery.status === "pass",
     });
     expect(readiness.liveAcceptanceRequired).toBe(v1ReleaseGateManifest.gates.liveAcceptance.status !== "pass");
     expect(readiness.currentHeadDriftRequired).toBe(v1ReleaseGateManifest.gates.t3HeadDrift.status !== "pass");

@@ -4,11 +4,11 @@ Status: PASS
 
 # V1 Step 5 — controller/privacy hardening
 
-`bridgeImplementationCommit`: `b4fb45d5b1ae6683d2b42e71589e207ff2f662dd`.
+`bridgeImplementationCommit`: `32db15baa1961e6fd1e16135ed18ee6e59b322f8`.
 
-`evidenceCommit`: `b4fb45d5b1ae6683d2b42e71589e207ff2f662dd` (implementation commit used as the evidence-refresh base; later evidence-only commits do not change `bridgeImplementationCommit`).
+`evidenceCommit`: `32db15baa1961e6fd1e16135ed18ee6e59b322f8` (implementation commit used as the evidence-refresh base; later evidence-only commits do not change `bridgeImplementationCommit`).
 
-Pinned external tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `4a32b82499af82948580235b3d1c66f2e84ad762` (browser-extension stamp `ecc2a76d317a` is tracked separately in Step-1/live-candidate provenance); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
+Pinned external tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `9ef2da538654c651dd3853890816f8a21b93fe08`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
 Production admission readiness is fail-closed and refreshed for each new admission rather than reusing a prior successful health snapshot. The readiness boundary validates the exact pinned provider-extension build identity and all five required v1 feature versions, requires the production action routes for input, pending-input cancel, and exact-turn Stop, and the ACP runtime separately rejects actions-disabled. Bound sessions also require a fresh enforced `backgroundWork=disabled` policy attestation. Setup diagnostics derive extension identity, actions, and required routes from one health snapshot, avoiding stale cross-snapshot mixing, and exact project resolution remains explicit.
 
@@ -26,7 +26,7 @@ npm audit --json
 git diff --check
 ```
 
-Current exact-tuple bridge validation: `npm run verify` PASS with `25/25` test files and `243/243` tests; fresh `npm audit --json` exits `0` with `0` vulnerabilities at every severity; fresh `git diff --check` PASS. Package smoke reports `bridgeVersion:1.0.0`, supported concurrency `1`, and `releaseQualified:false`. Final CoS source verification on provider build `4a32b82499af82948580235b3d1c66f2e84ad762` is also green: bulk `354` files / `6639` tests passed, serialized heavy lane `11` files / `2436` tests passed, and isolated renderer-state `1` file / `132` tests passed. Live setup diagnostics must be re-observed after the live candidate is safely reconciled to the final provider identity; no stale live `ready:true` claim is promoted here. Live Step 7/8 evidence remains invalidated for this implementation tuple.
+Current exact-tuple bridge validation: fresh `npm ci` PASS; `npm run verify` PASS with `25/25` test files and `243/243` tests; fresh `npm audit --json` exits `0` with `0` vulnerabilities at every severity; fresh `git diff --check` PASS. Package smoke reports `bridgeVersion:1.0.0`, supported concurrency `1`, and `releaseQualified:false`. Final CoS source verification on provider build `9ef2da538654c651dd3853890816f8a21b93fe08` is also green: bulk `351` files passed / `5` skipped with `6621` tests passed / `46` skipped, serialized heavy lane `14` files / `2454` tests passed / `4` skipped, and isolated renderer-state `1` file / `132` tests passed. Live setup diagnostics must be re-observed after the corrected portable candidate is safely launched on the preserved profile; no stale live `ready:true` claim is promoted here. Live Step 7/8 evidence remains invalidated for this implementation tuple.
 
 No prompt text, assistant text, tool bodies/results, browser content, tokens, authorization headers, raw controller configuration, or private filesystem paths are recorded in this evidence summary or required by the metadata-only metrics/logging contract.
 

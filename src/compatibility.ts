@@ -15,7 +15,7 @@ export const compatibility = {
     controlApiProtocol: 1,
     providerExtension: {
       apiVersion: 1,
-      buildId: "0e755281cae0f87084293e4a735cc27744691a64",
+      buildId: "e5157983c6b5cbc7a9a1fc77c0822d452ab52d2f",
       features: {
         "provider-project-resolve-v1": 1,
         "provider-assistant-content-v1": 1,

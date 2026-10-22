@@ -4,11 +4,11 @@ Status: PASS
 
 # V1 Step 2 — event translator and terminal semantics
 
-`bridgeImplementationCommit`: `32db15baa1961e6fd1e16135ed18ee6e59b322f8`.
+`bridgeImplementationCommit`: `a4262c02ad5ffc828d05f12d3f6337c842ddf595`.
 
-`evidenceCommit`: `32db15baa1961e6fd1e16135ed18ee6e59b322f8` (implementation commit used as the evidence-refresh base; later evidence-only commits do not change `bridgeImplementationCommit`).
+`evidenceCommit`: `a4262c02ad5ffc828d05f12d3f6337c842ddf595` (implementation commit used as the evidence-refresh base; later evidence-only commits do not change `bridgeImplementationCommit`).
 
-Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `9ef2da538654c651dd3853890816f8a21b93fe08`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64. Browser-extension/package identity is tracked separately and must be refreshed after the corrected provider is packaged.
+Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `2d4cf84c8d665e767d5caa1a360ade8880567d61`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64. Browser-extension/package identity is tracked separately and must be refreshed after the corrected provider is packaged.
 
 Validated production translator behavior includes monotonic cursor/dedupe handling; no assistant prose before authoritative drain; exact `finalAssistantSeq` selection with bounded ranged full-content delivery and resumable chunk acknowledgement; UTF-16-safe range advancement; tool/page projection without raw bodies; late old-turn activity before terminal; handoff continuity; stale-generation and malformed/post-drain fail-closed handling; cancellation-through-drain; and fresh background-policy attestation before terminal acceptance. The controller driver completes the same lifecycle through the typed production controller surface and resumes safely across delivery/persistence interruption points.
 
@@ -23,4 +23,4 @@ git diff --check                            PASS
 package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false
 ```
 
-This evidence supports only the deterministic `eventTranslator` gate for this exact implementation tuple. Step 1 records the final CoS source build separately; its final `npm run verify` is green on provider build `9ef2da538654c651dd3853890816f8a21b93fe08`. Live Step 7/8 evidence remains invalidated for this implementation identity; this deterministic suite does not promote it. `releaseQualified` remains false.
+This evidence supports only the deterministic `eventTranslator` gate for this exact implementation tuple. Step 1 records the final CoS source build separately; its final `npm run verify` is green on provider build `2d4cf84c8d665e767d5caa1a360ade8880567d61`. Live Step 7/8 evidence remains invalidated for this implementation identity; this deterministic suite does not promote it. `releaseQualified` remains false.

@@ -121,6 +121,7 @@ class FakeCos {
         "provider-assistant-content-v1": 1,
         "provider-session-policy-v1": 1,
         "provider-turn-drain-v1": 1,
+        "provider-turn-recovery-v1": 1,
       };
       if (this.missingProviderFeature) delete features[this.missingProviderFeature];
       json(res, 200, {

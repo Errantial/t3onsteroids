@@ -15,12 +15,13 @@ export const compatibility = {
     controlApiProtocol: 1,
     providerExtension: {
       apiVersion: 1,
-      buildId: "76fe2e7f3236e2ae2ffd4ec4606759909257fd69",
+      buildId: "4a32b82499af82948580235b3d1c66f2e84ad762",
       features: {
         "provider-project-resolve-v1": 1,
         "provider-assistant-content-v1": 1,
         "provider-session-policy-v1": 1,
         "provider-turn-drain-v1": 1,
+        "provider-turn-recovery-v1": 1,
       },
     },
   },

@@ -20,6 +20,7 @@ const readiness: CosControllerReadiness = {
     "provider-assistant-content-v1": 1,
     "provider-session-policy-v1": 1,
     "provider-turn-drain-v1": 1,
+    "provider-turn-recovery-v1": 1,
   },
   providerExtension: { apiVersion: 1, buildId: compatibility.cos.providerExtension.buildId },
 };

@@ -10,6 +10,7 @@ export const COS_PROVIDER_EXTENSION_FEATURES = {
   assistantContent: "provider-assistant-content-v1",
   sessionPolicy: "provider-session-policy-v1",
   turnDrain: "provider-turn-drain-v1",
+  turnRecovery: "provider-turn-recovery-v1",
 } as const;
 export const COS_REQUIRED_ACTION_ROUTES = [
   "POST /v1/inputs",

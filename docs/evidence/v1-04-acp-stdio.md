@@ -4,9 +4,11 @@ Status: PASS
 
 # V1 Step 4 — production ACP stdio provider
 
-`bridgeImplementationCommit`: `ef2548b817fe9318ac238e84d0ab39fd65258940`.
+`bridgeImplementationCommit`: `69f00277698e6e1fc36914c4fa8992b5f79ebbc5`.
 
-Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc` (browser-extension file stamp is tracked separately in Step-1/live-candidate provenance); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
+`evidenceCommit`: `69f00277698e6e1fc36914c4fa8992b5f79ebbc5` (implementation commit used as the evidence-refresh base; later evidence-only commits do not change `bridgeImplementationCommit`).
+
+Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `76fe2e7f3236e2ae2ffd4ec4606759909257fd69` (browser-extension file stamp is tracked separately in Step-1/live-candidate provenance); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
 The shipped built `node.exe + dist/cli/index.js` lane is covered through the real stdio ACP path against the deterministic protocol-1+extension controller boundary. Validation covers stable ACP v1 negotiation, side-effect-free initialize/session allocation and provider validation, lazy exact-session creation, prompt/update/terminal flow held open through authoritative `turn_drained`, late activity ordering, exact active-turn Stop, pending-cancel race conversion, first-input `pending` remaining provisional until exact `sent`/turn proof, cancellation settlement only after authoritative non-delivery/drain proof, healthy durable restart/resume without replacement input, and unknown/corrupt resume quarantine without CoS mutation.
 
@@ -21,4 +23,4 @@ git diff --check                            PASS
 package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false
 ```
 
-This Step-4 result and the Step-8 scenarios above are deterministic production-path evidence against the repaired `providerExtension` build, not browser/live acceptance. The Step-1 summary explicitly does not claim a full-CoS-verify PASS. Live Step 7/8 evidence remains invalidated for this implementation identity; these deterministic scenarios do not promote it. Overall `releaseQualified` remains false.
+This Step-4 result and the Step-8 scenarios above are deterministic production-path evidence against the repaired `providerExtension` build, not browser/live acceptance. Step 1 records the final provider source verification separately and it is green on build `76fe2e7f3236e2ae2ffd4ec4606759909257fd69`. Live Step 7/8 evidence remains invalidated for this implementation identity; these deterministic scenarios do not promote it. Overall `releaseQualified` remains false.

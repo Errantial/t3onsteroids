@@ -4,33 +4,33 @@ Status: PASS
 
 # V1 Step 1 — CoS provider extension
 
-The original CoS source/build qualification was recorded alongside bridge implementation `336c701c7fb3da967ef11c6b167da8a266becc46` (historical). This gate qualifies the external CoS provider-extension build below; it remains valid for current bridge implementation `9f6a70c589ac1ac4831ebde4f3f6d45bc493e3be` because the pinned provider-extension build id and all four feature versions are unchanged. Steps 2–9 record the current bridge implementation identity separately.
+`bridgeImplementationCommit`: `69f00277698e6e1fc36914c4fa8992b5f79ebbc5`.
 
-Final CoS `providerExtension` build identity: `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`, produced from the repaired CoS `2.1.39` lineage based on upstream source `87ae9d631f82d8da2f462d910410031ad8f97ac5`. This server/provider-extension build id is intentionally distinct from the browser-extension file stamp, which remains `a35dccb10b05` for the qualified candidate.
+Pinned CoS base remains `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`. Final provider-extension source/build identity for V1 is `76fe2e7f3236e2ae2ffd4ec4606759909257fd69`.
 
-The qualified repair lineage after the migrated provider-extension work is: `e571a421` (`Protect closing provider turns from idle tab cleanup`) -> `e7e41572` (`Recover provider drain from transient terminal null`) -> `9056ddc0` (`Cache validated project catalog`) -> `3bd1d77b` (`Avoid duplicate provider project canonicalization`) -> `600bd789` (`Retry transient provider terminal proof`) -> `4d8ea6ac` (`Bound provider terminal proof transport`) -> `73e52028` (`Retry transient provider terminal transport`). The `e571a421` repair protects only durable provider turns in exact `closing` state from idle/blocked browser cleanup until they become `drained`, `not_sent`, or `broken`. The subsequent drain repairs recover from transient terminal-null/transport reads without substituting a timeout or silence heuristic for authoritative drain, while the project repairs cache and reuse validated canonical project state instead of repeatedly canonicalizing the same catalog entry.
+The preserved historical source baseline was `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`, which contained the earlier provider drain/project/terminal-transport repairs. The current lineage adds the production exact-Stop-after-restart repair at `61d111f6940b74e5134986a12b53e7ef1f216328`, followed only by verification/test-isolation hardening through `c80222e4`, `e27c7511`, `654827ba`, `a6e4cf19`, `7772c7b0`, `f5287df9`, and final `76fe2e7f`. Those later commits do not relax exact-turn, Stop, deadline, question-anchor, background-work, terminal, or drain authority.
 
-The final extension advertises provider-extension API version `1`, clean build id `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`, and all four required feature ids at version `1`:
+The final provider extension advertises API version `1` and all four required feature ids at version `1`:
 
 - `provider-project-resolve-v1`: `1`
 - `provider-assistant-content-v1`: `1`
 - `provider-session-policy-v1`: `1`
 - `provider-turn-drain-v1`: `1`
 
-Source validation observed for this exact `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc` repair:
+Final source verification on `76fe2e7f3236e2ae2ffd4ec4606759909257fd69`:
 
-- targeted timed-out terminal-only regression: `1/1` PASS;
-- `test/provider-turn-drain.test.ts` + `test/projects.test.ts` + `test/control-api-reads.test.ts`: `101/101` PASS;
-- `npm run typecheck`: PASS;
-- `npm run build`: PASS;
-- `git diff --check`: PASS.
+```text
+npm run verify                              PASS — exit 0
+bulk Vitest lane                            PASS — 354 files, 6634 tests; 46 skipped tests
+serialized heavy lane                       PASS — 11 files, 2423 tests; 4 skipped tests
+isolated renderer-state lane                PASS — 1 file, 132 tests
+typecheck / privacy / notices prechecks     PASS as part of npm run verify
+```
 
-The idle-close failure was a real lifecycle retention defect, not a bridge restart shortcut: a chat could reach `activeTurnId=null` while its durable provider turn was still `closing`, allowing the 300-second idle cleanup to close the browser document before `turn_drained`. On reopen, the intentionally fail-closed recovery path then rewrote that unreconciled closing provider turn to `broken`. Later Step-7 timing exposed another real terminal-proof transport tail (`1992 ms` native drain at the previous `4d8ea6ac` candidate); `73e52028` is the scoped follow-up that retries transient provider terminal transport while preserving the bounded authoritative proof contract.
+The recurring `gpt-5.6-pro` automatic-Continue boundary and the native-work Stop-revocation case both pass in the final `input-delivery-integration.test.ts` run (`290/290`). `content-script.test.ts` passes `926/926`, `bridge.test.ts` passes `694/694`, `public-history-privacy.test.ts` passes `23/23`, `worktrees-manager.test.ts` passes `41/41`, and `renderer-state.test.ts` passes `132/132` in its isolated verification lane. The failures that motivated the runner changes were classified as cross-suite load/timing or fixture isolation issues; no acceptance assertion was weakened.
 
-Full CoS `npm run verify` is **not claimed as PASS** for this qualification evidence. The exact focused `73e52028` results above are the supported source-validation record; no later checkout or unrelated full-suite outcome should be inferred as qualified from this summary.
+Browser-extension file identity is separate from the provider-extension build id. The currently running pinned `2.1.39` live candidate was previously proven to materialize browser-extension stamp `45ee28157713` from the packaged `73e52028` candidate. That live observation does **not** claim that provider build `76fe2e7f` is already installed in the running app. Live preflight must reconcile the running candidate to the final provider identity before Step 7/8 can pass.
 
-No provider feature was disabled or downgraded, no production assertion was relaxed, and the browser-extension stamp `a35dccb10b05` must not be confused with the repaired server/providerExtension build id `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`.
+The CoS dependency audit was not rerun as part of this provider-source requalification. The prior non-zero CoS audit disposition remains a release item and is not converted into a zero-vulnerability claim by this evidence.
 
-CoS dependency audit disposition is explicitly non-zero and is not represented as a clean audit. Current `npm audit` reports `14` total findings: `6` high, `8` moderate, and `0` critical. High findings include direct `@modelcontextprotocol/client@2.1.0` advisory `GHSA-6qxp-vccf-f47h` (`fixAvailable`), direct `sharp@0.35.4` advisory `GHSA-wq5f-xc86-pv6w` (fixed by `0.35.5`), and `@anthropic-ai/mcpb@2.1.2` through `node-forge@1.4.0` advisory `GHSA-86w9-cpqp-85rv` (`fixAvailable=false`), plus high `http-cache-semantics` / `source-map-js` findings. Moderate findings include the inherited `electron-builder` / `global-agent` dependency chain. These are inherited CoS dependency findings, are not silently ignored by this evidence, and remain an explicit release disposition item rather than being hidden behind a false zero-vulnerability claim.
-
-This source evidence pins the server-side extension implementation and wire-contract build identity. It does not by itself claim live installation, replacement of the user's active CoS application, or Step-7/Step-8 live acceptance.
+This gate is source/provider-extension qualification only. It does not claim live installation, browser pairing, candidate replacement, Step-7 performance, or Step-8 acceptance. Overall `releaseQualified` remains false.

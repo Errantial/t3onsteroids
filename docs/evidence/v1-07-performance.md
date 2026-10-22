@@ -4,11 +4,13 @@ Status: PENDING
 
 # V1 Step 7 — live single-turn performance qualification
 
-`bridgeImplementationCommit`: `ef2548b817fe9318ac238e84d0ab39fd65258940`.
+`bridgeImplementationCommit`: `69f00277698e6e1fc36914c4fa8992b5f79ebbc5`.
 
-**Historical result only — invalidated.** The measurements below were recorded against prior implementation commit `336c701c7fb3da967ef11c6b167da8a266becc46`. Exact-Stop recovery changed at `9f6a70c589ac1ac4831ebde4f3f6d45bc493e3be` and was further hardened for in-flight discovery races and stalled response bodies at `ef2548b817fe9318ac238e84d0ab39fd65258940`. Under `PLAN.md`'s implementation-input invalidation rule, the old PASS does not satisfy the current Step-7 gate. Keep the raw measurements as history, but rerun the current implementation tuple before restoring `Status: PASS`.
+`evidenceCommit`: `69f00277698e6e1fc36914c4fa8992b5f79ebbc5` (implementation commit used as the current evidence-refresh base; historical live artifacts retain their own evidence commits).
 
-Pinned runtime tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc` (browser-extension file stamp is tracked separately in Step-1/live-candidate provenance); ACP SDK `1.9.0`; Node `24.21.0`; Windows x64. Live turns were exercised through the Chat On Steroids browser conversation named `T3 Code`, not by sending test prompts through the desktop app UI. The paired controller and bridge instrumentation used the isolated qualification profile and state root for run `20261019T215853Z`.
+**Historical result only — invalidated.** The measurements below were recorded against prior implementation commit `336c701c7fb3da967ef11c6b167da8a266becc46`. Exact-Stop and recovery behavior changed after that run, and the current implementation identity is now `69f00277698e6e1fc36914c4fa8992b5f79ebbc5`. Under `PLAN.md`'s implementation-input invalidation rule, the old PASS does not satisfy the current Step-7 gate. Keep the raw measurements as history, but rerun the current implementation tuple before restoring `Status: PASS`.
+
+Target pinned runtime tuple for the rerun: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `76fe2e7f3236e2ae2ffd4ec4606759909257fd69`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64. The historical turns below were exercised through the Chat On Steroids browser conversation named `T3 Code`, not by sending test prompts through the desktop app UI. Their raw artifacts remain preserved under the old tuple and do not count for the current gate.
 
 ## Short-turn measurements
 
@@ -43,4 +45,4 @@ git diff --check                            PASS
 Step-7 combined evaluator                   PASS — 10 bridged + 10 direct
 ```
 
-Current implementation validation at `ef2548b817fe9318ac238e84d0ab39fd65258940`: `npm run verify` PASS — 25/25 test files, 243/243 tests, including typecheck, lint, build and package smoke; `git diff --check` PASS. This is deterministic source/build evidence only and does not refresh the older live measurements. The combined evaluator output remains historical; Step 7 stays pending until a fresh live run is safe. The pinned V1-01…V1-19 acceptance matrix and Step-9 current-T3-HEAD drift/release preparation remain separate gates; overall release qualification remains false.
+Current implementation validation at `69f00277698e6e1fc36914c4fa8992b5f79ebbc5`: clean `npm ci` PASS; `npm run verify` PASS — 25/25 test files, 243/243 tests, including typecheck, lint, build and package smoke; `npm audit --json` exits 0 with zero vulnerabilities; `git diff --check` PASS. Final provider-source verification at `76fe2e7f3236e2ae2ffd4ec4606759909257fd69` also exits 0. This is deterministic source/build evidence only and does not refresh the older live measurements. The running pinned CoS candidate must still be safely reconciled from its currently installed provider identity to the final provider build, and its staged `2.1.44` updater hazard must be neutralized or isolated before any restart can count. The combined evaluator output remains historical; Step 7 stays pending until a fresh live run is safe. The pinned V1-01…V1-19 acceptance matrix and Step-9 current-T3-HEAD drift/release preparation remain separate gates; overall release qualification remains false.

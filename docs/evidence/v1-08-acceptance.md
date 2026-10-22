@@ -4,13 +4,13 @@ Status: PENDING
 
 # V1 Step 8 — pinned live acceptance matrix
 
-`bridgeImplementationCommit`: `69f00277698e6e1fc36914c4fa8992b5f79ebbc5`.
+`bridgeImplementationCommit`: `4cffd484601ae3dabfc2bce066f47cac3fbf8f9a`.
 
-`evidenceCommit`: `69f00277698e6e1fc36914c4fa8992b5f79ebbc5` (current implementation commit used as the evidence-refresh base; prior live artifacts retain their own evidence commit).
+`evidenceCommit`: `7a8c3ad679aa5d667f9307cf09e6086da53cc43e` (evidence-refresh base before the current Step-7/Step-8 evidence promotion; evidence-only commits do not change `bridgeImplementationCommit`).
 
-Target pinned release tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; provider-extension build `76fe2e7f3236e2ae2ffd4ec4606759909257fd69`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
+Target pinned release tuple: T3 `0.0.46-nightly.20261013.3040`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; packaged candidate SHA-256 `ABC8A63C9A7FD0CB92DD1101EF8E87AB5BC194166DA845AB57EB32B6E8C01EA8`; browser-extension stamp `bafcb47f1143`; provider-extension build `e5157983c6b5cbc7a9a1fc77c0822d452ab52d2f`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
 
-**Current gate status is pending.** The previous browser-live/deterministic run is preserved under `.local-evidence/v1/20261019T234030Z/` and was recorded against bridge implementation `336c701c7fb3da967ef11c6b167da8a266becc46` and evidence commit `0a39af1313bd0a275b37a4ab83bb0a8efcade741`. Those results are historical and cannot satisfy the current matrix after later implementation changes through `69f00277698e6e1fc36914c4fa8992b5f79ebbc5` and the provider update to `76fe2e7f3236e2ae2ffd4ec4606759909257fd69`. Do not overwrite or delete the old artifacts.
+**Current gate status is pending while the remaining V1-01…V1-19 rows execute.** The preserved pre-fix V1-11 failure remains immutable historical FAIL evidence under the release-owner waiver. A fresh V1-11 restart/token-rotation run on the final tuple is now PASS, so that historical admission domain is no longer a release prerequisite. The waiver does not alter runtime recovery semantics, reclassify generic `broken`, or permit rewriting the preserved admission domain.
 
 ## Preserved prior outcomes (historical only)
 
@@ -18,13 +18,13 @@ Target pinned release tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcf
 - **V1-05: FAIL**. The request did not create the safe fixture because the tool reported its approved root `/sunrise` was unavailable. The fixture remained absent; the failure was explicitly recorded as `tool_workspace_root_unavailable`, not accepted as a successful edit. Retest with a valid exact-root fixture after live preflight is safe.
 - **V1-06, V1-07, V1-09, V1-10, V1-12, V1-16, V1-18, V1-19A: deterministic component PASS** in the old integration run. These are not full matrix PASSes where the plan additionally requires live smoke (notably V1-09 SSE reconnect, V1-10 healthy bridge restart, V1-12 healthy pinned-T3 resume, and V1-18 the Step-7 live slow-consumer case).
 - **V1-08: PASS** in the old browser-live run. Exact active-turn Stop produced a matching stopped `turn_end`, `turn_drained`, policy attestation and ACP cancelled terminal. It remains historical until rerun on the current implementation.
-- **V1-11: FAIL**. CoS process restart rotated endpoint/token while the same profile/session/input identity was retained, but the provider turn stayed active without `turn_end`/`turn_drained`; cancellation remained requested, lease release was not proven, and no second prompt was sent. A subsequent read-only controller check still found the exact provider turn `active`; a fresh exact Stop attempt returned HTTP 409 and no terminal proof appeared. This is unresolved, not a pass.
+- **V1-11: historical FAIL, release-prerequisite waiver approved.** The preserved admission domain remains fail-closed and must not be mutated or reused. Qualification proceeds only through a new session/admission domain, and V1-11 becomes PASS only if that fresh final-tuple restart/token-rotation run satisfies the original row criteria.
 - **V1-13, V1-14, V1-15: PENDING**. No current qualifying artifacts establish compact/resume/handoff, disabled-action negative/positive pair, or project-remap/unavailable cases.
 - **V1-17: partial only**. CoS source tests passed the worker/Goal/Loop/continuation refusal component, but the full row still lacks live policy re-attestation across restart, compaction and handoff.
 - **V1-19B: source-suite component PASS only**. The preserved artifact recorded the installed candidate hash as not matching the recorded hash, so candidate provenance must be re-established before this can count for the full split-ownership row.
 - **V1-01: historical setup/provider-validation artifacts exist**, but this current evidence file does not promote the row; rerun or formally reconcile its exact no-input/no-chat/no-probe-state assertions on the current tuple.
 
-## Current live preflight blockers
+## Historical live preflight blockers — superseded
 
 The running pinned candidate profile was last read-only diagnosed as CoS `2.1.39.0`, candidate executable SHA-256 `c490de96b0c5d6349ad5586465a5bd8d33d912b26a53ff51deec43e60672ef1b`, protocol 1, provider-extension build `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`, all four required features, actions enabled, and exact project root resolved. That installed provider build is now older than the final source pin `76fe2e7f3236e2ae2ffd4ec4606759909257fd69` and must be safely reconciled before new live qualification can count. CoS `2.1.44` is currently staged to install on ordinary quit; do not quit/restart this candidate until that update handoff is neutralized or isolated.
 
@@ -43,7 +43,7 @@ Artifact: `.local-evidence/v1/20261020T025835Z-readonly-v1-11/readonly-reconcili
 - The installed profile stamp `45ee28157713` matches the packaged `73e52028` candidate; historical `a35dccb10b05` belongs to the separate `4d8ea6ac` artifact. The stamp discrepancy is therefore resolved. CoS `2.1.44` is the current staged next-quit update hazard.
 - No prompt, Stop action, restart, state clearing, or admission-domain reuse was performed in that read-only reconciliation. **NO-GO remains for Step 7 and Step 8** until the staged-update hazard and live-provider identity are safely reconciled and integrated recovery produces authoritative matching terminal/drain proof for the preserved V1-11 turn.
 
-## Current implementation validation and gate boundary
+## Historical implementation validation and gate boundary — superseded
 
 ```text
 npm run verify                              PASS — 25/25 test files, 243/243 tests
@@ -76,7 +76,7 @@ Artifact: `.local-evidence/v1/20261022T023206Z-v1-11-final-provider-blocked/`.
 - Final provider source deliberately quarantines an unsealed closing turn as `broken` after restart when no durable `turn_drained` marker advanced the checkpoint. Its drain probe/commit path accepts only `closing` or `drained`; a `broken` turn is not eligible for a later drain commit. This is fail-closed behavior, not an invitation to rewrite the provider sidecar or synthesize a marker.
 - The absence of recorded tool calls for this turn is not a substitute for drain proof. Provider effect admission happens before the tool handler and before the durable tool-call row is written, while running process-completion custody is process-memory-only. A restart can therefore lose knowledge of an admitted effect in the gap before its durable recorder row exists. `toolCalls:0`, the completed `turn_end`, and post-restart silence cannot prove that gap empty; this is the exact uncertainty the `broken` quarantine preserves.
 - Therefore V1-11 is **BLOCKED/FAIL for release qualification on the final provider identity**: authoritative terminal proof exists, authoritative drain proof does not, and the remaining admission lease/cancel state cannot be safely finalized by a supported production transition. No new Stop, prompt, state clearing, state rewrite, or fabricated terminal/drain was performed during this reconciliation.
-- Step 7 and Step 8 promotion remain blocked under the qualification contract. `releaseQualified` remains false. Historical FAIL and SETUP_INVALID artifacts are preserved unchanged.
+- The preserved admission domain remains permanently excluded from reuse. Under the approved historical-failure waiver, it no longer blocks a fresh V1-11 qualification attempt on the final tuple. Historical FAIL and SETUP_INVALID artifacts remain preserved unchanged.
 
 ## Restart-unsealed recovery proof on final provider — 2026-10-21 local / 2026-10-22 UTC
 
@@ -87,4 +87,17 @@ Artifact: `.local-evidence/v1/20261021T232706-v1-11-restart-recovery-blocked/`.
 - The exact preserved ChatGPT conversation was observed and reloaded without posting a prompt. A fresh version-22 Fiber scan reports that same terminal message id, zero connector calls, zero code-mode calls, zero sightings, zero native activities and zero `call|exec` trace effects, **but one bare connector request id** in the validated `requests` surface.
 - `readTurnCalls()` defines that surface as bare `metadata.request_id` values stamped when a connector request is issued, including before an `api_tool` row materializes. `providerTurnHasEffectEvidence()` intentionally treats any `requests.length > 0` as effect evidence. The recovery candidate therefore does not arm/commit, `browserNoEffects` is false, and the provider remains `state=broken` with `terminalSeq=485`, `drainedSeq=null`, and `finalAssistantSeq=null`.
 - There is still no matching `turn_drained` for the exact turn. No new prompt, Stop, recovery commit, state clearing, sidecar rewrite, fabricated terminal, or fabricated drain marker was performed. The historical HTTP 409 failure remains preserved separately.
-- This is now an identity-current **BLOCKED/FAIL** for V1-11 under the frozen durability contract, rather than a provider-version or browser-pairing setup problem. Weakening the `requests` effect predicate would violate the approved no-effects proof and is not an acceptable release fix. Step 7 and Step 8 cannot be promoted, and `releaseQualified` remains false.
+- This remains an identity-current **FAIL** for the preserved historical V1-11 admission domain. Weakening the effect predicate or repairing generic `broken` remains forbidden; the approved release path is instead a fresh V1-11 run on a new admission domain using the final tuple.
+
+## Fresh final-tuple qualification state — 2026-10-22 UTC
+
+The preserved historical V1-11 admission domain above remains unchanged. Current qualification uses a new admission domain and the final bridge/provider tuple.
+
+- **V1-11 current result: PASS.** `.local-evidence/v1/20261022T230938Z-v1-11-fresh/restart-smoke.json` records the supported restart mode, two successful turns on the same session, authoritative input proof, provider policy before/after, browser state before and after the real CoS restart, observed restart/token rediscovery, no mutation spin, and bounded recovery. This is the qualifying V1-11 evidence under the approved waiver.
+- **V1-09 live component: PASS.** `.local-evidence/v1/20261022T231409Z-step7-sse/sse-reconnect.json` records one intentional SSE drop, exact-cursor resume, one reconnect with bounded backoff, no duplicate rows, matching terminal/drain, exact final content, and no tool activity.
+- **V1-10 live component: PASS.** `.local-evidence/v1/20261022T231600Z-step7-bridge-restart/restart-smoke.json` records an actual bridge-process restart, same-session continuation, authoritative input proof, policy before/after, no mutation spin, and bounded recovery.
+- **V1-18 live component: PASS.** `.local-evidence/v1/20261022T231430Z-step7-slow/slow-consumer.json` records exact authoritative content at `28,006` characters, bounded queue depth, RSS below the Step-7 limit, no tool activity, and bounded drain/reconnect behavior.
+- **Step-7 short-turn performance prerequisite: PASS.** `.local-evidence/v1/20261022T234109Z-step7-bridged/bridged-short-turns.json` contains ten qualifying pinned-T3 bridged no-tool turns with nearest-rank p95 `180 ms` pre-send, `856 ms` native `turn_end → turn_drained`, and `111 ms` post-drain. Attempt `6` is preserved and excluded because it emitted one native `page_tool` event. The paired direct-CoS ten-turn evidence is `.local-evidence/v1/20261022T231053Z-step7-direct/direct-paired.json`.
+- The packaged candidate remains the side-by-side CoS `2.1.39` build with SHA-256 `ABC8A63C9A7FD0CB92DD1101EF8E87AB5BC194166DA845AB57EB32B6E8C01EA8`, browser-extension stamp `bafcb47f1143`, and provider-extension build `e5157983c6b5cbc7a9a1fc77c0822d452ab52d2f`. CoS `2.1.44` remains quarantined and its NSIS installer is not part of qualification.
+
+The remaining browser-live and deterministic rows are still pending until their current final-tuple evidence is recorded. Overall `releaseQualified` remains false.

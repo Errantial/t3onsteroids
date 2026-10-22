@@ -691,6 +691,38 @@ describe("durable ACP runtime boundaries", () => {
     await expect(lease.read()).resolves.toEqual({ status: "missing" });
   });
 
+  it("settles a persisted cancellation from an already-drained exact provider turn before retrying Stop", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    const stopExactTurn = vi.fn(async () => {
+      throw Object.assign(new Error("turn_not_running"), { code: "request_failed" });
+    });
+    const ctrl = controller({
+      stopExactTurn,
+      session: vi.fn(async () => ({
+        id: sessionId,
+        providerTurn: { inputId: sessionId, state: "drained" as const, turnId, drainedSeq: 3, finalAssistantSeq: null },
+      })),
+    }) as BridgeController & ProviderTurnController;
+    ctrl.assistantContentChunk = vi.fn(async () => { throw new Error("no assistant body expected"); });
+    ctrl.streamEvents = async function* () {
+      yield { seq: 2, position: 2, time: 2, kind: "turn_end" as const, source: "extension" as const, turnId, outcome: "completed" as const };
+      yield { seq: 3, position: 3, time: 3, kind: "turn_drained" as const, source: "app" as const, turnId, inputId: sessionId, highWaterSeq: 3, finalAssistantSeq: null };
+    };
+    let nextUuid = 0;
+    const bridge = runtime(ctrl, store, lease, () => nextUuid++ === 0 ? sessionId : secondSessionId);
+    bridge.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "first" }] });
+    await store.updateSession(sessionId, { kind: "bind_turn", inputId: sessionId, generation: 1, turnId });
+    await store.updateSession(sessionId, { kind: "set_cancel", inputId: sessionId, generation: 1, turnId });
+
+    const resumed = await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "second" }] });
+
+    expect(stopExactTurn).not.toHaveBeenCalled();
+    expect(resumed.session).toMatchObject({ generation: 2, activeInputId: secondSessionId, cancelIntent: "none" });
+    await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { generation: 2, inputId: secondSessionId } });
+  });
+
   it("reconciles a crash after terminal persistence but before lease deletion", async () => {
     const root = await tempRoot();
     const { store, lease } = durable(root);

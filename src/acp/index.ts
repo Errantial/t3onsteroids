@@ -72,6 +72,8 @@ export interface BridgeController {
   resolveProject(path: string): Promise<ProjectBinding>;
   input?(inputId: string): Promise<CosInputRecord | undefined>;
   session?(sessionId: string): Promise<CosSessionSummary>;
+  assistantContentChunk?: ProviderTurnController["assistantContentChunk"];
+  streamEvents?: ProviderTurnController["streamEvents"];
   cancelPendingInput?(inputId: string): Promise<void>;
   requestStopExactTurn?(sessionId: string, turnId: string): Promise<void>;
   stopExactTurn?(sessionId: string, turnId: string): Promise<unknown>;
@@ -491,6 +493,42 @@ export class AcpBridgeRuntime {
       if (!matchingLease) {
         await this.markBroken(session, "ambiguous_recovery");
         throw new BridgeError("session_broken", "Delivered cancelled turn no longer owns its exact durable lease");
+      }
+      if (this.options.controller.session) {
+        const summary = await this.options.controller.session(session.sessionId);
+        const attested = summary.providerTurn;
+        if (attested?.inputId === inputId && attested.turnId === translation.turnId && attested.state === "drained") {
+          if (attested.drainedSeq === null) {
+            throw new BridgeError("session_broken", "Drained provider cancellation attestation lacks durable high-water proof");
+          }
+          const requireBackgroundWorkDisabled = this.options.controller.requireBackgroundWorkDisabled;
+          const assistantContentChunk = this.options.controller.assistantContentChunk;
+          const streamEvents = this.options.controller.streamEvents;
+          if (!requireBackgroundWorkDisabled || !assistantContentChunk || !streamEvents) {
+            throw new BridgeError("session_broken", "Drained provider cancellation cannot be reconciled without the provider event contract");
+          }
+          const provider: ProviderTurnController = {
+            session: this.options.controller.session.bind(this.options.controller),
+            requireBackgroundWorkDisabled: requireBackgroundWorkDisabled.bind(this.options.controller),
+            assistantContentChunk: assistantContentChunk.bind(this.options.controller),
+            streamEvents: streamEvents.bind(this.options.controller),
+          };
+          const recovered = await this.driveDurableProviderTurn(provider, {
+            sessionId: session.sessionId,
+            // The original ACP request is already gone after restart. Reconciliation accepts the
+            // authoritative historical output only to finish its durable range/terminal checkpoint;
+            // it never replays that old assistant body into the next user prompt.
+            emit: async () => undefined,
+          });
+          if (!recovered.terminal) {
+            throw new BridgeError("session_broken", "Drained provider cancellation ended without authoritative terminal proof");
+          }
+          const settled = await this.refreshDurable(session.sessionId);
+          if (settled.cancelIntent === "requested" || settled.providerTranslation) {
+            throw new BridgeError("session_broken", "Drained provider cancellation did not settle its durable generation");
+          }
+          return settled;
+        }
       }
       if (!this.options.controller.stopExactTurn) throw new BridgeError("session_broken", "Exact-turn Stop is unavailable");
       await this.options.controller.stopExactTurn(session.sessionId, translation.turnId);

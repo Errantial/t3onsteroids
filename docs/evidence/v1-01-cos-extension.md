@@ -4,7 +4,7 @@ Status: PASS
 
 # V1 Step 1 — CoS provider extension
 
-`bridgeImplementationCommit`: `6f68fcddcba8ace4119ec28948516c3aa98454e6`.
+`bridgeImplementationCommit`: `3d2d224f784620d511f5ba51c23e57198440cb91`.
 
 Pinned CoS base remains `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`. Final provider-extension source/build identity for this qualification freeze is `0e755281cae0f87084293e4a735cc27744691a64`.
 

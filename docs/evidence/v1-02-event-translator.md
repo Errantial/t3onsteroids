@@ -4,9 +4,9 @@ Status: PASS
 
 # V1 Step 2 — event translator and terminal semantics
 
-`bridgeImplementationCommit`: `6f68fcddcba8ace4119ec28948516c3aa98454e6`.
+`bridgeImplementationCommit`: `3d2d224f784620d511f5ba51c23e57198440cb91`.
 
-`evidenceCommit`: `6f68fcddcba8ace4119ec28948516c3aa98454e6` (implementation commit used as the evidence-refresh base; later evidence-only commits do not change `bridgeImplementationCommit`).
+`evidenceCommit`: `3d2d224f784620d511f5ba51c23e57198440cb91` (implementation commit used as the evidence-refresh base; later evidence-only commits do not change `bridgeImplementationCommit`).
 
 Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `0e755281cae0f87084293e4a735cc27744691a64`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64. Browser-extension/package identity is tracked separately and must be refreshed after the final provider is packaged.
 
@@ -17,7 +17,7 @@ The frozen implementation also has deterministic built-stdio Step-8 coverage tha
 Current-machine bridge validation from this exact implementation tuple:
 
 ```text
-npm run verify                              PASS — 25/25 test files, 243/243 tests
+npm run verify                              PASS — 25/25 test files, 244/244 tests
 npm audit --json                            PASS — exit 0; 0 vulnerabilities at every severity
 git diff --check                            PASS
 package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false

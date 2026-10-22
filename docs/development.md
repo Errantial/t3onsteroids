@@ -102,7 +102,7 @@ For controller/CoS reconnect problems:
 1. Verify CoS is running under the same OS user/profile as T3 and the bridge.
 2. Verify Local control API is enabled; for prompt/cancel/Stop also verify Allow actions is enabled.
 3. Run the read-only diagnostic against the exact project root and the intended CoS user-data directory.
-4. Confirm health reports protocol 1, the exact pinned provider-extension build id, and all four feature versions at 1.
+4. Confirm health reports protocol 1, the exact pinned provider-extension build id, and all five feature versions at 1, including `provider-turn-recovery-v1`.
 5. Keep the existing bridge state intact while the bridge rediscovers the controller endpoint/token and reconciles the saved input/turn.
 6. If a lease remains held, resolve the saved turn to authoritative `not_sent` or drained terminal proof before attempting a new prompt.
 

@@ -4,33 +4,34 @@ Status: PASS
 
 # V1 Step 1 — CoS provider extension
 
-`bridgeImplementationCommit`: `69f00277698e6e1fc36914c4fa8992b5f79ebbc5`.
+`bridgeImplementationCommit`: `b4fb45d5b1ae6683d2b42e71589e207ff2f662dd`.
 
-Pinned CoS base remains `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`. Final provider-extension source/build identity for V1 is `76fe2e7f3236e2ae2ffd4ec4606759909257fd69`.
+Pinned CoS base remains `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`. Final provider-extension source/build identity for V1 is `4a32b82499af82948580235b3d1c66f2e84ad762`.
 
-The preserved historical source baseline was `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`, which contained the earlier provider drain/project/terminal-transport repairs. The current lineage adds the production exact-Stop-after-restart repair at `61d111f6940b74e5134986a12b53e7ef1f216328`, followed only by verification/test-isolation hardening through `c80222e4`, `e27c7511`, `654827ba`, `a6e4cf19`, `7772c7b0`, `f5287df9`, and final `76fe2e7f`. Those later commits do not relax exact-turn, Stop, deadline, question-anchor, background-work, terminal, or drain authority.
+The preserved historical source baseline was `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`. The previously qualified provider `76fe2e7f3236e2ae2ffd4ec4606759909257fd69` added the exact-Stop-after-restart and verification-isolation work. The final lineage then adds `e8ef46d8` (`Recover restart-unsealed provider drains`) and `4a32b824` (`Stabilize UIA invoke observation`). The recovery change is deliberately narrower than generic broken-state recovery: it requires the exact persisted restart-unsealed shape, matching terminal and token identity, no conflicting terminal, no durable exact-turn provider effect, fresh browser proof of zero native effect surfaces, and normal drain finalization. It does not synthesize `turn_drained` or reinterpret arbitrary `broken` state as recoverable.
 
-The final provider extension advertises API version `1` and all four required feature ids at version `1`:
+The final provider extension advertises API version `1` and all five required feature ids at version `1`:
 
 - `provider-project-resolve-v1`: `1`
 - `provider-assistant-content-v1`: `1`
 - `provider-session-policy-v1`: `1`
 - `provider-turn-drain-v1`: `1`
+- `provider-turn-recovery-v1`: `1`
 
-Final source verification on `76fe2e7f3236e2ae2ffd4ec4606759909257fd69`:
+Final source verification on `4a32b82499af82948580235b3d1c66f2e84ad762`:
 
 ```text
 npm run verify                              PASS — exit 0
-bulk Vitest lane                            PASS — 354 files, 6634 tests; 46 skipped tests
-serialized heavy lane                       PASS — 11 files, 2423 tests; 4 skipped tests
+bulk Vitest lane                            PASS — 354 files, 6639 tests; 46 skipped tests
+serialized heavy lane                       PASS — 11 files, 2436 tests; 4 skipped tests
 isolated renderer-state lane                PASS — 1 file, 132 tests
 typecheck / privacy / notices prechecks     PASS as part of npm run verify
 ```
 
-The recurring `gpt-5.6-pro` automatic-Continue boundary and the native-work Stop-revocation case both pass in the final `input-delivery-integration.test.ts` run (`290/290`). `content-script.test.ts` passes `926/926`, `bridge.test.ts` passes `694/694`, `public-history-privacy.test.ts` passes `23/23`, `worktrees-manager.test.ts` passes `41/41`, and `renderer-state.test.ts` passes `132/132` in its isolated verification lane. The failures that motivated the runner changes were classified as cross-suite load/timing or fixture isolation issues; no acceptance assertion was weakened.
+Recovery-focused qualification is green: `provider-turn-drain.test.ts` passes `12/12`, `extension.test.ts` passes `349/349`, `bridge.test.ts` passes `697/697`, and `content-script.test.ts` passes `936/936`. The final isolated `renderer-state.test.ts` passes `132/132`. During one duplicate concurrent full verification a Windows/Electron fixture timed out at 35 seconds while another full verification was already running; the same `codex-plugin-runtime-process.test.ts` then passed `5/5` in isolation, including the timed-out production-launch case in 845 ms. The uninterrupted final verification completed cleanly; no acceptance assertion or timeout was weakened.
 
-Browser-extension file identity is separate from the provider-extension build id. The currently running pinned `2.1.39` live candidate was previously proven to materialize browser-extension stamp `45ee28157713` from the packaged `73e52028` candidate. That live observation does **not** claim that provider build `76fe2e7f` is already installed in the running app. Live preflight must reconcile the running candidate to the final provider identity before Step 7/8 can pass.
+Browser-extension file identity is separate from the provider-extension build id. The final packaged browser-extension stamp is `ecc2a76d317a`, computed over 31 loaded extension files. The packaged `win-unpacked\Chat On Steroids.exe` has ProductVersion `2.1.39.0` and SHA-256 `E4A209847EBB00991B4B81C814F331BC78432910C3DFEF9E2FE464704C20CB8A`. Read-only ASAR inspection confirms the bundled main process contains exact provider build id `4a32b82499af82948580235b3d1c66f2e84ad762` and the `provider-turn-recovery-v1` capability. Packaging smoke reports the win32-x64 resources/native runtimes verified for `2.1.39`. The NSIS artifact was built as part of `dist:x64` but was not run and is not an accepted installation path for this qualification.
 
-The CoS dependency audit was not rerun as part of this provider-source requalification. The prior non-zero CoS audit disposition remains a release item and is not converted into a zero-vulnerability claim by this evidence.
+The final provider dependency audit remains nonzero and is preserved as such: `19` total advisories (`8` high, `11` moderate, `0` critical). This evidence does not convert that result into a zero-vulnerability claim.
 
-This gate is source/provider-extension qualification only. It does not claim live installation, browser pairing, candidate replacement, Step-7 performance, or Step-8 acceptance. Overall `releaseQualified` remains false.
+This gate is source/provider-extension qualification only. The final portable candidate has been built and provenance-checked, but the preserved V1 profile has not yet been replaced/restarted onto it in this qualification sequence. It therefore does not claim live installation, browser pairing, preserved V1-11 recovery, Step-7 performance, or Step-8 acceptance. Overall `releaseQualified` remains false.

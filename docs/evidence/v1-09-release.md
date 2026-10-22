@@ -15,7 +15,8 @@ Pinned release tuple remains T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcf
 ## Release-preparation checklist (pending)
 
 - [ ] Wait for Step 7 live performance and every Step 8 V1-01…V1-19 row to pass on current implementation and exact pinned external provenance.
-- [ ] Reconcile the running live provider from installed `73e52028...` to final source pin `76fe2e7f...`, neutralize/isolate the staged CoS `2.1.44` next-quit update handoff, and resolve the preserved V1-11 active turn with authoritative terminal/drain proof before any qualifying restart/live case.
+- [x] Reconcile the running live provider to final source pin `76fe2e7f...` and neutralize/isolate the staged CoS `2.1.44` next-quit update handoff. The final candidate is live and diagnosed ready.
+- [ ] Resolve the preserved V1-11 turn with authoritative terminal **and drain** proof before any qualifying restart/live case. Current final-provider evidence has matching `turn_end` seq `485` but no `turn_drained`; restart recovery quarantined the unsealed closing turn as `broken`, so this remains a hard fail-closed blocker.
 - [ ] Run the current-T3-HEAD drift lane separately; record `compatible` or `incompatible` and preserve the pinned T3 support metadata unchanged.
 - [ ] Verify a fresh clean checkout with `npm ci`, `npm run verify`, `npm audit --json`, and `git diff --check`.
 - [ ] Verify package/ACP/compatibility/readiness versions, real `node.exe + dist/cli/index.js` launch under T3 `shell:false`, and the full provenance tuple.

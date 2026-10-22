@@ -36,7 +36,7 @@ export const v1ReleaseGateManifest: V1ReleaseGateManifest = {
   schemaVersion: 1,
   gates: {
     cosProviderExtension: {
-      status: "pass",
+      status: "pending",
       evidencePath: "docs/evidence/v1-01-cos-extension.md",
       extensionBuildId: compatibility.cos.providerExtension.buildId,
       featureVersions: compatibility.cos.providerExtension.features,

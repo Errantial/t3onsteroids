@@ -18,7 +18,9 @@ Controller/client hardening covers credential-free loopback-origin discovery, de
 
 Privacy/metrics coverage is metadata-only. Structured logs allowlist operation/transition/error categories and hash correlation/session identifiers. Bridge metrics retain counters and bounded monotonic timing receipts for prompt/input/turn-end/drain/terminal, controller reads/actions, SSE connects/reconnects/backoffs, queue depth, drain high-water, and RSS high-water; session identifiers are reduced to hashed keys and only the newest 32 timing receipts are retained. Tests explicitly prove hostile identifiers, prompt-like text, tokens, private paths, and unrelated browser/page fields are not serialized. Step-7 browser status summarization retains only connection/bridge presence state.
 
-Verification commands:
+## Historical pre-live validation snapshot — superseded
+
+Verification commands used by the prior 4cff/e515 freeze:
 
 ```text
 npm ci
@@ -28,8 +30,8 @@ npm audit --json
 git diff --check
 ```
 
-Current exact-tuple bridge validation: fresh `npm ci` PASS with `147` packages and `0` vulnerabilities; `npm run verify` PASS with `25/25` test files and `244/244` tests, including the built ACP stdio lane at `14/14`; fresh `npm audit --json` exits `0` with `0` vulnerabilities at every severity; fresh `git diff --check` PASS. Package smoke exits `0` while the manifest is deliberately invalidated, reporting implementation readiness false and `releaseQualified:false`; after the evidence/manifest promotion and rebuild, package smoke again exits `0` with Steps 1–4 readiness true while `liveAcceptanceRequired:true`, `currentHeadDriftRequired:true`, and `releaseQualified:false`. Final CoS source verification on provider build `e5157983c6b5cbc7a9a1fc77c0822d452ab52d2f` is green: bulk `350` files passed / `5` skipped with `6608` tests passed / `45` skipped, serialized heavy lane `15` files / `2472` tests passed / `5` skipped, isolated renderer-state `1` file / `132` tests passed, focused `provider-turn-drain.test.ts` `13/13`, standalone typecheck PASS, and `git diff --check` PASS. Live setup diagnostics must be re-observed after the final portable candidate is safely launched on the preserved profile; no stale live `ready:true` claim is promoted here. Live Step 7/8 evidence remains invalidated for this implementation tuple.
+Historical 4cff/e515 bridge validation: fresh `npm ci` PASS with `147` packages and `0` vulnerabilities; `npm run verify` PASS with `25/25` test files and `244/244` tests, including the built ACP stdio lane at `14/14`; fresh `npm audit --json` exited `0`; `git diff --check` passed. At that time package smoke correctly remained non-release-qualified and live setup had not yet been refreshed. Those values are retained for lineage only; the current-final f3/495e qualification is the refresh recorded at the top of this file.
 
 No prompt text, assistant text, tool bodies/results, browser content, tokens, authorization headers, raw controller configuration, or private filesystem paths are recorded in this evidence summary or required by the metadata-only metrics/logging contract.
 
-Deterministic built-stdio Step-8 coverage exercises redaction-sensitive tool projection, metrics persistence, reconnect and slow-consumer paths without converting those tests into live acceptance. Step 1 separately records the final provider-source full-verify PASS. No Step 7 or Step 8 live/browser pass is claimed. This evidence supports only the deterministic `controllerPrivacy` gate for this exact tuple; release qualification remains false.
+The historical deterministic built-stdio coverage exercised redaction-sensitive tool projection, metrics persistence, reconnect and slow-consumer paths without converting those tests into live acceptance. Current-final Step 7/8 and release qualification are recorded by the refresh at the top of this file and the Step-7/8/9 evidence summaries.

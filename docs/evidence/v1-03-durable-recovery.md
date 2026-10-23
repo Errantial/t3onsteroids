@@ -18,7 +18,9 @@ Durable Windows journal I/O now has an explicit typed `StateIoError` with public
 
 Deterministic Step-8 built-stdio coverage now exercises recovery through the compiled ACP child: ambiguous input response loss without duplicate POST, restarted accepted-send reconciliation without replay, persisted exact-Stop replay, broken/cwd/additional-directory/corrupt/future-state quarantine without provider mutation, and the existing cancellation/restart boundaries. The current implementation also covers persisted cancellation after restart when the exact provider turn is already authoritatively drained: recovery consumes the authoritative historical provider stream/terminal and settles the lease before deciding whether a Stop action is still required. The preserved negative control demonstrated the old ordering by reaching `turn_not_running`; the fixed deterministic regression now passes without synthesizing provider events or widening generic `broken` recovery. This is deterministic production-path evidence only; it does not claim Step 7 or Step 8 live/browser pass.
 
-Current-machine bridge validation from this exact implementation tuple:
+## Historical pre-live validation snapshot — superseded
+
+The following was captured on the prior 4cff/e515 freeze and is retained only as lineage evidence:
 
 ```text
 npm run verify                              PASS — 25/25 test files, 244/244 tests
@@ -27,4 +29,4 @@ git diff --check                            PASS
 package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false
 ```
 
-The deterministic recovery gate is green for this exact implementation tuple. The final provider restart-unsealed recovery capability remains fail-closed unless exact persisted turn/terminal/token identity and fresh browser no-effects proof all agree; bare request attribution is no longer misclassified as an exact-turn effect, while real native effect surfaces still block recovery. The final `e5157983` provider retains the `0e755281` retryable transient probe-state recovery and additionally ignores representation-only replay records after authoritative provider drain, without weakening real effect blockers or generic `broken` fail-closed behavior. For an exact already-drained provider turn, restart cancellation still settles from the authoritative historical provider stream/terminal before retrying Stop; no synthetic terminal/drain events are introduced. Normal provider finalization remains the only source of `turn_drained`. The final provider source verification is green on build `e5157983c6b5cbc7a9a1fc77c0822d452ab52d2f`. This deterministic proof does not assert that the preserved V1-11 turn has recovered yet. Live Step 7/8 evidence remains invalidated for this implementation identity; overall release qualification remains false.
+At that historical snapshot, the e515 recovery source retained the fail-closed restart-unsealed behavior described above and live qualification was still pending. The current-final f3/495e deterministic and live qualification is the refresh recorded at the top of this file; the preserved historical V1-11 admission domain remains immutable fail-closed evidence.

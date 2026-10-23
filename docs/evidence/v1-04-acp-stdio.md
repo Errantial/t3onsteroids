@@ -16,7 +16,9 @@ The shipped built `node.exe + dist/cli/index.js` lane is covered through the rea
 
 The final freeze adds deterministic Step-8 built-stdio scenarios for input-response loss reconciliation without duplicate POST, exact SSE cursor resume after deliberate disconnect, restarted accepted-send and exact-Stop boundaries, quarantine/no-provider-mutation cases, controller rate limiting without action retry spin, blocking provider failure without false success, and bounded/complete output under a deliberately slow ACP consumer. The built ACP stdio regression lane now includes the restarted persisted-cancellation case where the exact provider turn is already drained: authoritative historical stream/terminal state is consumed and the lease is settled before any Stop retry, avoiding the old `turn_not_running` failure. Durable state I/O failures also cross the production ACP error boundary as typed `state_io_error` rather than `internal_error`; the public mapping exposes only the stable error code, not raw filesystem failure details.
 
-Current-machine bridge validation from this exact implementation tuple:
+## Historical pre-live validation snapshot — superseded
+
+The following was captured on the prior 4cff/e515 freeze and is retained only as lineage evidence:
 
 ```text
 npm run verify                              PASS — 25/25 test files, 244/244 tests
@@ -25,4 +27,4 @@ git diff --check                            PASS
 package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false
 ```
 
-This Step-4 result includes a green built ACP stdio lane of `14/14` tests and the deterministic scenarios above against the final `providerExtension` build; it is not browser/live acceptance. Step 1 records the final provider source verification separately and it is green on build `e5157983c6b5cbc7a9a1fc77c0822d452ab52d2f`. Live Step 7/8 evidence remains invalidated for this implementation identity; these deterministic scenarios do not promote it. Overall `releaseQualified` remains false.
+At that historical snapshot, the built ACP stdio lane was green but browser/live acceptance and release qualification were still pending. The current-final f3/495e qualification is the refresh recorded at the top of this file.

@@ -16,7 +16,9 @@ Validated production translator behavior includes monotonic cursor/dedupe handli
 
 The frozen implementation also has deterministic built-stdio Step-8 coverage that drives the real compiled ACP child through response-loss reconciliation, exact SSE cursor resume, cancellation/Stop boundaries, terminal provider failure, large final-assistant reconstruction, and a deliberately slow ACP consumer. These tests exercise translator/terminal semantics through the shipped stdio path; they are deterministic qualification only and are not a claim that Step 7 or Step 8 browser/live acceptance has passed.
 
-Current-machine bridge validation from this exact implementation tuple:
+## Historical pre-live validation snapshot — superseded
+
+The following was captured on the prior 4cff/e515 freeze and is retained only as lineage evidence:
 
 ```text
 npm run verify                              PASS — 25/25 test files, 244/244 tests
@@ -25,4 +27,4 @@ git diff --check                            PASS
 package smoke                               PASS — bridgeVersion 1.0.0; supportedConcurrency 1; releaseQualified false
 ```
 
-This evidence supports only the deterministic `eventTranslator` gate for this exact implementation tuple. Step 1 records the final CoS source build separately; its final `npm run verify` is green on provider build `e5157983c6b5cbc7a9a1fc77c0822d452ab52d2f`. Live Step 7/8 evidence remains invalidated for this implementation identity; this deterministic suite does not promote it. `releaseQualified` remains false.
+At that historical snapshot, this evidence supported only the deterministic `eventTranslator` gate and release qualification was still pending. The current-final f3/495e qualification is the refresh recorded at the top of this file.

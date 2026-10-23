@@ -1,6 +1,6 @@
 # Development, setup and operations
 
-The v1 bridge is Windows-first, uses Node directly, and is versioned as `1.0.0`. The production implementation includes the ACP stdio provider, CoS controller/provider-extension client, event translator, durable state and profile-wide admission lease, restart/cancellation recovery, bounded streaming, and release diagnostics. Live release qualification is still incomplete; this document describes the implemented operating model without claiming Steps 7–9 have passed.
+The v1 bridge is Windows-first, uses Node directly, and is versioned as `1.0.0`. The production implementation includes the ACP stdio provider, CoS controller/provider-extension client, event translator, durable state and profile-wide admission lease, restart/cancellation recovery, bounded streaming, and release diagnostics. V1 release qualification is complete on the pinned Windows tuple; this document describes that qualified operating model.
 
 ## Pinned release tuple
 
@@ -8,12 +8,12 @@ The first v1 support tuple is:
 
 - T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`;
 - CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`;
-- CoS provider-extension build `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`;
-- controller protocol 1 with `provider-project-resolve-v1`, `provider-assistant-content-v1`, `provider-session-policy-v1`, and `provider-turn-drain-v1` all at version 1;
+- CoS provider-extension build `495e3e96504d9b865c18478f7b42915280712f84`;
+- controller protocol 1 with `provider-project-resolve-v1`, `provider-assistant-content-v1`, `provider-session-policy-v1`, `provider-turn-drain-v1`, and `provider-turn-recovery-v1` all at version 1;
 - `@agentclientprotocol/sdk@1.9.0`;
 - Node 24, Windows x64.
 
-Treat current upstream T3 HEAD as a **separate drift lane**. Do not edit pinned compatibility metadata or loosen prompt normalization just to make HEAD work. Record the drift result separately; incompatibility there does not by itself invalidate the pinned release tuple.
+Treat current upstream T3 HEAD as a **separate drift lane**. The V1 release drift check against `807319c276c6831b2c219640e9da5b38019a8f1d` recorded `compatible`; that result does not widen the pinned support tuple. Future drift runs must still avoid editing pinned compatibility metadata or loosening prompt normalization merely to make HEAD work.
 
 ## Install and verify
 

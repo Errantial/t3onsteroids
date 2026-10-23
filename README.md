@@ -4,9 +4,9 @@ Windows-first bridge for using Chat On Steroids (CoS) as a Local ACP provider in
 
 ## Status
 
-The v1 implementation is versioned as **`1.0.0`**, but it is **not release-qualified yet**. The production bridge now includes the stable ACP v1 stdio provider, CoS protocol-1/provider-extension client, drain-aware event translator, durable Windows state and cross-process admission lease, restart/recovery logic, prompt normalization, bounded streaming/backpressure, setup diagnostics, and metadata-only release instrumentation.
+The v1 implementation is versioned as **`1.0.0`** and is **release-qualified on the pinned Windows support tuple**. The production bridge includes the stable ACP v1 stdio provider, CoS protocol-1/provider-extension client, drain-aware event translator, durable Windows state and cross-process admission lease, restart/recovery logic, prompt normalization, bounded streaming/backpressure, setup diagnostics, and metadata-only release instrumentation.
 
-The release manifest records the deterministic Steps 1–6 gates, but each behavioral PASS is valid only for the `bridgeImplementationCommit` named by its evidence and must be refreshed after any implementation-input change. Steps 7–9 remain release gates: live single-turn performance, the pinned live acceptance matrix, current-T3-HEAD drift, and final release preparation. Until the full gate set is current and complete, `--release-readiness` intentionally reports `releaseQualified:false`.
+All release-manifest gates are PASS for bridge implementation `f3a672cffdee77f54d377d5594893e0606d20d5b` and provider build `495e3e96504d9b865c18478f7b42915280712f84`. Step 7 live performance, the full pinned V1-01…V1-19 acceptance matrix, current-T3-HEAD drift, and fresh-checkout release preparation are current. `node dist/cli/index.js --release-readiness` reports `releaseQualified:true`.
 
 See [`PLAN.md`](PLAN.md) for the authoritative gate sequence and [`docs/release-status.md`](docs/release-status.md) for the current release boundary.
 
@@ -16,11 +16,11 @@ The first support claim is intentionally pinned:
 
 - T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`;
 - CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`;
-- CoS provider-extension build `0893fbdfe35192f5784f07fc03f97d2ccc235425` with all four v1 provider features;
+- CoS provider-extension build `495e3e96504d9b865c18478f7b42915280712f84` with all five required v1 provider features;
 - ACP SDK `1.9.0`;
 - Node 24 on Windows x64.
 
-Current upstream T3 HEAD is a separate drift lane. Its result can be compatible or incompatible without silently changing the pinned v1 support tuple.
+The separate current-upstream T3 drift lane was run against `807319c276c6831b2c219640e9da5b38019a8f1d` and recorded `compatible`. That result does not silently widen the pinned v1 support tuple.
 
 ## Setup and launch
 

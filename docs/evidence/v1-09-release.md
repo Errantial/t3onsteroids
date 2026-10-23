@@ -30,6 +30,12 @@ Fresh-checkout evidence: `.local-evidence/v1/20261023T081532Z-step9-fresh-checko
 - Bridge dependency audit remains zero. CoS application advisory disposition remains the separately documented Step-1 residual and is not altered by this bridge release.
 - The quarantined CoS updater was not run; active/default CoS remained untouched during side-by-side qualification.
 
+## Final manifest/readiness promotion
+
+After this Step-9 evidence was committed, the manifest promoted only `t3HeadDrift` and `releasePreparation` to PASS, with drift outcome `compatible`. The main worktree was then reverified: `npm run verify` PASS (`25/25` files, `246/246` tests), `npm audit --json` PASS with `0` vulnerabilities, `git diff --check` PASS, and `node scripts/implementation-commit.mjs` still returned `f3a672cffdee77f54d377d5594893e0606d20d5b`. Final `--release-readiness` output reports `liveAcceptanceRequired:false`, `currentHeadDriftRequired:false`, and `releaseQualified:true`.
+
+The `v1.0.0` tag is intentionally not asserted inside this pre-tag evidence block. Per the PLAN, the tag is created only after the final release/docs commit leaves the repository clean; exact-match tag verification is performed afterward rather than fabricated beforehand.
+
 ## Release preparation gate
 
 Evidence-Schema: 1

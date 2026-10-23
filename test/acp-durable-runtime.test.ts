@@ -847,6 +847,81 @@ describe("durable ACP runtime boundaries", () => {
     await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { generation: 2 } });
   });
 
+  it("recovers a dispatched input missing from CoS only when an already-consumed different drain proves it never advanced the provider owner", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    const missingId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const nextId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await store.updateSession(sessionId, {
+      kind: "create",
+      state: {
+        sessionId,
+        cwd: "C:\\repo",
+        canonicalCwd: "C:\\repo",
+        cosProjectId: "project-1",
+        bindingState: "bound",
+        interactionMode: "default",
+        cancelIntent: "none",
+        generation: 1,
+      },
+    });
+    await store.updateSession(sessionId, { kind: "begin_input", inputId: missingId, generation: 2, leaseId: journalLeaseId });
+    await store.updateSession(sessionId, { kind: "mark_dispatched", inputId: missingId, generation: 2 });
+    await store.updateSession(sessionId, { kind: "advance_cursor", inputId: missingId, generation: 2, seq: 28 });
+    await lease.acquire({ sessionId, inputId: missingId, generation: 2, ownerId: "crashed-owner", leaseId: journalLeaseId });
+    const input = vi.fn(async () => undefined);
+    const session = vi.fn(async () => ({
+      id: sessionId,
+      providerTurn: { inputId: sessionId, state: "drained" as const, turnId, drainedSeq: 28, finalAssistantSeq: null },
+    }));
+    const send = vi.fn(async (request: { id: string; sessionId?: string }) => ({ id: request.id, sessionId: request.sessionId ?? sessionId, delivery: "sent" as const }));
+    const bridge = runtime(controller({ input, session, send }), store, lease, () => nextId);
+
+    const result = await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "after proven missing dispatch" }] });
+
+    expect(input).toHaveBeenCalledWith(missingId);
+    expect(session).toHaveBeenCalledWith(sessionId);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(result.session).toMatchObject({ generation: 3, activeInputId: nextId, inputDispatchState: "dispatched" });
+    await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { inputId: nextId, generation: 3 } });
+  });
+
+  it("keeps a missing dispatched input ambiguous when CoS's different drain is newer than the persisted cursor", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    const missingId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    await store.updateSession(sessionId, {
+      kind: "create",
+      state: {
+        sessionId,
+        cwd: "C:\\repo",
+        canonicalCwd: "C:\\repo",
+        cosProjectId: "project-1",
+        bindingState: "bound",
+        interactionMode: "default",
+        cancelIntent: "none",
+        generation: 1,
+      },
+    });
+    await store.updateSession(sessionId, { kind: "begin_input", inputId: missingId, generation: 2, leaseId: journalLeaseId });
+    await store.updateSession(sessionId, { kind: "mark_dispatched", inputId: missingId, generation: 2 });
+    await store.updateSession(sessionId, { kind: "advance_cursor", inputId: missingId, generation: 2, seq: 27 });
+    await lease.acquire({ sessionId, inputId: missingId, generation: 2, ownerId: "crashed-owner", leaseId: journalLeaseId });
+    const send = vi.fn();
+    const bridge = runtime(controller({
+      input: vi.fn(async () => undefined),
+      session: vi.fn(async () => ({
+        id: sessionId,
+        providerTurn: { inputId: sessionId, state: "drained" as const, turnId, drainedSeq: 28, finalAssistantSeq: null },
+      })),
+      send,
+    }), store, lease);
+
+    await expect(bridge.prompt({ sessionId, prompt: [{ type: "text", text: "must remain blocked" }] })).rejects.toMatchObject({ code: "input_busy" });
+    expect(send).not.toHaveBeenCalled();
+    await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { inputId: missingId, generation: 2 } });
+  });
+
   it("re-dispatches a persisted pending cancellation after restart and settles only on exact not_sent proof", async () => {
     const root = await tempRoot();
     const { store, lease } = durable(root);

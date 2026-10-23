@@ -1209,11 +1209,42 @@ export class AcpBridgeRuntime {
           throw new BridgeError("input_busy", "Outstanding provider input cannot be reconciled without the input read API");
         }
         const existing = await this.options.controller.input(pendingInputId);
-        if (!existing || existing.delivery === "unconfirmed" || existing.delivery === undefined) {
+        if (!existing) {
+          // An accepted provider input is durable in both the input journal and
+          // `currentProviderTurn`. If the exact row is absent but CoS still attests a
+          // different, already-drained provider turn whose drain marker is no newer than
+          // the cursor this bridge had persisted before this dispatch, the missing input
+          // never advanced CoS's provider owner. That is exact no-admission proof, not a
+          // silence timeout. Keep every other missing-row case ambiguous.
+          if (!this.options.controller.session) {
+            throw new BridgeError("input_busy", "Outstanding provider input is still delivery-unconfirmed");
+          }
+          const summary = await this.options.controller.session(session.sessionId);
+          const prior = summary.providerTurn;
+          const cursor = session.cosEventCursor ?? 0;
+          const provenNotAdmitted = prior?.inputId !== pendingInputId &&
+            prior?.state === "drained" &&
+            prior.drainedSeq !== null &&
+            prior.drainedSeq <= cursor;
+          if (!provenNotAdmitted) {
+            throw new BridgeError("input_busy", "Outstanding provider input is still delivery-unconfirmed");
+          }
+          await this.releaseLeaseAfterProof(session.sessionId, {
+            kind: "not_sent",
+            sessionId: session.sessionId,
+            inputId: pendingInputId,
+            generation,
+          });
+          session = await this.applyDurableTransition(session.sessionId, {
+            kind: "settle_not_sent",
+            inputId: pendingInputId,
+            generation,
+          });
+        } else if (existing.delivery === "unconfirmed" || existing.delivery === undefined) {
           throw new BridgeError("input_busy", "Outstanding provider input is still delivery-unconfirmed");
-        }
-        await this.requireInputIdentity(session, existing, pendingInputId);
-        if (existing.delivery === "not_sent") {
+        } else {
+          await this.requireInputIdentity(session, existing, pendingInputId);
+          if (existing.delivery === "not_sent") {
           await this.releaseLeaseAfterProof(session.sessionId, {
             kind: "not_sent",
             sessionId: session.sessionId,
@@ -1221,20 +1252,21 @@ export class AcpBridgeRuntime {
             generation,
           });
           session = await this.applyDurableTransition(session.sessionId, { kind: "settle_not_sent", inputId: pendingInputId, generation });
-        } else {
-          this.options.metrics?.increment("cosInputAcceptedOrReconciled");
-          if (session.bindingState === "create_pending") {
-            session = await this.applyDurableTransition(session.sessionId, {
-              kind: "binding",
-              inputId: pendingInputId,
-              generation,
-              bindingState: "bound",
-              canonicalCwd: canonicalRoot,
-              cosProjectId: project.projectId,
-            });
+          } else {
+            this.options.metrics?.increment("cosInputAcceptedOrReconciled");
+            if (session.bindingState === "create_pending") {
+              session = await this.applyDurableTransition(session.sessionId, {
+                kind: "binding",
+                inputId: pendingInputId,
+                generation,
+                bindingState: "bound",
+                canonicalCwd: canonicalRoot,
+                cosProjectId: project.projectId,
+              });
+            }
+            session = await this.applyDurableTransition(session.sessionId, { kind: "promote_mode", inputId: pendingInputId, generation });
+            throw new BridgeError("input_busy", "The previously accepted provider input must finish before a new prompt is admitted");
           }
-          session = await this.applyDurableTransition(session.sessionId, { kind: "promote_mode", inputId: pendingInputId, generation });
-          throw new BridgeError("input_busy", "The previously accepted provider input must finish before a new prompt is admitted");
         }
       }
     }

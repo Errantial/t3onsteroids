@@ -6,7 +6,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import { AcpBridgeRuntime } from "./index.js";
 import { BridgeError } from "./index.js";
 import { CosControllerError } from "../cos/index.js";
-import { CosControllerClient, discoverCosController } from "../cos/index.js";
+import { CosControllerClient, discoverCosController, type CosControllerTransport } from "../cos/index.js";
 import { createProductionStateContext } from "../state/index.js";
 import { StateIoError, StateLockBusyError, UnsupportedStateFilesystemError } from "../state/index.js";
 import type { ProviderTurnOutputEffect } from "../translate/driver.js";
@@ -18,6 +18,15 @@ export interface ProductionAcpOptions {
   readonly stdin?: Readable;
   readonly stdout?: Writable;
   readonly metrics?: BridgeMetrics;
+  /**
+   * Internal live-qualification hook only. The public CLI never sets this, and it does not
+   * change releaseReadiness() or the advertised supportedConcurrency capability.
+   */
+  readonly qualification?: {
+    readonly maxConcurrentTurns: 2 | 4;
+    readonly maxQueuedTurns: number;
+    readonly transport?: CosControllerTransport;
+  };
 }
 
 function cosUserDataDirectory(env: NodeJS.ProcessEnv): string {
@@ -94,8 +103,21 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
     await writeFile(metricsPath, `${JSON.stringify(metrics.snapshot(), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   };
   const userDataDir = cosUserDataDirectory(env);
-  const state = await createProductionStateContext(userDataDir, env, { warmProcessIdentity: true });
-  const controller = new CosControllerClient(() => discoverCosController(userDataDir), undefined, undefined, metrics);
+  const state = await createProductionStateContext(userDataDir, env, {
+    warmProcessIdentity: true,
+    ...(options.qualification
+      ? {
+          maxConcurrentTurns: options.qualification.maxConcurrentTurns,
+          maxQueuedTurns: options.qualification.maxQueuedTurns,
+        }
+      : {}),
+  });
+  const controller = new CosControllerClient(
+    () => discoverCosController(userDataDir),
+    options.qualification?.transport,
+    undefined,
+    metrics,
+  );
   // Prime Node/fetch/controller discovery while T3 is still completing the ACP handshake. The
   // response is deliberately discarded: prompt admission still takes its own fresh provider
   // readiness snapshot, so a restart, token rotation, disabled actions, or provenance change

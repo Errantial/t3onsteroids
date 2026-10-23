@@ -1,6 +1,6 @@
 # Development, setup and operations
 
-The v1 bridge is Windows-first, uses Node directly, and is versioned as `1.0.0`. The production implementation includes the ACP stdio provider, CoS controller/provider-extension client, event translator, durable state and profile-wide admission lease, restart/cancellation recovery, bounded streaming, and release diagnostics. V1 release qualification is complete on the pinned Windows tuple; this document describes that qualified operating model.
+The v1 bridge is Windows-first, uses Node directly, and is versioned as `1.0.0`. The production implementation includes the ACP stdio provider, CoS controller/provider-extension client, event translator, durable state and profile-wide admission lease, restart/cancellation recovery, bounded streaming, and release diagnostics. V1 release qualification is complete on the pinned Windows tuple. This post-v1 branch builds a bounded profile-wide concurrency scheduler on top of that released base; higher concurrency remains separately qualified and does not change the v1 release result.
 
 ## Pinned release tuple
 
@@ -70,7 +70,9 @@ ACP `ResourceLink` support follows the same boundary: only local `file:` URIs th
 
 V1 is same-host, **same OS user/profile** only. The bridge discovers the current user's CoS controller token from that user's CoS profile; a different-user service or remote-client authority model has not been release-qualified.
 
-V1 admits **one active bridged turn per stable CoS profile/controller identity**, coordinated across ACP processes by a durable profile-wide lease. A second simultaneous turn receives a deterministic busy result instead of being queued invisibly. Controller port/token rotation does not create a new admission domain. Two-to-four concurrent chats are post-v1 work and must not be advertised yet.
+The pinned v1 release contract admits one active bridged turn per stable CoS profile/controller identity. That release uses a durable profile-wide lease, and a second simultaneous turn receives a deterministic busy result; controller port/token rotation does not create a new admission domain.
+
+On branch feat/post-v1-concurrency, commit b8640281c52b932bc7f8cd3d6f5048164a7beb0a implements the post-v1 durable profile-wide scheduler: a bounded active set, FIFO waiting queue, exact queued cancellation/release, and legacy single-lease state compatibility. The production capability is intentionally still supportedConcurrency: 1 until isolated live qualification passes at two chats. Do not infer support for two or four chats from the implementation or offline tests alone; qualify four separately against the controller's four-stream global cap.
 
 ## Terminal semantics and background work
 

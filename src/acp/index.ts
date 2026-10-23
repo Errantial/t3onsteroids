@@ -1392,8 +1392,11 @@ export class AcpBridgeRuntime {
           } catch (settleError) {
             const settled = await this.readPersisted(session.sessionId);
             if (settleError instanceof BridgeError && settleError.code === "session_broken" &&
-                settled?.generation === generation && !settled.activeInputId && !settled.providerTranslation &&
-                settled.cancelIntent === "none") {
+                settled?.generation === generation && !settled.activeInputId && !settled.activeCosTurnId &&
+                !settled.providerTranslation && !settled.cancelTargetTurnId && settled.cancelIntent === "none" &&
+                !settled.inputDispatchState && !settled.dispatchInputId && !settled.admissionLeaseId &&
+                !settled.pendingInteractionMode && !settled.modeTransitionInputId &&
+                settled.bindingState !== "create_pending") {
               throw new BridgeError("cancelled", "Provider input was cancelled before dispatch");
             }
             throw settleError;

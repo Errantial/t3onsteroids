@@ -6,6 +6,8 @@ The codebase is pinned to T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e
 
 The preserved historical V1-11 broken admission domain remains immutable fail-closed regression evidence; it was never repaired, rewritten, or reused. Release qualification uses the fresh final-tuple V1-11 PASS required by `PLAN.md`.
 
+The post-v1 concurrency work on `feat/post-v1-concurrency` is separate from that released tuple. Its scheduler implementation and qualification evidence must be evaluated against the released v1 base before any higher `supportedConcurrency` claim is made; post-v1 changes do not retroactively alter the v1.0.0 release qualification result.
+
 ## Supported launcher
 
 T3 must launch a real executable with `shell:false`. The selected/validated **launch shape** is the installed real `node.exe` with the built `dist/cli/index.js` script as its argument. `.cmd`/`.bat` wrappers are unsupported. No standalone packager is bundled or implicitly downloaded.

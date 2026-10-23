@@ -47,7 +47,7 @@ export const v1ReleaseGateManifest: V1ReleaseGateManifest = {
     controllerPrivacy: { status: "pass", evidencePath: "docs/evidence/v1-05-controller-privacy.md" },
     toolchainAudit: { status: "pass", evidencePath: "docs/evidence/v1-06-toolchain-audit.md" },
     performance: { status: "pass", evidencePath: "docs/evidence/v1-07-performance.md" },
-    liveAcceptance: { status: "pending", evidencePath: "docs/evidence/v1-08-acceptance.md" },
+    liveAcceptance: { status: "pass", evidencePath: "docs/evidence/v1-08-acceptance.md" },
     t3HeadDrift: { status: "pending", evidencePath: "docs/evidence/v1-09-release.md", outcome: null },
     releasePreparation: { status: "pending", evidencePath: "docs/evidence/v1-09-release.md" },
   },

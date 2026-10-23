@@ -4,11 +4,13 @@ Status: PASS
 
 # V1 Step 6 — toolchain audit and pre-live implementation freeze
 
-`bridgeImplementationCommit`: `4cffd484601ae3dabfc2bce066f47cac3fbf8f9a`.
+`bridgeImplementationCommit`: `f3a672cffdee77f54d377d5594893e0606d20d5b`.
 
-`evidenceCommit`: `4cffd484601ae3dabfc2bce066f47cac3fbf8f9a` (implementation commit used as the evidence-refresh base; later evidence-only commits do not change `bridgeImplementationCommit`).
+`evidenceCommit`: `f3a672cffdee77f54d377d5594893e0606d20d5b` (current implementation base; later evidence-only commits do not change `bridgeImplementationCommit`).
 
-Pinned runtime tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `e5157983c6b5cbc7a9a1fc77c0822d452ab52d2f`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
+Pinned runtime tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `495e3e96504d9b865c18478f7b42915280712f84`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
+
+The strict-reset deterministic refresh is `.local-evidence/v1/20261023T054205Z-step8-deterministic-final/step8-deterministic.json` — PASS, 2/2 files and 50/50 tests. Final release checks are rerun after evidence/manifest closure; historical implementation/provider references later in this file are retained for lineage only.
 
 The runtime dependency lane remains deliberately narrow: `@agentclientprotocol/sdk` is pinned at `1.9.0` and Node requires `>=24`. Development tooling is pinned to TypeScript `5.9.3`, Vitest `5.0.5`, vite-node `6.0.0`, typescript-eslint `8.71.2`, and ESLint / @eslint/js `9.39.5`. The cross-process fixture uses the explicit vite-node dependency rather than relying on an accidental Vitest transitive path.
 

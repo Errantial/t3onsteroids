@@ -4,11 +4,13 @@ Status: PASS
 
 # V1 Step 3 — durable state, recovery and admission lease
 
-`bridgeImplementationCommit`: `4cffd484601ae3dabfc2bce066f47cac3fbf8f9a`.
+`bridgeImplementationCommit`: `f3a672cffdee77f54d377d5594893e0606d20d5b`.
 
-`evidenceCommit`: `4cffd484601ae3dabfc2bce066f47cac3fbf8f9a` (implementation commit used as the evidence-refresh base; later evidence-only commits do not change `bridgeImplementationCommit`).
+`evidenceCommit`: `f3a672cffdee77f54d377d5594893e0606d20d5b` (current implementation base; later evidence-only commits do not change `bridgeImplementationCommit`).
 
-Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `e5157983c6b5cbc7a9a1fc77c0822d452ab52d2f`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
+Pinned tuple: T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`; CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`; CoS `providerExtension` buildId `495e3e96504d9b865c18478f7b42915280712f84`; ACP SDK `1.9.0`; Node `24.21.0`; Windows x64.
+
+Current-final deterministic owner: `.local-evidence/v1/20261023T054205Z-step8-deterministic-final/step8-deterministic.json` — PASS, including f3-specific missing-dispatched-input reconciliation, restart, cancellation, and quarantine boundaries. Historical implementation/provider references later in this file are retained for lineage only.
 
 Validated production durability covers the Windows hard-link mutation mutex and capability probe; tagged/quarantined session reads; guarded narrow transitions preserving concurrent cursor/cancel/mode state; provisional first-session binding/mode state while CoS delivery is only `pending`; exact unwind to unbound/prior mode when cancellation proves `not_sent`; exact generation/input/turn checks; stable profile-derived admission identity; one long-lived cross-process lease; stale-owner and PID-reuse handling without heartbeat-only stealing; crash-safe create/send/cancel/Stop recovery; lease retention through `turn_end`; release only after authoritative drain/final persistence proof; exact cancellation-target persistence; safe unknown/corrupt resume quarantine; and prevention of stale reconciler deletion of replacement leases.
 

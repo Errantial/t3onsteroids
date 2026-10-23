@@ -13,7 +13,7 @@
     "controlApiProtocol": 1,
     "providerExtension": {
       "apiVersion": 1,
-      "buildId": "15800c3b772424fe215f513f3ed69140b3795047",
+      "buildId": "495e3e96504d9b865c18478f7b42915280712f84",
       "features": {
         "provider-project-resolve-v1": 1,
         "provider-assistant-content-v1": 1,

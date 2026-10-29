@@ -13,7 +13,13 @@ The first v1 support tuple is:
 - `@agentclientprotocol/sdk@1.9.0`;
 - Node 24, Windows x64.
 
-Treat current upstream T3 HEAD as a **separate drift lane**. The V1 release drift check against `807319c276c6831b2c219640e9da5b38019a8f1d` recorded `compatible`; that result does not widen the pinned support tuple. Future drift runs must still avoid editing pinned compatibility metadata or loosening prompt normalization merely to make HEAD work.
+Treat current upstream T3 HEAD as a **separate drift lane**. The V1 release drift check against `807319c276c6831b2c219640e9da5b38019a8f1d` recorded `compatible`; that result does not widen the pinned support tuple. Never loosen prompt normalization or other compatibility behavior merely to make HEAD work.
+
+## Pinned development baseline
+
+`src/compatibility.ts` tracks the **development baseline** and now targets T3 `0.1.5-nightly.20261029.3877` / `6d450a4284852af137b2f3407fddd89eb76e7644`. That baseline is ahead of the last live-qualified tuple. Qualification is tuple-specific: `v1ReleaseGateManifest.qualifiedT3Sha` records the T3 commit the release gates were recorded against, and `releaseReadiness()` reports `t3BaselineQualified:false` / `releaseQualified:false` whenever the two differ. Promote `qualifiedT3Sha` only together with fresh live-acceptance evidence for the new baseline.
+
+The maintained T3 patch series lives in `handoff/t3-patches/`; the directory for this baseline is `main-2026-10-29-6d450a42` (same commit as nightly `.3877`). On the new baseline the series applies cleanly, the full `vp` typecheck passes (36/36 packages), the web production build succeeds, and the focused web/ACP test suites pass.
 
 ## Install and verify
 

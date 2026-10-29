@@ -6,8 +6,8 @@ Each directory holds a `git am`-able series for one T3 base commit:
 
 | Directory | T3 base | Status |
 | --- | --- | --- |
-| `pinned-ffb4af8d/` | `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8` (the pinned support tuple) | applies clean; web typecheck, focused tests, fmt and lint pass; sandboxed browser verification with a mock ACP agent passes |
-| `main-2026-10-29-6d450a42/` | upstream `main` `6d450a4284852af137b2f3407fddd89eb76e7644` | applies clean; the ComposerFooterControls extraction needed a port; focused tests were not re-run and the typecheck is unverified because the install used the pinned lockfile (302 missing-dependency errors, none in these files) |
+| `pinned-ffb4af8d/` | `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8` (the release-qualified v1.0.0 support tuple) | applies clean; web typecheck, focused tests, fmt and lint pass; sandboxed browser verification with a mock ACP agent passes |
+| `main-2026-10-29-6d450a42/` | `6d450a4284852af137b2f3407fddd89eb76e7644` = `v0.1.5-nightly.20261029.3877` (current development baseline) | applies clean; full `vp` typecheck 36/36 packages, web production build, and focused web/ACP tests pass (2026-10-29) |
 
 ## Apply
 
@@ -21,7 +21,7 @@ If a hunk conflicts on a newer base, port it by hand: the series keeps its footp
 ## Series
 
 - `0001` `feat(web): optional per-thread tokens/sec readout`: last finished turn's average output tokens/sec next to the context-window meter, toggled from the meter popover (off by default, remembered per thread on the client). Uses only a complete provider-reported main-agent total and the turn's wall time; shows nothing otherwise (so nothing for the CoS provider until it reports token usage).
-- `0002` `feat(acp): report per-turn token usage from the prompt response`: maps the usage an ACP agent returns with `session/prompt` into the normalized per-turn `TurnTokenUsage`, so the readout above works for ACP providers that report tokens. A report that carries thought tokens is stored as `partial` (ACP does not say whether output already includes them), which the readout ignores rather than understating a rate. Verified on the pinned base with new adapter tests plus pure-mapping tests. The `main` port applies and its pure-mapping tests pass; its adapter integration test and typecheck were not run. One unrelated Windows failure exists in `AcpRegistryAdapterV2.test.ts` (no win32-x64 fixture distribution), identical without these patches.
+- `0002` `feat(acp): report per-turn token usage from the prompt response`: maps the usage an ACP agent returns with `session/prompt` into the normalized per-turn `TurnTokenUsage`, so the readout above works for ACP providers that report tokens. A report that carries thought tokens is stored as `partial` (ACP does not say whether output already includes them), which the readout ignores rather than understating a rate. Verified on the pinned base with new adapter tests plus pure-mapping tests. On the `v0.1.5-nightly.20261029.3877` port the whole repository typechecks (36/36 packages), `AcpAdapterV2.test.ts` passes 72/72 including the usage-mapping case, and the web production build succeeds.
 
 ## Browser verification (2026-10-29)
 

@@ -21,7 +21,7 @@ CoS → T3 through T3's outside-agent MCP surface is a later independent capabil
 
 ## Pinned development baseline
 
-- T3 running desktop/server: `0.0.46-nightly.20261013.3040`, source SHA `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`.
+- T3 running desktop/server: `0.1.5-nightly.20261029.3877`, source SHA `6d450a4284852af137b2f3407fddd89eb76e7644`. This is the **pinned development baseline**; the `v1.0.0` live release claim remains tied to the previously qualified T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8` tuple until live acceptance is rerun on this baseline (`releaseReadiness()` reports `t3BaselineQualified:false` meanwhile). The maintained T3 patch series is verified against this baseline: the full `vp` typecheck (36/36 packages), the web production build, and the focused tokens/sec and ACP-usage suites pass on `6d450a42`.
 - CoS base for development: `2.1.39`, source SHA `87ae9d631f82d8da2f462d910410031ad8f97ac5`, local control API protocol `1`. The usable v1 compatibility tuple is **base SHA + exact provider-extension commit/build + advertised extension feature versions**. Production either requires an upstream CoS release containing those features or an explicitly supported fork/build with equivalent provenance; stock `2.1.39` alone remains sufficient only for the control-protocol spike.
 - ACP TypeScript SDK: pin `@agentclientprotocol/sdk` **1.9.0** exactly for the first implementation lane. Any upgrade is a separate compatibility change with rerun conformance.
 - Windows x64 is the first validated platform.

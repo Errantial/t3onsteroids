@@ -20,6 +20,8 @@ The first support claim is intentionally pinned:
 - ACP SDK `1.9.0`;
 - Node 24 on Windows x64.
 
+The **development baseline** (`src/compatibility.ts`) is T3 `0.1.5-nightly.20261029.3877` / `6d450a4284852af137b2f3407fddd89eb76e7644`. That is ahead of the release-qualified tuple above: `--release-readiness` reports `t3BaselineQualified:false` and `releaseQualified:false` until live acceptance is rerun on the new baseline and `v1ReleaseGateManifest.qualifiedT3Sha` is promoted with new evidence.
+
 The separate current-upstream T3 drift lane was run against `807319c276c6831b2c219640e9da5b38019a8f1d` and recorded `compatible`. That result does not silently widen the pinned v1 support tuple.
 
 ## Setup and launch

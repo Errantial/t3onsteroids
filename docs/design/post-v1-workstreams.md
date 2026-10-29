@@ -149,12 +149,34 @@ tuple is requalified. Worktree support is not a concurrency claim and does not c
 
 ## 2. Model and reasoning selection
 
-Open contract question: ACP 1.9 offers session modes, not a generic model selector. Before widening
-the bridge, confirm exactly how pinned T3 communicates a per-thread model/reasoning choice to a
-Local ACP provider, and whether it expects an ACP capability or a provider-specific extension. The
-controller must attest the exact model/effort on the accepted input; a T3 selection that cannot be
-proven must fail `unsupported_model` rather than silently using the CoS default. Do not advertise a
-model picker until the attestation exists.
+Confirmed against the pinned T3 server build:
+
+- T3 understands two ACP v1 paths. If `session/new` (or resume) returns a legacy `models`
+  catalog, it calls `session/set_model`. If the response carries config options, a `model`-category
+  select takes precedence and T3 calls `session/set_config_option`; a `thought_level` category
+  drives reasoning effort the same way.
+- T3 applies the selection before `session/prompt`, and does not put the model in the prompt
+  payload.
+
+Controller side (implemented in `5e32b52`):
+
+- `GET /v1/models` (`provider-model-catalog-v1`) publishes the observed ChatGPT catalog:
+  `state`, `observedAt`, and `models[]` with `id`, `label`, `efforts`.
+- `POST /v1/inputs` accepts `model` and `reasoningEffort` for provider chats. It resolves the model
+  against a ready catalog, rejects an unknown model or an effort the model does not offer before
+  the outbox, and records the resolved identity on the input. The existing browser model-selection
+  path applies it; an unavailable catalog fails `model_catalog_unavailable` rather than guessing.
+
+Bridge side (next):
+
+- Advertise a `model` config option (and a `thought_level` option for the selected model's
+  efforts) at `session/new` and resume from a cached, read-only `/v1/models` call. Do not trigger
+  discovery from ACP.
+- Handle `session/set_config_option` for those ids, persist the selection in durable session state,
+  and send it on every prompt. Revalidate the catalog after resume.
+- Attestation: CoS records the observed model on the session. The bridge must compare it with the
+  requested identity after admission/drain and fail `unsupported_model`/`model_mismatch` rather than
+  claiming a selection took effect. Until that check exists, do not advertise the picker.
 
 ## 3. Attachments and slash commands
 

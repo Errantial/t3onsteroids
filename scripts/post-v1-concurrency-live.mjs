@@ -977,6 +977,7 @@ if (includeFour && twoChatStatus === "PASS") {
     const stopSampler = await startRssSampler(peers, stateDir);
     const samples = [];
     let fifthStreamStatus = 0;
+    let fifthStreamProbe = null;
     try {
       for (let index = 1; index <= 10; index += 1) {
         const pending = peers.map((peer, peerIndex) => {
@@ -986,11 +987,23 @@ if (includeFour && twoChatStatus === "PASS") {
         await waitForLeaseState(stateDir, (state) => state.active.length === 4, 15000);
         if (index === 1) {
           const discoveryNow = await discoverCosController(profile);
-          const probe = await fetch(discoveryNow.baseUrl + "/v1/sessions/" + encodeURIComponent(peers[0].sessionId) + "/events/stream?from=0", {
-            headers: { Authorization: "Bearer " + discoveryNow.token, Accept: "text/event-stream" }, signal: AbortSignal.timeout(5000),
-          }).catch((error) => ({ status: 0, error: errorCategory(error) }));
-          fifthStreamStatus = typeof probe.status === "number" ? probe.status : 0;
-          if (probe.body) await probe.body.cancel().catch(() => undefined);
+          // An active lease proves send authority, not that the controller has created the session
+          // or that the bridge has opened its event stream yet. Let the four streams attach, then
+          // probe; a 404 before the session exists is a setup race, not a full stream budget.
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          const startedProbe = performance.now();
+          let attempts = 0;
+          while (attempts < 10 && performance.now() - startedProbe < 12000) {
+            attempts += 1;
+            const probe = await fetch(discoveryNow.baseUrl + "/v1/sessions/" + encodeURIComponent(peers[0].sessionId) + "/events/stream?from=0", {
+              headers: { Authorization: "Bearer " + discoveryNow.token, Accept: "text/event-stream" }, signal: AbortSignal.timeout(5000),
+            }).catch((error) => ({ status: 0, error: errorCategory(error) }));
+            fifthStreamStatus = typeof probe.status === "number" ? probe.status : 0;
+            if (probe.body) await probe.body.cancel().catch(() => undefined);
+            if (fifthStreamStatus === 200 || fifthStreamStatus === 503) break;
+            await new Promise((resolve) => setTimeout(resolve, 750));
+          }
+          fifthStreamProbe = { attempts, elapsedMs: Math.round(performance.now() - startedProbe), status: fifthStreamStatus };
         }
         const outcomes = await Promise.all(pending);
         if (outcomes.some((row) => !row.ok)) {
@@ -1014,7 +1027,7 @@ if (includeFour && twoChatStatus === "PASS") {
       return { pass, evidence: { schemaVersion: 1, chatCount: 4, turnsPerChat: 10, latency, sessionProofs: proofs,
         maxActiveLeases: rss.maxActiveLeases, maxWaitingLeases: rss.maxWaitingLeases, perProcessBridgeRssHighWaterBytes: perProcessRss,
         aggregateBridgeRssHighWaterBytes: rss.aggregateRssHighWaterBytes, aggregateRssSampleCount: rss.rssSampleCount,
-        fifthStreamStatus, fifthSseProbeFitsAlongsideFourBridgedChats: fifthStreamStatus === 200 },
+        fifthStreamStatus, fifthStreamProbe, fifthSseProbeFitsAlongsideFourBridgedChats: fifthStreamStatus === 200 },
         summary: { turns: samples.length, maxActiveLeases: rss.maxActiveLeases, latencyBudgetPass: latency.budgetPass, fifthStreamStatus } };
     } finally { await stopSampler(); await Promise.all(peers.map(closePeer)); }
   });

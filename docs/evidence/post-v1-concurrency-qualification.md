@@ -127,3 +127,16 @@ Bridge compatibility now pins provider build `4be7fc9`. The running `8b907ee` ca
 ## 2026-10-29 stream budget for one process per chat
 
 The live gate starts one ACP bridge process per chat, so four concurrent chats hold four separate controller event streams; the multiplexed route only shares a connection between chats that one bridge process follows. With `MAX_EVENT_STREAMS = 4` the four-chat workload therefore left no slot for the gate's fifth-stream probe, which is what the earlier blocker recorded. Provider build `d7b266711c408c8183b1bddbd927ab85d533843b` raises the cap to eight: the four-chat working set plus headroom for a probe or a second reader. The multiplexed route remains advertised and tested for clients that follow several chats in one process, and still holds one slot for its whole subscription set. Provider stream tests 13/13 and the other control-API suites 83/83 pass at this build; the bridge compatibility pin now names it.
+
+The reconnect fault case originally keyed its drop on a numeric SSE `id`, which the multiplexed route intentionally does not send, so the fault never fired on provider build `4be7fc9`. `scripts/post-v1-concurrency-runner.mjs` now also reads `sessionId`/`seq` from a mux frame and records the per-session cursor the next connection resumed from. An isolated rerun of `sse-reconnect-with-two-active` then passed (`sseReconnectCount: 1`) before the full matrix was repeated at build `d7b2667`.
+
+## 2026-10-29 four-chat gate attempts at build d7b2667
+
+Two full-matrix runs exercised the eight-stream budget and the multiplexed route. In both, all eight two-chat cases passed on the new build.
+
+- `20261029T203600Z-full-eight-stream-cap-8`: the four-chat workload completed all 40 turns with four active leases and four passing session proofs (10 confirmed inputs, 10 drains, no duplicate sequence per chat); per-process RSS stayed between 82 and 95 MB. The gate failed on latency: drain p95 was 1467 ms against the 1000 ms budget, with outliers of 743, 1467, 3283 and 4928 ms. End-to-end median was 8.8 s. The fifth-stream probe recorded 404 because it ran before the controller had created that chat's session; the probe now waits for the four bridges to attach and retries on a setup race.
+- `20261029T204848Z-full-eight-probe-retry`: the eight two-chat cases passed again. The four-chat workload reached round 7, then one chat received its prompt but never had an input accepted within the 15 s lease wait; the case aborted with `lease_state_timeout` and no pre-send phase was recorded for that turn.
+
+A direct stream-budget check against the same build held four per-session streams and opened a fifth: statuses `200, 200, 200, 200, 200`. The eight-slot budget and the multiplexed route therefore work as designed; they are not the remaining constraint.
+
+Four concurrent chats are **not qualified**. Correctness held on every turn that completed, but hidden-tab completion detection produced drain delays above the gate budget and one pre-send acceptance stalled past the gate's wait. `supportedConcurrency` remains 2. Raising it requires either steady drain latency under four hidden provider tabs or a documented budget change, and a four-chat run with no stalled acceptance.

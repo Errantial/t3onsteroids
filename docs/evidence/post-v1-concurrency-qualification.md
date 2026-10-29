@@ -78,3 +78,15 @@ The lane now targets T3 `0.1.5-nightly.20261029.3877` / `6d450a4284852af137b2f34
 Offline gate on the updated tree: typecheck PASS, ESLint PASS (one pre-existing `prefer-const` in `src/state/durable.ts` fixed), build PASS, `25/25` test files and `283/283` tests PASS. This includes the queueing scheduler, cancellation-reconciliation hardening, and the controller read-retry/history paging work already in this branch.
 
 Live qualification remains pending on the same two external blockers recorded above: the isolated Chrome companion extension is not currently paired (`bridgePresent=false`), and the newest valid two-chat sample still fails the 250 ms pre-send p95 gate (`8b907ee`: 388/232/407/241/130/189 ms, two samples over budget). No new live prompts were sent during this baseline move.
+
+## 2026-10-29 live two-chat attempt on the re-paired lane
+
+The isolated Chrome lane was restored by pointing the companion extension at the running candidate (browser port `8767`, token from `cos-profile-live-01`) and stopping a stale candidate that was holding the extension on port `8765`. Preflight then reported `bridgeReady=true` (protocol 1, actions enabled, exact build `8b907ee`).
+
+Run `20261029T180339Z-twochat-8b907ee-nightly` (8 cases):
+
+- PASS: queue-cancel-slot-reuse (`maxWaitingLeases=1`), independent-active-cancellation (`maxActiveLeases=2`), crash-restart-with-two-active (2 unique inputs, `maxActiveLeases=2`), cross-session-stale-event, long-output-slow-consumer-rss (107 MiB, below the 256 MiB budget).
+- FAIL: single-chat-baseline (pre-send p95 `640 ms`; samples `426,155,640,116,108,107,96,169,212,104`), two-chat-workload (pre-send p95 doomed with 2/12 over budget: `99,125,111,224,136,262,209,238,201,107,334,100`).
+- SSE-reconnect case failed with a harness `TypeError` in its evidence path (`a.result` read when the prompt outcome was not `ok`). Fixed with optional chaining plus recorded prompt outcomes; the isolated rerun `20261029T181405Z-sse-reconnect-only` PASSed (`sseReconnectCount=1`, `maxActiveLeases=2`).
+
+Latency profile: every phase except `inputSendMs` is stable (persisted read 1-7 ms, project 5-23 ms, readiness 3-14 ms, durable prepare 18-28 ms, lease acquire 15-42 ms, mark dispatched 16-29 ms). The failures are isolated to controller input acceptance: `inputSendMs` was 24-121 ms on most turns but 334 ms (first turn) and 544 ms (third turn) in the baseline. No provider semantics were changed for this run.

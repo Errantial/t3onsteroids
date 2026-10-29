@@ -850,7 +850,8 @@ const sse = await maybeRunCase("sse-reconnect-with-two-active", async () => {
     return { pass, evidence: { schemaVersion: 1, bothSessionsActiveDuringFaultCase: rss.maxActiveLeases === 2,
       intentionalSseDrop: { performed: fault.sseDropPerformed, afterSeq: fault.afterSeq, reconnectFrom: fault.reconnectFrom },
       reconnectMetrics: { sseConnectCount: metrics.sseConnectCount, sseReconnectCount: metrics.sseReconnectCount, backoffCount: metrics.backoffCount },
-      bothFinalsMatched: a.result.finalMatched && b.result.finalMatched, sessionProofs: [proofA, proofB],
+      bothFinalsMatched: a.result?.finalMatched === true && b.result?.finalMatched === true, sessionProofs: [proofA, proofB],
+      promptOutcomes: [a.ok ? "ok" : a.errorCategory, b.ok ? "ok" : b.errorCategory],
       maxActiveLeases: rss.maxActiveLeases, aggregateBridgeRssHighWaterBytes: rss.aggregateRssHighWaterBytes, aggregateRssSampleCount: rss.rssSampleCount },
       summary: { reconnectPass: pass, sseReconnectCount: metrics.sseReconnectCount, maxActiveLeases: rss.maxActiveLeases } };
   } finally { await stopSampler(); await Promise.all(peers.map(closePeer)); }

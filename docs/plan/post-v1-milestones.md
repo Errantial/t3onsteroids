@@ -65,10 +65,12 @@ Complete as an explicit refusal policy.
 
 ## M5. One provider build and 2-chat requalification
 
-In progress.
+Complete.
 
 - Batch the provider commits above into one extension build, pin it in the bridge, rebuild the
   bridge, and rerun the full eight-case 2-chat matrix against the rebuilt candidate. Record the
   build id, executable identity, matrix result and any setup-invalid attempts in
   `docs/evidence/post-v1-concurrency-qualification.md` and `docs/release-status.md`.
 - 4/8-chat concurrency stays parked at `supportedConcurrency=2`.
+
+- Evidence: provider build d77cdca, bridge pin 63db337, full bridge suite 297/297, candidate healthy with all nine features. Run 20261029T230611Z-twochat-requal-retry2 passed all eight cases (baseline pre-send/drain/post p95 109/933/89 ms; two-chat 142/719/94 ms; RSS 82/87 MB per process) on T3 6d450a42 and CoS base 87ae9d63, executable SHA-256 AAFEE508A39EA6C696B39E629410A8CB5C442215919087807F2DD24B32AA87AE. Two earlier attempts failed one flaky case each and are recorded in docs/evidence/post-v1-concurrency-qualification.md; the passing run is the qualifying evidence.

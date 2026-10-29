@@ -643,7 +643,14 @@ const twoChat = await maybeRunCase("two-chat-workload", async () => {
         state.active.some((row) => row.sessionId === peers[0].sessionId) && state.active.some((row) => row.sessionId === peers[1].sessionId),
       [outcomeA, outcomeB], 15000);
       const [a, b] = await Promise.all([outcomeA, outcomeB]);
-      if (!a.ok || !b.ok) throw new Error("two_chat_prompt_failed");
+      if (!a.ok || !b.ok) {
+        const failures = [a, b].flatMap((row, peerIndex) => row.ok ? [] : [{
+          peer: peerIndex + 1,
+          category: row.errorCategory,
+          message: typeof row.error?.message === "string" ? row.error.message.slice(0, 160) : null,
+        }]);
+        throw new Error("two_chat_prompt_failed " + JSON.stringify({ round: index, failures }));
+      }
       let classifiedA;
       let classifiedB;
       try {

@@ -140,3 +140,21 @@ Two full-matrix runs exercised the eight-stream budget and the multiplexed route
 A direct stream-budget check against the same build held four per-session streams and opened a fifth: statuses `200, 200, 200, 200, 200`. The eight-slot budget and the multiplexed route therefore work as designed; they are not the remaining constraint.
 
 Four concurrent chats are **not qualified**. Correctness held on every turn that completed, but hidden-tab completion detection produced drain delays above the gate budget and one pre-send acceptance stalled past the gate's wait. `supportedConcurrency` remains 2. Raising it requires either steady drain latency under four hidden provider tabs or a documented budget change, and a four-chat run with no stalled acceptance.
+
+## 2026-10-29 batched provider build and 2-chat requalification
+
+Provider build `d77cdcaf4433aa54df5bd8b2c06c21083f92d3f8` carries `provider-session-workspace-v1`, `provider-model-catalog-v1` and `provider-input-images-v1` on top of the turn-drain and multiplexed-stream features. The bridge pin and full bridge suite (297/297) were refreshed at that build, and the packaged candidate reported `buildId=d77cdca…` with all nine features, actions enabled, a paired browser and a ready model catalog.
+
+Authoritative run: `20261029T230611Z-twochat-requal-retry2` — **PASS**, all eight cases.
+
+- single-chat baseline: 10 turns, pre-send p95 109 ms, drain p95 933 ms, post-drain p95 89 ms, RSS 79 MB.
+- two-chat workload: 20 turns, 2 active leases, pre-send p95 142 ms, drain p95 719 ms, post-drain p95 94 ms, per-process RSS 82/87 MB, aggregate 147 MiB.
+- queue/cancel/slot reuse, independent cancellation, SSE reconnect (`sseReconnectCount:1`), crash/restart, cross-session stale event, and long-output slow-consumer all passed.
+- Tuple: T3 `6d450a4284852af137b2f3407fddd89eb76e7644`, CoS base `87ae9d631f82d8da2f462d910410031ad8f97ac5`. Candidate executable SHA-256 `AAFEE508A39EA6C696B39E629410A8CB5C442215919087807F2DD24B32AA87AE`.
+
+Two earlier attempts on the same build did not pass and are retained as setup evidence:
+
+- `20261029T224954Z-twochat-requal-d77cdca`: baseline drain p95 1103 ms against 1000 ms; the two-chat workload itself passed.
+- `20261029T225829Z-twochat-requal-retry`: baseline passed; the two-chat workload stopped after eight accepted turns per peer because one prompt failed (the harness now records the round, peer and category for that failure).
+
+The passing run is the qualifying evidence; `supportedConcurrency` remains 2. The workspace/model/image features do not raise that ceiling and 4/8-chat concurrency remains parked.

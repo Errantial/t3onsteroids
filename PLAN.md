@@ -1,16 +1,15 @@
 # T3 Code ↔ Chat On Steroids Compatibility Plan
 
-Status: implementation in progress. The bridge contracts, controller client, lazy-binding runtime, recovery guards, offline performance guard tests and release diagnostics exist, but v1 is **not yet release-complete**. The authoritative path to a finished v1 is the "Remaining work to finished v1" section below.
+Status: **v1.0.0 release-qualified** on the pinned Windows support tuple. The implementation, live acceptance, performance, current-T3 drift, fresh-checkout release preparation, and final release manifest are complete for V1; the remaining sections below are retained as the design/qualification specification and historical implementation plan.
 
 ## Current implementation checkpoint
 
-As of the current repository state:
+As of the qualified `v1.0.0` repository state:
 
-- **Complete in this repository:** project/tooling foundation, compatibility metadata, typed protocol-1 CoS client, bridge-side project/content/policy extension contracts, prompt normalization, lazy session binding, per-prompt readiness/policy checks, cancellation-intent state-machine handling, single-controller admission leasing semantics, bounded retry/backpressure helpers, release diagnostics, and offline/package-smoke tests.
-- **Partially complete:** the provider-extension client still lacks the newly source-validated `provider-turn-drain-v1` contract; ACP runtime semantics exist as library code, but there is no production stdio ACP agent entrypoint yet; persistence and admission leasing are currently memory implementations rather than durable/cross-process production implementations; Phase-1 stream/JSON hardening still has known cleanup items.
-- **Not yet implemented here:** the actual CoS provider extension described in Phase 2, the Phase-4 event translator/terminal-state machine, durable state/lease storage, production ACP stdio wiring, and the complete pinned live end-to-end acceptance matrix.
-- **Previously proven externally:** a disposable Local ACP spike on the pinned running T3 build exercised initialize/new/prompt/stream/Stop, and the exact pinned stock CoS protocol-1 controller suite passed 136/136 targeted tests.
-- **Release status:** pre-v1. Do not describe the provider as compatible/release-qualified until the remaining v1 gates below are complete.
+- **Complete in this repository:** project/tooling foundation, pinned compatibility metadata, typed protocol-1 CoS client, all five required provider-extension contracts including `provider-turn-drain-v1` and `provider-turn-recovery-v1`, prompt normalization, lazy session binding, per-prompt readiness/policy checks, exact cancellation/restart recovery, durable cross-process session/admission state, bounded streaming/backpressure, the production ACP stdio entrypoint, event translation/terminal settlement, privacy-safe diagnostics/metrics, and release-readiness derivation.
+- **Qualified live behavior:** Step 7 performance/reconnect/restart/slow-consumer lanes are PASS, and the complete pinned V1-01…V1-19 acceptance matrix is PASS on the final bridge/provider tuple. The preserved historical broken V1-11 admission domain remains untouched fail-closed regression evidence; qualification uses a separate fresh final-tuple V1-11 PASS.
+- **Release preparation:** current upstream T3 HEAD drift is recorded separately as compatible without widening the pinned support claim, and fresh-checkout verification, audit, launcher proof, evidence closure, and final manifest promotion are complete.
+- **Release status:** `v1.0.0` is tagged and release-qualified for the explicit pinned tuple and support boundaries documented in `docs/release-status.md` and `docs/evidence/v1-09-release.md`. Post-v1 items such as 2–4 concurrent bridged chats remain outside the V1 support claim.
 
 ## Objective
 
@@ -1028,13 +1027,30 @@ Do not call the provider compatible until all of the following are true on the p
 
 After v1 is stable, pursue these in this order unless product priorities change:
 
-1. **2–4 concurrent CoS chats/threads.** This is a desired feature immediately after v1, not merely an exploratory idea. Qualify two concurrent chats first, then four. Replace the v1 single-slot admission lease with a bounded profile-wide scheduler while retaining one active root turn per bound session. Measure browser reliability, queue depth, memory, controller utilization, latency, cancellation isolation and stale-event isolation. Respect the controller's four-SSE global cap; if four bridged chats cannot coexist safely with controller overhead/other clients, add a multiplexed event-stream extension before advertising the higher ceiling. Concurrency must be capability-advertised from measured support rather than configured optimistically.
-2. model/reasoning selection bound to an exact CoS input;
-3. pre-effect external approval/question routing so T3 can own those interactions;
-4. deliberate T3 MCP forwarding/namespacing into CoS;
-5. CoS worker/subagent projection into T3 native subagent UI;
-6. ACP v2-only features where they add concrete value;
-7. macOS/Linux packaging and conformance;
-8. CoS→T3 outside-agent MCP packaging;
-9. optional legacy T3 `v0.0.42` lane;
-10. native T3 provider only if a measured ACP limitation cannot be solved at the CoS/controller layer.
+1. **Usage page: extend T3 Code's existing `/usage` page to cover the CoS-backed provider.** Source review of the pinned T3 (`ffb4af8d…`) and upstream `main` (`6d450a42…`, 2026-10-29) shows T3 **already ships** a usage page (`apps/web/src/routes/usage.tsx`, `apps/server/src/usage/*`, `packages/contracts/src/usage.ts` and `providerUsageLimits.ts`) with cost/token views, per-provider subscription quota windows, usage-limit sources, price overrides and a `usage.open` keybinding. This item is therefore gap-filling inside that page, not a new page, and it must reuse its components, contracts, keybindings and empty/unavailable states.
+   - **Audit result (pinned `ffb4af8d`):** the page's `UsageProviderKind` is the closed set `claude | codex | grok | cursor | opencode | antigravity | pi` (`packages/contracts/src/usage.ts`). Usage is aggregated server-side from provider transcripts (`apps/server/src/usage/usageTranscriptReader.ts`), and subscription windows come from per-provider quota probes plus configurable usage-limit sources (`providerUsageLimits.ts`). A CoS-backed Local ACP thread is none of these, so it cannot appear: it has no transcript on disk and no quota probe. Per-turn token usage (`TurnTokenUsage` in `providerRuntime.ts`) is the only normalized channel an ACP provider could feed.
+   - Design consequence: do not add `cos` to the transcript-reader path. The smallest honest route is for the bridge to relay controller-reported usage as ACP usage metadata that T3 maps into `TurnTokenUsage` (which also lights up the tokens/sec readout), and to show subscription windows for CoS only if the controller exposes them. Both depend on the controller usage contract below.
+   - For CoS, determine whether the controller can report authoritative usage. If not, that is a versioned controller extension (`provider-usage-v1` style, behind the explicit contract rules in `AGENTS.md`) and the page shows its existing "unavailable" state until then. Never estimate.
+   - Honor T3's own constraints from its `AGENTS.md`: performance (no oversized websocket payloads), remote-ready (works over relay/tunnel), and multi-surface (web, desktop, mobile) with a per-provider adapter decision, even if that decision is "not supported".
+   - Privacy: aggregate counts only; no prompt text, tool bodies, tokens or raw configuration are logged or persisted.
+2. **Toggleable tokens/sec display per thread.** *Status: implemented as a patch* (`handoff/t3-patches/`, pinned `ffb4af8d` and ported to upstream `main` `6d450a42`); remaining: sandboxed browser verification. Not present in the pinned or current T3 (no tok/s code found). T3 does carry per-turn token usage (`ProviderTurnTokenUsage`, Claude/Codex turn-token-usage modules, context-window meter), which is the natural data source; add timing alongside it rather than a parallel pipeline.
+   - Off by default; per-thread toggle persisted through T3's normal preference mechanism and reachable from the same surfaces T3 uses for comparable controls (thread chrome, Settings, command palette, keybinding), with a way to turn it back off.
+   - Throughput comes only from provider-reported token counts and real timestamps. Where a provider (notably CoS, which drives a browser chat) cannot report authoritative output tokens, show nothing or "n/a"; a character-count estimate is never presented as tokens.
+   - Define the measurement window (first output to last output versus whole turn), live behavior while streaming, and reset between turns. Updates are throttled so streaming and rendering cost do not regress.
+   - Shares the provider-capability/availability contract with item 1.
+
+   **Delivery vehicle (decided): a maintained patch series against T3, not upstream contributions.**
+   - The work ships as an ordered, `git am`-able patch series (the same pattern as `handoff/cos-provider-extension-patches`), kept in a dedicated directory/repo here and pinned to explicit T3 SHAs. Prefer new files and small, well-isolated hook points in existing files so the series rebases cleanly onto other T3 forks; avoid broad refactors and formatting churn.
+   - **Never open PRs, issues or discussions against `pingdotgg/t3code`.** Local clones keep `origin`'s push URL disabled. Publishing, if any, goes only to a fork the user owns and names.
+   - T3's source shows no third-party plugin/extension mechanism for web UI or server features (its "extension" concepts are provider-native, e.g. Pi), so a patch series is the extension story unless a supported hook is found later. Re-verify this on each target fork.
+   - Each release of the series records the T3 base SHA it applies to, a clean-apply check against the pinned SHA and current upstream `main`, and focused tests only (T3 asks contributors not to run repo-wide checks). Follow T3's own rules when testing: never start a server against `~/.t3/userdata`, seed a sandbox `.t3` from a copy, and per this repository's `AGENTS.md` use the browser/background path rather than taking over the desktop app.
+3. **2–4 concurrent CoS chats/threads.** This is the next bridge capability after the T3 UI features above, not merely an exploratory idea. Qualify two concurrent chats first, then four. Replace the v1 single-slot admission lease with a bounded profile-wide scheduler while retaining one active root turn per bound session. Measure browser reliability, queue depth, memory, controller utilization, latency, cancellation isolation and stale-event isolation. Respect the controller's four-SSE global cap; if four bridged chats cannot coexist safely with controller overhead/other clients, add a multiplexed event-stream extension before advertising the higher ceiling. Concurrency must be capability-advertised from measured support rather than configured optimistically.
+4. model/reasoning selection bound to an exact CoS input;
+5. pre-effect external approval/question routing so T3 can own those interactions;
+6. deliberate T3 MCP forwarding/namespacing into CoS;
+7. CoS worker/subagent projection into T3 native subagent UI;
+8. ACP v2-only features where they add concrete value;
+9. macOS/Linux packaging and conformance;
+10. CoS→T3 outside-agent MCP packaging;
+11. optional legacy T3 `v0.0.42` lane;
+12. native T3 provider only if a measured ACP limitation cannot be solved at the CoS/controller layer.

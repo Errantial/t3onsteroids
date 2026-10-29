@@ -1,0 +1,438 @@
+From 40ce24e01f05ca1847e9cd3c2048a28a291b68a6 Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Thu, 29 Oct 2026 07:33:00 -0600
+Subject: [PATCH] feat(web): optional per-thread tokens/sec readout
+
+Shows the last finished turn's average output tokens per second next to the
+context-window meter. Off by default; the toggle lives in the meter popover and
+is remembered per thread on this client. The rate comes only from a complete
+provider-reported main-agent token total and the turn's wall time, so
+providers that report nothing (or only partial totals, or subagent turns) show
+no readout instead of an estimate.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ apps/web/src/components/chat/ChatComposer.tsx |  1 +
+ .../chat/ComposerFooterControls.tsx           |  7 ++
+ .../components/chat/ContextWindowMeter.tsx    | 12 +++
+ .../src/components/chat/ThreadTokenRate.tsx   | 70 +++++++++++++++
+ .../chat/threadTokenRatePreference.test.ts    | 20 +++++
+ .../chat/threadTokenRatePreference.ts         | 42 +++++++++
+ apps/web/src/lib/tokenThroughput.test.ts      | 89 +++++++++++++++++++
+ apps/web/src/lib/tokenThroughput.ts           | 63 +++++++++++++
+ 8 files changed, 304 insertions(+)
+ create mode 100644 apps/web/src/components/chat/ThreadTokenRate.tsx
+ create mode 100644 apps/web/src/components/chat/threadTokenRatePreference.test.ts
+ create mode 100644 apps/web/src/components/chat/threadTokenRatePreference.ts
+ create mode 100644 apps/web/src/lib/tokenThroughput.test.ts
+ create mode 100644 apps/web/src/lib/tokenThroughput.ts
+
+diff --git a/apps/web/src/components/chat/ChatComposer.tsx b/apps/web/src/components/chat/ChatComposer.tsx
+index d7878cc29a..a3d3bf03d2 100644
+--- a/apps/web/src/components/chat/ChatComposer.tsx
++++ b/apps/web/src/components/chat/ChatComposer.tsx
+@@ -3452,6 +3452,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
+                     activeContextWindow={
+                       settings.contextWindowMeterEnabled ? activeContextWindow : null
+                     }
++                    contextWindowThreadRef={routeKind === "server" ? routeThreadRef : undefined}
+                     reserveContextWindowMeter={reserveContextWindowMeter}
+                     activeThreadModelDisplayName={activeThreadModelDisplayName}
+                     pendingAction={pendingPrimaryAction}
+diff --git a/apps/web/src/components/chat/ComposerFooterControls.tsx b/apps/web/src/components/chat/ComposerFooterControls.tsx
+index 46de66194d..85c7d0588c 100644
+--- a/apps/web/src/components/chat/ComposerFooterControls.tsx
++++ b/apps/web/src/components/chat/ComposerFooterControls.tsx
+@@ -3,6 +3,7 @@ import type {
+   ProviderInstanceId,
+   ProviderInteractionMode,
+   RuntimeMode,
++  ScopedThreadRef,
+ } from "@t3tools/contracts";
+ import { createModelSelection } from "@t3tools/shared/model";
+ import { BotIcon, PencilRulerIcon } from "lucide-react";
+@@ -16,6 +17,7 @@ import { ComposerControl, ComposerControlIcon } from "./ComposerControl";
+ import { focusRequestedPermission, useComposerMenuProps } from "./composerEventScope";
+ import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
+ import { ContextWindowMeter, ContextWindowMeterPlaceholder } from "./ContextWindowMeter";
++import { ThreadTokenRateBadge } from "./ThreadTokenRate";
+ import { resolveModelPickerSelectedModel } from "./ModelPickerContent";
+ import { ProviderModelPicker } from "./ProviderModelPicker";
+ import { runtimeModeConfig } from "./runtimeModeConfig";
+@@ -245,6 +247,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
+   compact: boolean;
+   canOperateThread: boolean;
+   activeContextWindow: ContextWindowSnapshot | null;
++  contextWindowThreadRef?: ScopedThreadRef | undefined;
+   reserveContextWindowMeter: boolean;
+   activeThreadModelDisplayName: string | null;
+   isPreparingWorktree: boolean;
+@@ -283,9 +286,13 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
+ }) {
+   return (
+     <>
++      {props.activeContextWindow ? (
++        <ThreadTokenRateBadge threadRef={props.contextWindowThreadRef} />
++      ) : null}
+       {props.activeContextWindow ? (
+         <ContextWindowMeter
+           usage={props.activeContextWindow}
++          threadRef={props.contextWindowThreadRef}
+           modelDisplayName={props.activeThreadModelDisplayName}
+           onCompact={props.onCompactContext}
+           compactDisabled={props.compactDisabled}
+diff --git a/apps/web/src/components/chat/ContextWindowMeter.tsx b/apps/web/src/components/chat/ContextWindowMeter.tsx
+index e7f4042f53..f0309fe6f1 100644
+--- a/apps/web/src/components/chat/ContextWindowMeter.tsx
++++ b/apps/web/src/components/chat/ContextWindowMeter.tsx
+@@ -1,4 +1,6 @@
+ import { Button } from "../ui/button";
++import type { ScopedThreadRef } from "@t3tools/contracts";
++import { TokenRateToggleRow, useThreadTokenRate } from "./ThreadTokenRate";
+ import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
+ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+ import {
+@@ -20,12 +22,15 @@ function formatPercentage(value: number | null): string | null {
+ 
+ export function ContextWindowMeter(props: {
+   usage: ContextWindowSnapshot;
++  /** Enables the per-thread tokens/sec option when the thread is known. */
++  threadRef?: ScopedThreadRef | undefined;
+   modelDisplayName?: string | null;
+   onCompact?: (() => void) | undefined;
+   compactDisabled?: boolean | undefined;
+   compactDisabledReason?: string | null | undefined;
+ }) {
+   const { usage, modelDisplayName, onCompact, compactDisabled, compactDisabledReason } = props;
++  const tokenRate = useThreadTokenRate(props.threadRef);
+   const usedPercentage = formatPercentage(usage.usedPercentage);
+   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
+   const radius = 9.75;
+@@ -144,6 +149,13 @@ export function ContextWindowMeter(props: {
+               </span>
+             </div>
+           ) : null}
++          {props.threadRef ? (
++            <TokenRateToggleRow
++              enabled={tokenRate.enabled}
++              hasReading={tokenRate.throughput !== null}
++              onEnabledChange={tokenRate.setEnabled}
++            />
++          ) : null}
+           {usage.compactsAutomatically ? (
+             <div className="mt-1 text-pretty text-secondary-label text-2xs font-medium">
+               {formatContextWindowCompactionMessage(modelDisplayName, usage.autoCompactThreshold)}
+diff --git a/apps/web/src/components/chat/ThreadTokenRate.tsx b/apps/web/src/components/chat/ThreadTokenRate.tsx
+new file mode 100644
+index 0000000000..66f4a5c9aa
+--- /dev/null
++++ b/apps/web/src/components/chat/ThreadTokenRate.tsx
+@@ -0,0 +1,70 @@
++import type { ScopedThreadRef } from "@t3tools/contracts";
++import { useMemo } from "react";
++
++import { deriveTokenThroughput, formatTokensPerSecond } from "~/lib/tokenThroughput";
++import { useThreadProjection } from "../../state/entities";
++import { Switch } from "../ui/switch";
++import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
++import { useThreadTokenRatePreference } from "./threadTokenRatePreference";
++
++/**
++ * Everything the tokens/sec feature needs from a thread ref: the opt-in, and the
++ * last finished turn's rate read straight from the thread projection. Keeping
++ * this out of ChatView/ChatComposer leaves those files with a single prop.
++ */
++export function useThreadTokenRate(threadRef: ScopedThreadRef | null | undefined) {
++  const { enabled, setEnabled } = useThreadTokenRatePreference(threadRef ?? null);
++  const providerTurns = useThreadProjection(enabled ? (threadRef ?? null) : null)?.projection
++    .providerTurns;
++  const throughput = useMemo(
++    () => (enabled && providerTurns ? deriveTokenThroughput(providerTurns) : null),
++    [enabled, providerTurns],
++  );
++  return { enabled, setEnabled, throughput };
++}
++
++/** Last finished turn's output rate; renders nothing when off or when the provider reported no complete total. */
++export function ThreadTokenRateBadge(props: { threadRef: ScopedThreadRef | undefined }) {
++  const { throughput } = useThreadTokenRate(props.threadRef);
++  if (throughput === null) return null;
++  const label = formatTokensPerSecond(throughput.tokensPerSecond);
++  return (
++    <Tooltip>
++      <TooltipTrigger
++        render={
++          <span
++            data-slot="token-rate-badge"
++            aria-label={`Last turn averaged ${label}`}
++            className="shrink-0 cursor-default px-1 text-muted-foreground text-2xs tabular-nums"
++          />
++        }
++      >
++        {label}
++      </TooltipTrigger>
++      <TooltipPopup side="top">
++        {throughput.outputTokens.toLocaleString()} output tokens over{" "}
++        {(throughput.elapsedMs / 1000).toFixed(1)}s, including tool time
++      </TooltipPopup>
++    </Tooltip>
++  );
++}
++
++export function TokenRateToggleRow(props: {
++  enabled: boolean;
++  hasReading: boolean;
++  onEnabledChange: (enabled: boolean) => void;
++}) {
++  return (
++    <div className="flex flex-col gap-0.5">
++      <label className="flex items-center justify-between gap-3 text-2xs leading-4">
++        <span className="text-secondary-label">Show tokens/sec</span>
++        <Switch size="sm" checked={props.enabled} onCheckedChange={props.onEnabledChange} />
++      </label>
++      {props.enabled && !props.hasReading ? (
++        <div className="text-pretty text-secondary-label text-2xs">
++          No complete token total from the provider for the last turn.
++        </div>
++      ) : null}
++    </div>
++  );
++}
+diff --git a/apps/web/src/components/chat/threadTokenRatePreference.test.ts b/apps/web/src/components/chat/threadTokenRatePreference.test.ts
+new file mode 100644
+index 0000000000..3ca45deb6f
+--- /dev/null
++++ b/apps/web/src/components/chat/threadTokenRatePreference.test.ts
+@@ -0,0 +1,20 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { toggleThreadInList } from "./threadTokenRatePreference";
++
++describe("toggleThreadInList", () => {
++  it("adds a thread once and removes it again", () => {
++    const on = toggleThreadInList(["a"], "b", true);
++    expect(on).toEqual(["a", "b"]);
++    expect(toggleThreadInList(on, "b", true)).toEqual(["a", "b"]);
++    expect(toggleThreadInList(on, "b", false)).toEqual(["a"]);
++  });
++
++  it("keeps the most recently enabled threads when the cap is hit", () => {
++    const full = Array.from({ length: 500 }, (_, index) => `t${index}`);
++    const next = toggleThreadInList(full, "new", true);
++    expect(next).toHaveLength(500);
++    expect(next[0]).toBe("t1");
++    expect(next.at(-1)).toBe("new");
++  });
++});
+diff --git a/apps/web/src/components/chat/threadTokenRatePreference.ts b/apps/web/src/components/chat/threadTokenRatePreference.ts
+new file mode 100644
+index 0000000000..4ccd7b92e9
+--- /dev/null
++++ b/apps/web/src/components/chat/threadTokenRatePreference.ts
+@@ -0,0 +1,42 @@
++import { scopedThreadKey } from "@t3tools/client-runtime/environment";
++import type { ScopedThreadRef } from "@t3tools/contracts";
++import * as Schema from "effect/Schema";
++import { useCallback, useMemo } from "react";
++
++import { useLocalStorage } from "../../hooks/useLocalStorage";
++
++const STORAGE_KEY = "t3code:thread-token-rate:v1";
++// Off by default, so only enabled threads are stored. The cap keeps the entry
++// bounded for users who toggle it across many threads over time.
++const MAX_ENABLED_THREADS = 500;
++
++const EnabledThreadsSchema = Schema.Array(Schema.String);
++const NO_THREADS: ReadonlyArray<string> = [];
++
++export function toggleThreadInList(
++  enabledThreads: ReadonlyArray<string>,
++  threadKey: string,
++  enabled: boolean,
++): ReadonlyArray<string> {
++  const rest = enabledThreads.filter((key) => key !== threadKey);
++  return enabled ? [...rest, threadKey].slice(-MAX_ENABLED_THREADS) : rest;
++}
++
++/** Per-thread opt-in for the tokens/sec readout, persisted on this client. */
++export function useThreadTokenRatePreference(threadRef: ScopedThreadRef | null) {
++  const [enabledThreads, setEnabledThreads] = useLocalStorage(
++    STORAGE_KEY,
++    NO_THREADS,
++    EnabledThreadsSchema,
++  );
++  const threadKey = useMemo(() => (threadRef ? scopedThreadKey(threadRef) : null), [threadRef]);
++  const enabled = threadKey !== null && enabledThreads.includes(threadKey);
++  const setEnabled = useCallback(
++    (next: boolean) => {
++      if (threadKey === null) return;
++      setEnabledThreads((current) => toggleThreadInList(current, threadKey, next));
++    },
++    [setEnabledThreads, threadKey],
++  );
++  return { enabled, setEnabled };
++}
+diff --git a/apps/web/src/lib/tokenThroughput.test.ts b/apps/web/src/lib/tokenThroughput.test.ts
+new file mode 100644
+index 0000000000..c4112474a2
+--- /dev/null
++++ b/apps/web/src/lib/tokenThroughput.test.ts
+@@ -0,0 +1,89 @@
++import type { OrchestrationV2ProviderTurn } from "@t3tools/contracts";
++import * as DateTime from "effect/DateTime";
++import { describe, expect, it } from "vite-plus/test";
++
++import { deriveTokenThroughput, formatTokensPerSecond } from "./tokenThroughput";
++
++type Turn = Parameters<typeof deriveTokenThroughput>[0][number];
++
++const at = (seconds: number) => DateTime.makeUnsafe(Date.UTC(2026, 9, 29, 12, 0, seconds));
++
++function turn(input: {
++  startS: number;
++  endS: number | null;
++  status?: OrchestrationV2ProviderTurn["status"];
++  usage?: Turn["turnTokenUsage"];
++}): Turn {
++  return {
++    status: input.status ?? "completed",
++    startedAt: at(input.startS),
++    completedAt: input.endS === null ? null : at(input.endS),
++    ...(input.usage === undefined ? {} : { turnTokenUsage: input.usage }),
++  };
++}
++
++const complete = (outputTokens: number, hasSubagents = false): Turn["turnTokenUsage"] => ({
++  usageScope: "main_agent",
++  usageStatus: "complete",
++  inputTokens: 1000,
++  outputTokens,
++  hasSubagents,
++});
++
++describe("deriveTokenThroughput", () => {
++  it("divides complete output tokens by turn wall time", () => {
++    const result = deriveTokenThroughput([turn({ startS: 0, endS: 10, usage: complete(500) })]);
++    expect(result).toEqual({ tokensPerSecond: 50, outputTokens: 500, elapsedMs: 10_000 });
++  });
++
++  it("uses the most recent completed turn, ignoring unfinished ones", () => {
++    const result = deriveTokenThroughput([
++      turn({ startS: 0, endS: 10, usage: complete(100) }),
++      turn({ startS: 20, endS: 30, usage: complete(400) }),
++      turn({ startS: 40, endS: null, status: "running", usage: complete(9999) }),
++    ]);
++    expect(result?.tokensPerSecond).toBe(40);
++  });
++
++  it("reports nothing when the provider gave no complete total", () => {
++    expect(deriveTokenThroughput([turn({ startS: 0, endS: 10 })])).toBeNull();
++    expect(
++      deriveTokenThroughput([
++        turn({
++          startS: 0,
++          endS: 10,
++          usage: {
++            usageScope: "main_agent",
++            usageStatus: "partial",
++            outputTokens: 500,
++            hasSubagents: false,
++          },
++        }),
++      ]),
++    ).toBeNull();
++  });
++
++  it("skips subagent turns, zero-token turns and sub-threshold durations", () => {
++    expect(
++      deriveTokenThroughput([turn({ startS: 0, endS: 10, usage: complete(500, true) })]),
++    ).toBeNull();
++    expect(deriveTokenThroughput([turn({ startS: 0, endS: 10, usage: complete(0) })])).toBeNull();
++    expect(
++      deriveTokenThroughput([
++        {
++          status: "completed",
++          startedAt: at(0),
++          completedAt: DateTime.makeUnsafe(Date.UTC(2026, 9, 29, 12, 0, 0, 200)),
++          turnTokenUsage: complete(50),
++        },
++      ]),
++    ).toBeNull();
++  });
++});
++
++describe("formatTokensPerSecond", () => {
++  it("rounds large rates and keeps one decimal for small ones", () => {
++    expect(formatTokensPerSecond(123.4)).toBe("123 tok/s");
++    expect(formatTokensPerSecond(42.26)).toBe("42.3 tok/s");
++  });
++});
+diff --git a/apps/web/src/lib/tokenThroughput.ts b/apps/web/src/lib/tokenThroughput.ts
+new file mode 100644
+index 0000000000..4e3fd434c7
+--- /dev/null
++++ b/apps/web/src/lib/tokenThroughput.ts
+@@ -0,0 +1,63 @@
++import type { OrchestrationV2ProviderTurn } from "@t3tools/contracts";
++import * as DateTime from "effect/DateTime";
++
++/** Shorter turns are dominated by startup latency, so a rate would mislead. */
++const MIN_ELAPSED_MS = 500;
++
++export interface TokenThroughput {
++  readonly tokensPerSecond: number;
++  readonly outputTokens: number;
++  readonly elapsedMs: number;
++}
++
++type ThroughputTurn = Pick<
++  OrchestrationV2ProviderTurn,
++  "status" | "startedAt" | "completedAt" | "turnTokenUsage"
++>;
++
++function toEpochMs(value: ThroughputTurn["startedAt"]): number | null {
++  if (value === null) return null;
++  const ms = DateTime.toEpochMillis(value);
++  return Number.isFinite(ms) ? ms : null;
++}
++
++/**
++ * Average output tokens per second over the thread's most recent finished
++ * provider turn. Returns null whenever the provider did not report a complete
++ * main-agent total, so the UI shows nothing instead of an estimate.
++ *
++ * Elapsed time is the whole turn (tools and waiting included), not pure
++ * generation time. Turns with subagents are skipped because their wall time
++ * overlaps work the main-agent token count does not cover.
++ */
++export function deriveTokenThroughput(
++  turns: ReadonlyArray<ThroughputTurn>,
++): TokenThroughput | null {
++  let latest: { readonly startedMs: number; readonly turn: ThroughputTurn } | null = null;
++  for (const turn of turns) {
++    if (turn.status !== "completed") continue;
++    const startedMs = toEpochMs(turn.startedAt);
++    if (startedMs === null) continue;
++    // Ties go to the later entry, matching latestProviderTurnTokenUsage.
++    if (latest === null || startedMs >= latest.startedMs) latest = { startedMs, turn };
++  }
++  if (latest === null) return null;
++
++  const usage = latest.turn.turnTokenUsage;
++  if (usage === undefined || usage.usageStatus !== "complete" || usage.hasSubagents) return null;
++  const completedMs = toEpochMs(latest.turn.completedAt);
++  if (completedMs === null) return null;
++  const elapsedMs = completedMs - latest.startedMs;
++  if (elapsedMs < MIN_ELAPSED_MS || usage.outputTokens <= 0) return null;
++
++  return {
++    tokensPerSecond: usage.outputTokens / (elapsedMs / 1000),
++    outputTokens: usage.outputTokens,
++    elapsedMs,
++  };
++}
++
++export function formatTokensPerSecond(tokensPerSecond: number): string {
++  if (tokensPerSecond >= 100) return `${Math.round(tokensPerSecond)} tok/s`;
++  return `${tokensPerSecond.toFixed(1)} tok/s`;
++}

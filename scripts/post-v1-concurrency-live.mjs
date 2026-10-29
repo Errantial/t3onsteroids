@@ -993,7 +993,14 @@ if (includeFour && twoChatStatus === "PASS") {
           if (probe.body) await probe.body.cancel().catch(() => undefined);
         }
         const outcomes = await Promise.all(pending);
-        if (outcomes.some((row) => !row.ok)) throw new Error("four_chat_prompt_failed");
+        if (outcomes.some((row) => !row.ok)) {
+          const failures = outcomes.flatMap((row, peerIndex) => row.ok ? [] : [{
+            peer: peerIndex + 1,
+            category: row.errorCategory,
+            message: typeof row.error?.message === "string" ? row.error.message.slice(0, 160) : null,
+          }]);
+          throw new Error("four_chat_prompt_failed " + JSON.stringify({ round: index, fifthStreamStatus, failures }));
+        }
         samples.push(...outcomes.map((row) => row.result));
       }
       const rss = await stopSampler();

@@ -104,3 +104,14 @@ Results:
 - Full matrix (`20261029T191009Z-twochat-full-tunnel-manual`): **all eight cases PASS** - single-chat baseline, two-chat workload, queue-cancel-slot-reuse, independent-active-cancellation, sse-reconnect-with-two-active, crash-restart-with-two-active, cross-session-stale-event, long-output-slow-consumer-rss. Baseline pre-send p95 110 ms / drain 591 ms / post 111 ms; two-chat pre-send p95 209 ms / drain 460 ms / post 105 ms; long-output bridge RSS 97.8 MiB; aggregate two-chat bridge RSS 169.3 MiB.
 
 Advertised capability raised from 1 to **2** on this branch (`releaseReadiness().supportedConcurrency = 2`), with production queue capacity enabled by the existing scheduler. Four-chat qualification is next: it must show the controller's four-SSE global cap still leaves room for other CoS activity, or a versioned multiplexed stream contract is required first. The v1 release tuple and its `releaseQualified` gates are unchanged.
+
+## 2026-10-29 four-chat attempt and stream-cap finding
+
+Two include-four attempts were made after the two-chat pass.
+
+- `20261029T192257Z-fourchat-tunnel-manual`: all eight two-chat cases PASSed again. The four-chat workload ran with four peers (six prompts each) and failed at round 3 with `four_chat_prompt_failed`. One peer (`b3e0dfd8-37d6-439b-b8c6-26bc5a30c5af`) still had generation 6 dispatched at abort; the controller journal shows that same turn started at `19:33:56.746Z` and drained at `19:34:02.177Z` - after the case ended at `19:34:01.577Z`. That run also opened the four new chats slowly: the first four admissions were claimed by the browser about 92 s after admission, which is what consumed the round budget.
+- `20261029T193822Z-fourchat-tunnel-manual-r2` (after closing five accumulated browser tabs): two-chat workload PASS, but the single-chat baseline failed on drain p95 `1026 ms` against the 1000 ms budget (one 1026 ms sample; pre-send p95 was 108 ms). Because the two-chat gate status is derived from all cases in the same run, the four-chat case was skipped as `SETUP_INVALID / two_chat_gate_not_passed`.
+
+Structural blocker: the controller enforces `MAX_EVENT_STREAMS = 4` and rejects a fifth stream with 503 (`control-stream.ts`). Each active bridged turn holds its own per-turn stream, so four active turns occupy all four slots. The four-chat gate requires `fifthStreamStatus === 200` - proof that four bridged sessions leave room for other CoS activity - which cannot hold while four per-turn streams are open. Advertising four therefore requires the versioned multiplexed event-stream contract described in `PLAN.md`, not another scheduling or latency fix.
+
+Until that contract exists, the advertised ceiling stays at **2**. The four-chat workload itself is otherwise exercised (peers start, leases reach 4) and the remaining work is stream multiplexing plus a clean full-matrix rerun.

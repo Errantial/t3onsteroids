@@ -175,10 +175,11 @@ Bridge side (implemented in `70ce675`):
 - `session/set_config_option` validates the id/value, records the choice through a durable
   `select_model` transition, and returns the refreshed options. Every prompt carries the selected
   model and effort.
-- Attestation gap: the controller validates the model against the catalog before the outbox and the
-  extension reports `model_unconfirmed` when its picker does not accept the choice, but the bridge
-  does not yet compare the session's observed model after drain. Until it does, the bridge claims
-  only that a model was requested and accepted, not proven post-drain.
+- Confirmation: the extension applies the requested model/effort through
+  `selectModelSettings(input.model, input.reasoningEffort)` and fails the send with
+  `content_delivery_model_unconfirmed` when the picker does not confirm. A delivered input therefore
+  proves the picker accepted the exact model/effort; no post-drain bridge comparison is needed for
+  that claim, and the bridge does not claim a model when the send fails.
 
 ## 3. Attachments and slash commands
 

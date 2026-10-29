@@ -78,9 +78,16 @@ export type {
 } from "./mutex.js";
 export {
   DurableAdmissionLease,
+  MAX_LEASE_SLOTS,
   canonicalProfileIdentityHash,
   leaseReferencedSessionIds,
 } from "./lease.js";
+export {
+  CONCURRENCY_QUALIFICATION_ENV,
+  MAX_CONCURRENT_TURNS_ENV,
+  QUALIFIED_MAX_CONCURRENT_TURNS,
+  resolveLeaseCapacity,
+} from "./concurrency.js";
 export type {
   DurableAdmissionLeaseOptions,
   DurableLeaseAcquireResult,

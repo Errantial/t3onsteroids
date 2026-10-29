@@ -402,7 +402,8 @@ export class AcpBridgeRuntime {
   private async durableLeaseMatches(session: SessionState, inputId: string, generation: number): Promise<boolean> {
     if (!this.options.durableLease) throw new Error("Durable lease check requested without durable lease");
     if (!session.admissionLeaseId) return false;
-    const current = await this.options.durableLease.read();
+    // Look the lease up by the journaled id: with more than one slot, "the" profile lease no longer exists.
+    const current = await this.options.durableLease.readByLeaseId(session.admissionLeaseId);
     if (current.status === "corrupt") {
       throw new BridgeError("session_broken", "Durable admission lease is corrupt and cannot be reconciled safely");
     }

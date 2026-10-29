@@ -111,7 +111,20 @@ export async function canonicalProfileIdentityHash(userDataDir: string): Promise
   return sha256(stable);
 }
 
+/**
+ * Structural ceiling of lease slots per profile. It matches the CoS controller's global SSE budget:
+ * every active bridged turn holds one event stream, so more slots than streams could never run.
+ * What a deployment may actually use is the separate, evidence-gated `capacity`.
+ */
+export const MAX_LEASE_SLOTS = 4;
+
 export interface DurableAdmissionLeaseOptions {
+  /**
+   * Concurrent turns the profile admits. Defaults to 1, the V1 single-turn behavior. Lowering it
+   * never strands existing leases: every slot up to MAX_LEASE_SLOTS is still read, released and
+   * counted as occupied, and capacity only gates new admissions.
+   */
+  readonly capacity?: number;
   readonly mutex?: HardLinkMutexOptions;
   readonly identity?: WindowsProcessIdentity;
   readonly now?: () => number;
@@ -120,6 +133,7 @@ export interface DurableAdmissionLeaseOptions {
 export class DurableAdmissionLease {
   private readonly now: () => number;
   private readonly identity: WindowsProcessIdentity;
+  private readonly capacity: number;
 
   constructor(
     private readonly stateRoot: string,
@@ -127,12 +141,19 @@ export class DurableAdmissionLease {
     private readonly options: DurableAdmissionLeaseOptions = {},
   ) {
     if (!HEX_64.test(controllerIdentityHash)) throw new Error("invalid controller profile identity hash");
+    const capacity = options.capacity ?? 1;
+    if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > MAX_LEASE_SLOTS) {
+      throw new Error(`lease capacity must be an integer from 1 to ${MAX_LEASE_SLOTS}`);
+    }
+    this.capacity = capacity;
     this.now = options.now ?? Date.now;
     this.identity = options.identity ?? options.mutex?.identity ?? new PowerShellWindowsProcessIdentity();
   }
 
-  private file(): string {
-    return path.join(this.stateRoot, "leases", `${this.controllerIdentityHash}.json`);
+  /** Slot 0 keeps the V1 file name, so single-slot state needs no migration. */
+  private file(slot = 0): string {
+    const name = slot === 0 ? this.controllerIdentityHash : `${this.controllerIdentityHash}.s${slot}`;
+    return path.join(this.stateRoot, "leases", `${name}.json`);
   }
 
   private mutex(): HardLinkMutex {
@@ -142,10 +163,10 @@ export class DurableAdmissionLease {
     });
   }
 
-  async read(): Promise<DurableLeaseReadResult> {
+  private async readSlot(slot: number): Promise<DurableLeaseReadResult> {
     let bytes: Buffer;
     try {
-      bytes = await fs.readFile(this.file());
+      bytes = await fs.readFile(this.file(slot));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return { status: "missing" };
       throw error;
@@ -161,6 +182,37 @@ export class DurableAdmissionLease {
     }
   }
 
+  /** Every held lease with its slot, or the first corrupt slot. Any corrupt slot fails closed. */
+  async readSlots(): Promise<
+    | { readonly status: "ok"; readonly held: ReadonlyArray<{ readonly slot: number; readonly lease: DurableLeaseRecord }> }
+    | { readonly status: "corrupt"; readonly sha256: string }
+  > {
+    const held: Array<{ slot: number; lease: DurableLeaseRecord }> = [];
+    for (let slot = 0; slot < MAX_LEASE_SLOTS; slot++) {
+      const result = await this.readSlot(slot);
+      if (result.status === "corrupt") return result;
+      if (result.status === "found") held.push({ slot, lease: result.lease });
+    }
+    return { status: "ok", held };
+  }
+
+  /** The lowest-slot held lease. With the default capacity of 1 this is the profile's only lease. */
+  async read(): Promise<DurableLeaseReadResult> {
+    const slots = await this.readSlots();
+    if (slots.status === "corrupt") return slots;
+    const first = slots.held[0];
+    return first ? { status: "found", lease: first.lease } : { status: "missing" };
+  }
+
+  /** The exact lease a session journal named, wherever it lives. Recovery must use this, never read(). */
+  async readByLeaseId(leaseId: string): Promise<DurableLeaseReadResult> {
+    if (!LEASE_ID.test(leaseId)) return { status: "missing" };
+    const slots = await this.readSlots();
+    if (slots.status === "corrupt") return slots;
+    const match = slots.held.find((entry) => entry.lease.leaseId === leaseId);
+    return match ? { status: "found", lease: match.lease } : { status: "missing" };
+  }
+
   async acquire(input: {
     readonly sessionId: string;
     readonly inputId: string;
@@ -174,9 +226,16 @@ export class DurableAdmissionLease {
       throw new Error("invalid lease admission record");
     }
     return this.mutex().withLock(async () => {
-      const existing = await this.read();
-      if (existing.status === "corrupt") throw new Error(`lease_corrupt:${existing.sha256}`);
-      if (existing.status === "found") return { status: "held", lease: existing.lease };
+      const slots = await this.readSlots();
+      if (slots.status === "corrupt") throw new Error(`lease_corrupt:${slots.sha256}`);
+      // One active root turn per session, and never more turns than capacity admits.
+      const sameSession = slots.held.find((entry) => entry.lease.sessionId === input.sessionId);
+      if (sameSession) return { status: "held", lease: sameSession.lease };
+      const occupied = new Set(slots.held.map((entry) => entry.slot));
+      const first = slots.held[0];
+      if (first && slots.held.length >= this.capacity) return { status: "held", lease: first.lease };
+      const slot = Array.from({ length: MAX_LEASE_SLOTS }, (_, index) => index).find((index) => !occupied.has(index));
+      if (slot === undefined) throw new Error("lease_slots_exhausted");
       const processIdentity = await this.identity.current();
       const now = this.now();
       const lease: DurableLeaseRecord = {
@@ -192,18 +251,19 @@ export class DurableAdmissionLease {
         acquiredAt: now,
         heartbeatAt: now,
       };
-      await atomicWrite(this.file(), lease);
+      await atomicWrite(this.file(slot), lease);
       return { status: "acquired", lease };
     });
   }
 
   async heartbeat(leaseId: string): Promise<"updated" | "missing" | "changed"> {
     return this.mutex().withLock(async () => {
-      const current = await this.read();
-      if (current.status === "missing") return "missing";
-      if (current.status !== "found") throw new Error("lease_corrupt");
-      if (current.lease.leaseId !== leaseId) return "changed";
-      await atomicWrite(this.file(), { ...current.lease, heartbeatAt: this.now() });
+      const slots = await this.readSlots();
+      if (slots.status === "corrupt") throw new Error("lease_corrupt");
+      if (slots.held.length === 0) return "missing";
+      const match = slots.held.find((entry) => entry.lease.leaseId === leaseId);
+      if (!match) return "changed";
+      await atomicWrite(this.file(match.slot), { ...match.lease, heartbeatAt: this.now() });
       return "updated";
     });
   }
@@ -222,12 +282,13 @@ export class DurableAdmissionLease {
     // Reconciliation that produced `proof` happened before this call, outside the mutex. Inside
     // the short critical section we only compare the exact lease generation and delete it.
     return this.mutex().withLock(async () => {
-      const current = await this.read();
-      if (current.status === "missing") return "missing";
-      if (current.status !== "found") throw new Error("lease_corrupt");
-      if (current.lease.leaseId !== expectedLeaseId) return "changed";
-      if (!this.proofMatches(current.lease, proof)) return "proof_mismatch";
-      await fs.unlink(this.file());
+      const slots = await this.readSlots();
+      if (slots.status === "corrupt") throw new Error("lease_corrupt");
+      if (slots.held.length === 0) return "missing";
+      const match = slots.held.find((entry) => entry.lease.leaseId === expectedLeaseId);
+      if (!match) return "changed";
+      if (!this.proofMatches(match.lease, proof)) return "proof_mismatch";
+      await fs.unlink(this.file(match.slot));
       return "released";
     });
   }
@@ -249,16 +310,17 @@ export async function leaseReferencedSessionIds(stateRoot: string): Promise<Read
   }
 
   const protectedSessions = new Set<string>();
+  const profiles = new Set<string>();
   for (const name of names) {
-    const match = /^([0-9a-f]{64})\.json$/.exec(name);
-    if (!match) continue;
-    const profileHash = match[1];
-    if (!profileHash) continue;
-    const current = await new DurableAdmissionLease(stateRoot, profileHash).read();
-    if (current.status === "corrupt") {
-      throw new Error(`lease_corrupt:${profileHash}:${current.sha256}`);
+    const match = /^([0-9a-f]{64})(?:\.s[1-9][0-9]*)?\.json$/.exec(name);
+    if (match?.[1]) profiles.add(match[1]);
+  }
+  for (const profileHash of profiles) {
+    const slots = await new DurableAdmissionLease(stateRoot, profileHash).readSlots();
+    if (slots.status === "corrupt") {
+      throw new Error(`lease_corrupt:${profileHash}:${slots.sha256}`);
     }
-    if (current.status === "found") protectedSessions.add(current.lease.sessionId);
+    for (const entry of slots.held) protectedSessions.add(entry.lease.sessionId);
   }
   return protectedSessions;
 }

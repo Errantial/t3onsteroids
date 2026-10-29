@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { DurableSessionStore, defaultStateDirectory } from "./durable.js";
+import { resolveLeaseCapacity } from "./concurrency.js";
 import { DurableAdmissionLease, canonicalProfileIdentityHash, leaseReferencedSessionIds } from "./lease.js";
 import { PowerShellWindowsProcessIdentity } from "./mutex.js";
 
@@ -39,6 +40,7 @@ export async function createProductionStateContext(
   const processIdentity = new PowerShellWindowsProcessIdentity();
   const sessionStore = new DurableSessionStore(stateDirectory, { mutex: { identity: processIdentity } });
   const admissionLease = new DurableAdmissionLease(stateDirectory, profileIdentityHash, {
+    capacity: resolveLeaseCapacity(env),
     identity: processIdentity,
     mutex: { identity: processIdentity },
   });

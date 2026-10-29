@@ -121,3 +121,15 @@ An installed-candidate lane is also defined in `PLAN.md`, but it is a separate e
 The deterministic implementation/source gates are not sufficient by themselves for a release claim. For `v1.0.0`, Steps 7–9 have now completed the live single-turn performance lane, the pinned V1-01…V1-19 matrix, current-T3-HEAD drift, fresh-checkout/package verification, final evidence/readiness, and the release tag.
 
 The final qualified implementation is bridge `f3a672cffdee77f54d377d5594893e0606d20d5b` with CoS provider build `495e3e96504d9b865c18478f7b42915280712f84`. The historical V1-11 broken admission domain remains preserved and fail-closed rather than repaired or reused; the final release qualification is based on a fresh equivalent V1-11 PASS on the final tuple. `docs/release-status.md` and `docs/evidence/v1-07-performance.md` through `v1-09-release.md` are the authoritative current qualification summaries.
+
+## Concurrent turns (post-v1, unqualified)
+
+The durable admission lease supports up to four slots per CoS profile (`MAX_LEASE_SLOTS`, matching the controller's global SSE budget), but the qualified ceiling is **one** turn. The production build admits one turn unless a qualification run opts in:
+
+```text
+T3COS_MAX_CONCURRENT_TURNS=2 T3COS_CONCURRENCY_QUALIFICATION=1
+```
+
+Asking for more than the qualified ceiling without `T3COS_CONCURRENCY_QUALIFICATION=1` fails at startup instead of being clamped. The lease also enforces one active turn per session, keeps honoring every existing slot if capacity is lowered, and fails closed if any slot file is corrupt. Slot 0 keeps the V1 file name, so existing state needs no migration.
+
+Raising `QUALIFIED_MAX_CONCURRENT_TURNS` in `src/state/concurrency.ts` is a qualification result: it needs live evidence for browser reliability, queue depth, memory, controller utilization, latency, cancellation isolation and stale-event isolation first (see the post-v1 roadmap in `PLAN.md`). Do not advertise or document concurrent chats as supported before then.

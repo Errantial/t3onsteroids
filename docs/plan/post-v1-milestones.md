@@ -109,3 +109,18 @@ the support tuple.
 - Widening the support tuple still requires checking out and building that HEAD, then running the
   pinned acceptance matrix. No built HEAD checkout exists in this environment, so this step records
   the drift instead of claiming compatibility or incompatibility.
+
+Live verification of the M6 fence (2026-10-29):
+
+- Provider `954147b` packaged; bridge pinned at `0ad8095`; full bridge suite 300/300.
+- Relaunched isolated candidate reports `buildId=954147b…`,
+  `provider-background-work-v1:1` and the route
+  `/v1/sessions/{id}/background-work`.
+- A live provider session from the passing matrix reports
+  `{"state":"disabled","pending":[]}`, so the bridge's new settlement check runs on the real
+  route and correctly finds no pending work for a disabled session.
+- The `turn_drain_pending` branch is covered deterministically in
+  `test/acp-phase3.test.ts`; a live pending worker cannot be created while the policy is
+  disabled, which is the remaining precondition for exercising that branch end to end.
+- Still open for the full background-work milestone: Goal/Loop registration in the projection and a
+  per-work cancellation route before the policy can leave `disabled`.

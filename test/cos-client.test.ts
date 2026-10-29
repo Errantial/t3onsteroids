@@ -861,3 +861,60 @@ describe("provider workspace resolution", () => {
     })).rejects.toMatchObject({ code: "schema_mismatch" });
   });
 });
+
+describe("provider model catalog", () => {
+  const modelHealth = {
+    protocol: 1,
+    app: "chat-on-steroids",
+    actions: { enabled: true, routes: [...COS_REQUIRED_ACTION_ROUTES] },
+    features: {
+      "provider-project-resolve-v1": 1,
+      "provider-assistant-content-v1": 1,
+      "provider-session-policy-v1": 1,
+      "provider-turn-drain-v1": 1,
+      "provider-turn-recovery-v1": 1,
+      "provider-model-catalog-v1": 1,
+    },
+    providerExtension: { apiVersion: 1, buildId: compatibility.cos.providerExtension.buildId },
+  };
+
+  it("reads the catalog and drops fields the wire does not promise", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/v1/health") return jsonResponse(modelHealth);
+      if (path === "/v1/models") return jsonResponse({
+        state: "ready",
+        observedAt: 10,
+        models: [{ id: "gpt-6-thinking", label: "GPT-6 Thinking", efforts: ["low", "high"], aliases: ["6"] }],
+      });
+      return jsonResponse({}, 404);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "token" }), { fetch });
+    await expect(client.models()).resolves.toEqual({
+      state: "ready",
+      observedAt: 10,
+      models: [{ id: "gpt-6-thinking", label: "GPT-6 Thinking", efforts: ["low", "high"] }],
+    });
+  });
+
+  it("fails explicitly when the controller does not publish a catalog", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      if (new URL(String(url)).pathname === "/v1/health") return jsonResponse({
+        protocol: 1,
+        app: "chat-on-steroids",
+        actions: { enabled: true, routes: [...COS_REQUIRED_ACTION_ROUTES] },
+        features: {
+          "provider-project-resolve-v1": 1,
+          "provider-assistant-content-v1": 1,
+          "provider-session-policy-v1": 1,
+          "provider-turn-drain-v1": 1,
+          "provider-turn-recovery-v1": 1,
+        },
+        providerExtension: { apiVersion: 1, buildId: compatibility.cos.providerExtension.buildId },
+      });
+      return jsonResponse({}, 404);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "token" }), { fetch });
+    await expect(client.models()).rejects.toMatchObject({ code: "model_catalog_unavailable" });
+  });
+});

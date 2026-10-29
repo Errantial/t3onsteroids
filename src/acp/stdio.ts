@@ -138,16 +138,27 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
       clientNotices = params.clientCapabilities?.session?.notices != null;
       return runtime.initialize(params.protocolVersion);
     })
-    .onRequest(acp.methods.agent.session.new, ({ params }) => {
+    .onRequest(acp.methods.agent.session.new, async ({ params }) => {
       try {
-        return runtime.newSession(params);
+        const created = runtime.newSession(params);
+        const configOptions = await runtime.modelConfigOptions().catch(() => []);
+        return configOptions.length > 0 ? { ...created, configOptions } : created;
       } catch (error) {
         return safeRequestError(error);
       }
     })
     .onRequest(acp.methods.agent.session.resume, async ({ params }) => {
       try {
-        return await runtime.resumeSession(params);
+        const resumed = await runtime.resumeSession(params);
+        const configOptions = await runtime.modelConfigOptions(params.sessionId).catch(() => []);
+        return configOptions.length > 0 ? { ...resumed, configOptions } : resumed;
+      } catch (error) {
+        return safeRequestError(error);
+      }
+    })
+    .onRequest(acp.methods.agent.session.setConfigOption, async ({ params }) => {
+      try {
+        return { configOptions: await runtime.setConfigOption(params) };
       } catch (error) {
         return safeRequestError(error);
       }

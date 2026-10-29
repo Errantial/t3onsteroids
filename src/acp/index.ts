@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ContentBlock, InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, ResumeSessionRequest, ResumeSessionResponse } from "@agentclientprotocol/sdk";
+import type { ContentBlock, InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption, SetSessionConfigOptionRequest } from "@agentclientprotocol/sdk";
 
-import type { CosControllerReadiness, CosInputRecord, CosSessionSummary } from "../cos/index.js";
+import type { CosControllerReadiness, CosInputRecord, CosModelCatalog, CosSessionSummary } from "../cos/index.js";
 import { v1ProviderSessionPolicy } from "../policy/index.js";
-import { newUnboundSession, type InteractionMode, type SessionState, withInteractionMode } from "../session/index.js";
+import { isReasoningEffort, newUnboundSession, type InteractionMode, type ReasoningEffort, type SessionState, withInteractionMode } from "../session/index.js";
 import {
   driveProviderTurn,
   type DriveProviderTurnResult,
@@ -43,7 +43,12 @@ export type BridgeErrorCode =
   | "cancelled"
   | "provider_policy_unavailable"
   | "actions_disabled"
-  | "session_broken";
+  | "session_broken"
+  | "unsupported_config_option"
+  | "model_catalog_unavailable"
+  | "unsupported_model"
+  | "model_required"
+  | "unsupported_reasoning_effort";
 
 export class BridgeError extends Error {
   constructor(readonly code: BridgeErrorCode, message: string) {
@@ -81,6 +86,7 @@ export interface BridgeController {
   requireProviderExtension?(): Promise<CosControllerReadiness>;
   requireBackgroundWorkDisabled?(sessionId: string): Promise<{ backgroundWork: "disabled"; enforced: true }>;
   resolveProject(path: string): Promise<ProjectBinding>;
+  models?(): Promise<CosModelCatalog>;
   input?(inputId: string): Promise<CosInputRecord | undefined>;
   session?(sessionId: string): Promise<CosSessionSummary>;
   assistantContentChunk?: ProviderTurnController["assistantContentChunk"];
@@ -266,6 +272,98 @@ export class AcpBridgeRuntime {
     await this.persistWholeForReference(broken);
     this.sessions.set(session.sessionId, broken);
     return broken;
+  }
+
+  /**
+   * ACP session configuration for the current model catalog. Empty when the controller does not
+   * publish one, so a protocol-1 controller never gains model controls by accident.
+   */
+  async modelConfigOptions(sessionId?: string): Promise<SessionConfigOption[]> {
+    const catalog = await this.options.controller.models?.();
+    if (!catalog || catalog.state !== "ready" || catalog.models.length === 0) return [];
+    const session = sessionId ? await this.sessionForConfig(sessionId) : undefined;
+    const model = session?.model !== undefined && catalog.models.some((entry) => entry.id === session.model)
+      ? session.model
+      : catalog.models[0]!.id;
+    const chosen = catalog.models.find((entry) => entry.id === model)!;
+    const effort = session?.reasoningEffort !== undefined && chosen.efforts.includes(session.reasoningEffort)
+      ? session.reasoningEffort
+      : chosen.efforts.find(isReasoningEffort);
+    const options: SessionConfigOption[] = [{
+      type: "select",
+      id: "model",
+      name: "Model",
+      category: "model",
+      currentValue: chosen.id,
+      options: catalog.models.map((entry) => ({ value: entry.id, name: entry.label })),
+    }];
+    if (effort !== undefined) {
+      options.push({
+        type: "select",
+        id: "thought_level",
+        name: "Reasoning",
+        category: "thought_level",
+        currentValue: effort,
+        options: chosen.efforts.map((value) => ({ value, name: value })),
+      });
+    }
+    return options;
+  }
+
+  /** Applies one ACP config selection and returns the refreshed full option set. */
+  async setConfigOption(request: SetSessionConfigOptionRequest): Promise<SessionConfigOption[]> {
+    if (typeof request.value !== "string" || request.value.length === 0 || request.value.length > 80) {
+      throw new BridgeError("unsupported_config_option", "Configuration option value is invalid");
+    }
+    const session = await this.sessionForConfig(request.sessionId);
+    const catalog = await this.options.controller.models?.();
+    if (!catalog || catalog.state !== "ready") {
+      throw new BridgeError("model_catalog_unavailable", "The controller model catalog is not ready");
+    }
+    let model = session.model;
+    let reasoningEffort = session.reasoningEffort;
+    if (request.configId === "model") {
+      const chosen = catalog.models.find((entry) => entry.id === request.value);
+      if (!chosen) throw new BridgeError("unsupported_model", "The requested model is not available");
+      model = chosen.id;
+      const fallbackEffort = chosen.efforts.find(isReasoningEffort);
+      if (reasoningEffort === undefined || !chosen.efforts.includes(reasoningEffort)) reasoningEffort = fallbackEffort;
+    } else if (request.configId === "thought_level") {
+      if (model === undefined) throw new BridgeError("model_required", "Choose a model before a reasoning level");
+      const chosen = catalog.models.find((entry) => entry.id === model);
+      if (!chosen || !chosen.efforts.includes(request.value)) {
+        throw new BridgeError("unsupported_reasoning_effort", "The requested effort is not available for this model");
+      }
+      reasoningEffort = request.value as ReasoningEffort;
+    } else {
+      throw new BridgeError("unsupported_config_option", "This session configuration option is not supported");
+    }
+    if (this.options.durableStore) {
+      const updated = await this.applyDurableTransition(session.sessionId, {
+        kind: "select_model",
+        model: model ?? null,
+        reasoningEffort: reasoningEffort ?? null,
+      });
+      this.sessions.set(updated.sessionId, updated);
+      return this.modelConfigOptions(updated.sessionId);
+    }
+    const { model: _model, reasoningEffort: _effort, ...rest } = session;
+    void _model;
+    void _effort;
+    const updated: SessionState = {
+      ...rest,
+      ...(model === undefined ? {} : { model }),
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    };
+    await this.persistWholeForReference(updated);
+    this.sessions.set(updated.sessionId, updated);
+    return this.modelConfigOptions(updated.sessionId);
+  }
+
+  private async sessionForConfig(sessionId: string): Promise<SessionState> {
+    const local = this.sessions.get(sessionId) ?? (this.options.durableStore ? await this.readPersisted(sessionId) : null);
+    if (!local) throw new BridgeError("session_not_found", "ACP session is unknown");
+    return local;
   }
 
   private async refreshDurable(sessionId: string): Promise<SessionState> {
@@ -1473,6 +1571,8 @@ export class AcpBridgeRuntime {
         ...(project.kind !== undefined && project.kind !== "project" ? { workspacePath: project.canonicalPath } : {}),
         providerPolicy: v1ProviderSessionPolicy,
       } : { sessionId: session.sessionId }),
+      ...(session.model === undefined ? {} : { model: session.model }),
+      ...(session.reasoningEffort === undefined ? {} : { reasoningEffort: session.reasoningEffort }),
     });
     const inputSendMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
     this.options.metrics?.observePreSendPhases(session.sessionId, generation, {

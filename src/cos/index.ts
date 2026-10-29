@@ -35,6 +35,7 @@ export type CosErrorCode =
   | "project_unmapped"
   | "provider_policy_unavailable"
   | "provider_extension_unavailable"
+  | "model_catalog_unavailable"
   | "schema_mismatch"
   | "protocol_mismatch"
   | "request_failed";
@@ -77,6 +78,18 @@ export interface CosResolvedProject {
   /** Present when the controller resolved a workspace inside the project rather than its root. */
   readonly kind?: "project" | "worktree" | "subdirectory";
   readonly sourceProjectPath?: string;
+}
+
+export interface CosChatModel {
+  readonly id: string;
+  readonly label: string;
+  readonly efforts: readonly string[];
+}
+
+export interface CosModelCatalog {
+  readonly state: "unknown" | "pending" | "ready" | "unavailable";
+  readonly observedAt: number | null;
+  readonly models: readonly CosChatModel[];
 }
 
 export interface CosAssistantContentChunk {
@@ -135,6 +148,9 @@ export interface CosSendInput {
   readonly providerPolicy?: { readonly backgroundWork: "disabled" };
   /** New provider chat only: a working directory inside the supplied project. */
   readonly workspacePath?: string;
+  /** ChatGPT model/effort resolved for this turn; omitted means the controller's current picker. */
+  readonly model?: string;
+  readonly reasoningEffort?: string;
 }
 
 export interface CosControllerTransport {
@@ -403,6 +419,7 @@ export class CosControllerClient {
   private readonly pendingEventStreams = new Map<string, number>();
   private eventStreamMuxCache: { readonly value: boolean; readonly expiresAt: number } | undefined;
   private workspaceResolveCache: { readonly value: boolean; readonly expiresAt: number } | undefined;
+  private modelCatalogCache: { readonly value: boolean; readonly expiresAt: number } | undefined;
   private muxHub: MuxHub | undefined;
   private metricsState = {
     readAttempts: 0,
@@ -427,6 +444,7 @@ export class CosControllerClient {
       this.providerExtensionReadiness = undefined;
       this.eventStreamMuxCache = undefined;
       this.workspaceResolveCache = undefined;
+      this.modelCatalogCache = undefined;
     }
     if (force || !this.discovery) this.discovery = await this.discover();
     return this.discovery;
@@ -452,6 +470,7 @@ export class CosControllerClient {
         this.providerExtensionReadiness = undefined;
         this.eventStreamMuxCache = undefined;
         this.workspaceResolveCache = undefined;
+        this.modelCatalogCache = undefined;
       },
       onConnect: () => {
         this.metricsState.sseConnectAttempts += 1;
@@ -546,6 +565,10 @@ export class CosControllerClient {
       value: readiness.features["provider-session-workspace-v1"] === 1,
       expiresAt: Date.now() + 60_000,
     };
+    this.modelCatalogCache = {
+      value: readiness.features["provider-model-catalog-v1"] === 1,
+      expiresAt: Date.now() + 60_000,
+    };
     return readiness;
   }
 
@@ -601,6 +624,36 @@ export class CosControllerClient {
       kind,
       sourceProjectPath: asString(row.sourceProjectPath, "workspace resolve response.sourceProjectPath"),
     };
+  }
+
+  async models(): Promise<CosModelCatalog> {
+    await this.requireProviderExtensionWithinAdmission();
+    const cached = this.modelCatalogCache;
+    if (cached === undefined || cached.expiresAt <= Date.now() || !cached.value) {
+      throw new CosControllerError("model_catalog_unavailable", "CoS controller does not publish a model catalog");
+    }
+    const value = await this.readJson("/v1/models");
+    const row = asRecord(value, "model catalog");
+    const state = asString(row.state, "model catalog.state");
+    if (state !== "unknown" && state !== "pending" && state !== "ready" && state !== "unavailable") {
+      throw new CosControllerError("schema_mismatch", `Unknown model catalog state ${state}`);
+    }
+    const observedAt = row.observedAt;
+    if (observedAt !== null && (typeof observedAt !== "number" || !Number.isFinite(observedAt))) {
+      throw new CosControllerError("schema_mismatch", "model catalog.observedAt is invalid");
+    }
+    if (!Array.isArray(row.models)) throw new CosControllerError("schema_mismatch", "model catalog.models must be an array");
+    const models = row.models.map((candidate, index) => {
+      const model = asRecord(candidate, `model catalog.models[${index}]`);
+      const id = asString(model.id, `model catalog.models[${index}].id`);
+      const label = asString(model.label, `model catalog.models[${index}].label`);
+      if (id.length > 80 || label.length > 80) throw new CosControllerError("schema_mismatch", "model catalog entry is too long");
+      if (!Array.isArray(model.efforts) || model.efforts.some((effort) => typeof effort !== "string" || effort.length > 16)) {
+        throw new CosControllerError("schema_mismatch", "model catalog entry efforts are invalid");
+      }
+      return { id, label, efforts: model.efforts as string[] };
+    });
+    return { state, observedAt: observedAt as number | null, models };
   }
 
   async assistantContentChunk(sessionId: string, seq: number, offset = 0, limit = 16_384): Promise<CosAssistantContentChunk> {

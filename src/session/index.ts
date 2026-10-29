@@ -2,6 +2,12 @@ import type { ProviderTurnTranslationState } from "../translate/events.js";
 
 export type BindingState = "unbound" | "create_pending" | "bound" | "broken";
 export type InteractionMode = "default" | "plan";
+/** The ChatGPT reasoning levels a model may offer, as published by the controller. */
+export const REASONING_EFFORTS = ['pro','none','minimal','low','medium','high','xhigh','max','ultra'] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+export function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return typeof value === 'string' && (REASONING_EFFORTS as readonly string[]).includes(value);
+}
 export type CancelIntent = "none" | "requested";
 export type InputDispatchState = "prepared" | "dispatched";
 export type RecoveryReason =
@@ -37,6 +43,9 @@ export interface SessionState {
   readonly cosEventCursor?: number;
   /** Durable in-progress provider-turn translation state. Cleared only after terminal acceptance. */
   readonly providerTranslation?: ProviderTurnTranslationState;
+  /** Model and effort selected for this ACP session; applied to every subsequent prompt. */
+  readonly model?: string;
+  readonly reasoningEffort?: ReasoningEffort;
   readonly cancelIntent?: CancelIntent;
   readonly cancelTargetTurnId?: string;
   readonly recoveryReason?: RecoveryReason;

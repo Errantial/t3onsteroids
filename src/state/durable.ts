@@ -3,7 +3,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import type { ProviderTurnTranslationState, StableTerminalStopReason } from "../translate/events.js";
-import type { InputDispatchState, InteractionMode, RecoveryReason, SessionState } from "../session/index.js";
+import type { InputDispatchState, InteractionMode, ReasoningEffort, RecoveryReason, SessionState } from "../session/index.js";
+import { isReasoningEffort } from "../session/index.js";
 import {
   HardLinkMutex,
   PowerShellWindowsProcessIdentity,
@@ -107,6 +108,7 @@ export type DurableSessionTransition =
   | { readonly kind: "settle_not_sent"; readonly generation: number; readonly inputId: string }
   | { readonly kind: "set_cancel"; readonly generation: number; readonly inputId: string; readonly turnId?: string }
   | { readonly kind: "clear_cancel"; readonly generation: number; readonly inputId: string; readonly turnId?: string }
+  | { readonly kind: "select_model"; readonly model: string | null; readonly reasoningEffort: ReasoningEffort | null }
   | { readonly kind: "mark_broken"; readonly reason: RecoveryReason };
 
 interface QuarantineRecord {
@@ -140,7 +142,7 @@ const SESSION_KEYS = new Set([
   "sessionId", "bindingState", "interactionMode", "pendingInteractionMode", "modeTransitionInputId",
   "cwd", "canonicalCwd", "cosProjectId", "activeInputId", "activeCosTurnId", "generation", "cosEventCursor",
   "inputDispatchState", "dispatchInputId", "admissionLeaseId",
-  "providerTranslation", "cancelIntent", "cancelTargetTurnId", "recoveryReason",
+  "providerTranslation", "cancelIntent", "cancelTargetTurnId", "recoveryReason", "model", "reasoningEffort",
 ]);
 
 function sha256(bytes: Buffer): string {
@@ -215,6 +217,8 @@ function parseRecord(bytes: Buffer): { kind: "found"; value: DurableSessionRecor
   if (row.cancelIntent !== undefined && row.cancelIntent !== "none" && row.cancelIntent !== "requested") return { kind: "corrupt" };
   if (!optionalBoundedString(row.cancelTargetTurnId, TURN_ID_MAX)) return { kind: "corrupt" };
   if (row.recoveryReason !== undefined && (typeof row.recoveryReason !== "string" || !RECOVERY_REASONS.has(row.recoveryReason as RecoveryReason))) return { kind: "corrupt" };
+  if (!optionalBoundedString(row.model, 80)) return { kind: "corrupt" };
+  if (row.reasoningEffort !== undefined && !isReasoningEffort(row.reasoningEffort)) return { kind: "corrupt" };
   if (row.providerTranslation !== undefined && !validTranslation(row.providerTranslation, row.sessionId)) return { kind: "corrupt" };
   return { kind: "found", value: row as unknown as DurableSessionRecord };
 }
@@ -553,6 +557,25 @@ function normalTransition(record: DurableSessionRecord, transition: Exclude<Dura
       const { cancelTargetTurnId: _target, ...rest } = record;
       void _target;
       return withTranslation({ ...rest, cancelIntent: "none" }, { ...current, cancelRequested: false });
+    }
+    case "select_model": {
+      if (transition.model !== null && (transition.model.length < 1 || transition.model.length > 80)) {
+        return { status: "wrong_input", value: record };
+      }
+      if (transition.reasoningEffort !== null && !isReasoningEffort(transition.reasoningEffort)) {
+        return { status: "wrong_input", value: record };
+      }
+      const { model: _model, reasoningEffort: _effort, ...rest } = record;
+      void _model;
+      void _effort;
+      if ((record.model ?? null) === transition.model && (record.reasoningEffort ?? null) === transition.reasoningEffort) {
+        return { status: "unchanged", value: record };
+      }
+      return {
+        ...rest,
+        ...(transition.model === null ? {} : { model: transition.model }),
+        ...(transition.reasoningEffort === null ? {} : { reasoningEffort: transition.reasoningEffort }),
+      };
     }
   }
 }

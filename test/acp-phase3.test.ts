@@ -135,6 +135,44 @@ describe("Phase 3 ACP shell and lazy binding", () => {
     expect(controller.send.mock.calls[1]?.[0]).not.toHaveProperty("workspacePath");
   });
 
+  it("advertises the controller model catalog and applies a selected model to prompts", async () => {
+    const controller = makeController();
+    controller.models = vi.fn(async () => ({
+      state: "ready" as const,
+      observedAt: 1,
+      models: [
+        { id: "gpt-6-thinking", label: "GPT-6 Thinking", efforts: ["low", "high"] },
+        { id: "gpt-6-pro", label: "GPT-6 Pro", efforts: ["pro"] },
+      ],
+    }));
+    const ids = [sessionId, secondId];
+    const runtime = new AcpBridgeRuntime({
+      controller,
+      store: new MemoryStateStore<SessionState>(),
+      makeUuid: () => ids.shift()!,
+      canonicalize: async (path) => path,
+    });
+    runtime.newSession({ cwd: "C:\\repo", mcpServers: [] });
+
+    await expect(runtime.modelConfigOptions(sessionId)).resolves.toMatchObject([
+      { id: "model", category: "model", currentValue: "gpt-6-thinking" },
+      { id: "thought_level", category: "thought_level", currentValue: "low" },
+    ]);
+    await expect(runtime.setConfigOption({ sessionId, configId: "model", value: "gpt-6-pro" })).resolves.toMatchObject([
+      { id: "model", currentValue: "gpt-6-pro" },
+      { id: "thought_level", currentValue: "pro" },
+    ]);
+    await runtime.prompt({ sessionId, prompt: [{ type: "text", text: "use the selected model" }] });
+    expect(controller.send).toHaveBeenCalledWith(expect.objectContaining({
+      model: "gpt-6-pro",
+      reasoningEffort: "pro",
+    }));
+    await expect(runtime.setConfigOption({ sessionId, configId: "model", value: "not-a-model" }))
+      .rejects.toMatchObject({ code: "unsupported_model" });
+    await expect(runtime.setConfigOption({ sessionId, configId: "unknown", value: "x" }))
+      .rejects.toMatchObject({ code: "unsupported_config_option" });
+  });
+
   it("persists create_pending before the first POST", async () => {
     const controller = makeController();
     const store = new MemoryStateStore<SessionState>();

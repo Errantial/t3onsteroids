@@ -1335,3 +1335,23 @@ describe("profile-wide durable admission lease", () => {
     await expect(leaseB.read()).resolves.toMatchObject({ status: "found", lease: { sessionId: protectedSession } });
   });
 });
+
+it("persists an ACP model selection across durable reads", async () => {
+  const root = await tempRoot();
+  const durable = store(root);
+  await durable.updateSession(sessionId, { kind: "create", state: initial() });
+
+  await expect(durable.updateSession(sessionId, { kind: "select_model", model: "gpt-6-thinking", reasoningEffort: "high" }))
+    .resolves.toMatchObject({ status: "updated", value: { model: "gpt-6-thinking", reasoningEffort: "high" } });
+  await expect(durable.readSession(sessionId)).resolves.toMatchObject({
+    status: "found", value: { model: "gpt-6-thinking", reasoningEffort: "high" }
+  });
+
+  const cleared = await durable.updateSession(sessionId, { kind: "select_model", model: null, reasoningEffort: null });
+  expect(cleared.status).toBe("updated");
+  expect((cleared as { value: SessionState }).value.model).toBeUndefined();
+  expect((cleared as { value: SessionState }).value.reasoningEffort).toBeUndefined();
+
+  await expect(durable.updateSession(sessionId, { kind: "select_model", model: "gpt-6-thinking", reasoningEffort: "nonsense" as never }))
+    .resolves.toMatchObject({ status: "wrong_input" });
+});

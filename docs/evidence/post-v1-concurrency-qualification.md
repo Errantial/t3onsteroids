@@ -115,3 +115,11 @@ Two include-four attempts were made after the two-chat pass.
 Structural blocker: the controller enforces `MAX_EVENT_STREAMS = 4` and rejects a fifth stream with 503 (`control-stream.ts`). Each active bridged turn holds its own per-turn stream, so four active turns occupy all four slots. The four-chat gate requires `fifthStreamStatus === 200` - proof that four bridged sessions leave room for other CoS activity - which cannot hold while four per-turn streams are open. Advertising four therefore requires the versioned multiplexed event-stream contract described in `PLAN.md`, not another scheduling or latency fix.
 
 Until that contract exists, the advertised ceiling stays at **2**. The four-chat workload itself is otherwise exercised (peers start, leases reach 4) and the remaining work is stream multiplexing plus a clean full-matrix rerun.
+
+## 2026-10-29 multiplexed event-stream implementation
+
+Provider source `4be7fc97a448a1a5f8b9d721f703e661f9246d1b` adds `GET /v1/events/stream` (`provider-event-stream-mux-v1`): one held connection for a bounded set of chats, per-session `cursors=<id>:<seq>`, `sessionId` on every frame, one controller stream slot for the whole set, and validation before the first byte. Provider tests: `test/control-api-stream.test.ts` 13/13 (fan-out, per-session resume, kind filter, invalid subscriptions, one-slot accounting, health route/feature), plus the control-API suites 96/96. Typecheck passes.
+
+Bridge side adds `MuxHub` and uses it only when the last readiness snapshot advertised the feature; otherwise the per-session stream remains. It reconnects at per-session cursors, reopens when another chat joins, fails explicitly if the route disappears, and forces a shared reconnect on a Stop boundary. Tests: `test/cos-mux.test.ts` 4/4; full bridge suite 287/287.
+
+Bridge compatibility now pins provider build `4be7fc9`. The running `8b907ee` candidate predates the route, so a live four-chat rerun requires rebuilding and relaunching the candidate from `4be7fc9`; the two-chat ceiling remains 2 until that run passes with a 200 fifth-stream probe.

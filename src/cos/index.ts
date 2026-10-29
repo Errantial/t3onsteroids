@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { compatibility } from "../compatibility.js";
 import type { BridgeMetrics } from "../metrics.js";
+import { MuxHub } from "./mux.js";
 
 export const COS_CONTROL_PROTOCOL = 1 as const;
 export const COS_APP_ID = "chat-on-steroids" as const;
@@ -394,6 +395,8 @@ export class CosControllerClient {
   private readonly activeEventStreams = new Map<string, Set<AbortController>>();
   private readonly eventStreamEpochs = new Map<string, number>();
   private readonly pendingEventStreams = new Map<string, number>();
+  private eventStreamMuxCache: { readonly value: boolean; readonly expiresAt: number } | undefined;
+  private muxHub: MuxHub | undefined;
   private metricsState = {
     readAttempts: 0,
     readRetries: 0,
@@ -415,9 +418,46 @@ export class CosControllerClient {
     if (force) {
       this.discovery = undefined;
       this.providerExtensionReadiness = undefined;
+      this.eventStreamMuxCache = undefined;
     }
     if (force || !this.discovery) this.discovery = await this.discover();
     return this.discovery;
+  }
+
+  /**
+   * Whether the last readiness snapshot advertised the multiplexed event stream. Admission reads
+   * health before a turn, so the cache is warm on the live path; without a snapshot the client keeps
+   * the per-session stream rather than spending a read just to discover the route.
+   */
+  private multiplexedEventStreams(): boolean {
+    const cached = this.eventStreamMuxCache;
+    return cached !== undefined && cached.expiresAt > Date.now() && cached.value;
+  }
+
+  private multiplexedStreams(): MuxHub {
+    this.muxHub ??= new MuxHub({
+      discover: () => this.getDiscovery(),
+      fetch: this.transport.fetch.bind(this.transport),
+      retryPolicy: this.retryPolicy,
+      invalidateDiscovery: () => {
+        this.discovery = undefined;
+        this.providerExtensionReadiness = undefined;
+        this.eventStreamMuxCache = undefined;
+      },
+      onConnect: () => {
+        this.metricsState.sseConnectAttempts += 1;
+        this.bridgeMetrics?.increment("sseConnectCount");
+      },
+      onReconnect: () => {
+        this.metricsState.sseReconnects += 1;
+        this.bridgeMetrics?.increment("sseReconnectCount");
+      },
+      onBackoff: () => {
+        this.metricsState.sseBackoffs += 1;
+        this.bridgeMetrics?.increment("backoffCount");
+      },
+    });
+    return this.muxHub;
   }
 
   private async request(path: string, init: RequestInit = {}, options: { retryRead?: boolean } = {}): Promise<Response> {
@@ -488,7 +528,12 @@ export class CosControllerClient {
   }
 
   async health(): Promise<CosControllerReadiness> {
-    return parseHealth(await this.readJson("/v1/health"));
+    const readiness = parseHealth(await this.readJson("/v1/health"));
+    this.eventStreamMuxCache = {
+      value: readiness.features["provider-event-stream-mux-v1"] === 1,
+      expiresAt: Date.now() + 60_000,
+    };
+    return readiness;
   }
 
   async requireProviderExtension(): Promise<CosControllerReadiness> {
@@ -804,6 +849,9 @@ export class CosControllerClient {
   }
 
   private reconnectEventStreams(sessionId: string, reason: string): void {
+    // The multiplexed connection covers every subscribed chat, so a Stop boundary reconnects the
+    // shared stream; per-session cursors make the replay harmless for the other chats.
+    this.muxHub?.reconnect(sessionId, reason);
     // Increment even when no reader is registered yet. A stream can be suspended in controller
     // discovery before it creates its AbortController; its captured epoch prevents it opening a
     // connection to the endpoint it discovered before this Stop/reconnect boundary.
@@ -838,6 +886,12 @@ export class CosControllerClient {
     rolloverMs?: number;
     idleTimeoutMs?: number;
   } = {}): AsyncGenerator<CosEvent> {
+    if (this.multiplexedEventStreams()) {
+      // One connection carries every active chat; the hub reconnects at per-session cursors.
+      const signal = options.signal ?? new AbortController().signal;
+      yield* this.multiplexedStreams().stream(sessionId, options.from ?? 0, signal);
+      return;
+    }
     let cursor = options.from;
     let connectedOnce = false;
     let reconnectAttempt = 0;

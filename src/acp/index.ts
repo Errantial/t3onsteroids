@@ -106,6 +106,7 @@ export interface BridgeController {
 export interface PromptNormalizationResult {
   readonly text: string;
   readonly interactionMode: InteractionMode;
+  readonly images: readonly { readonly name: string; readonly dataUrl: string }[];
 }
 
 export interface BridgeRuntimeOptions {
@@ -190,6 +191,7 @@ export async function normalizePrompt(
   canonicalize: (path: string) => Promise<string> = realpath,
 ): Promise<PromptNormalizationResult> {
   const textBlocks: string[] = [];
+  const images: Array<{ name: string; dataUrl: string }> = [];
   let nextMode = currentMode;
   for (const block of prompt) {
     if (block.type === "text") {
@@ -199,6 +201,17 @@ export async function normalizePrompt(
       textBlocks.push(parsed.text);
     } else if (block.type === "resource_link") {
       textBlocks.push(await resourceLinkToText(block, canonicalRoot, canonicalize));
+    } else if (block.type === "image") {
+      if (block.mimeType !== "image/webp") {
+        throw new BridgeError("unsupported_prompt_content", "Only WebP prompt images are supported");
+      }
+      if (typeof block.data !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(block.data)) {
+        throw new BridgeError("unsupported_prompt_content", "Prompt image data is not valid base64");
+      }
+      const dataUrl = `data:image/webp;base64,${block.data}`;
+      if (dataUrl.length > 512_100) throw new BridgeError("input_too_large", "Prompt image exceeds the controller limit");
+      if (images.length >= 10) throw new BridgeError("unsupported_prompt_content", "At most ten prompt images are supported");
+      images.push({ name: `image-${images.length + 1}.webp`, dataUrl });
     } else {
       throw new BridgeError("unsupported_prompt_content", `Prompt content type ${block.type} is not supported in v1`);
     }
@@ -207,7 +220,7 @@ export async function normalizePrompt(
   let text = textBlocks.join("\n");
   if (nextMode === "plan") text = `${PLAN_GUIDANCE}\n\n${text}`;
   if (text.length > MAX_COS_INPUT_CHARS) throw new BridgeError("input_too_large", "Normalized CoS input exceeds 64,000 characters");
-  return { text, interactionMode: nextMode };
+  return { text, interactionMode: nextMode, images };
 }
 
 export class AcpBridgeRuntime {
@@ -1177,7 +1190,7 @@ export class AcpBridgeRuntime {
     return {
       protocolVersion: 1,
       agentCapabilities: {
-        promptCapabilities: {},
+        promptCapabilities: { image: true },
         sessionCapabilities: { resume: {} },
       },
       agentInfo: { name: "t3onsteroids", version: BRIDGE_VERSION },
@@ -1297,6 +1310,12 @@ export class AcpBridgeRuntime {
     const canonicalWorkspace = await this.canonicalize(project.canonicalPath);
     const canonicalRoot = await this.canonicalize(project.sourceProjectPath ?? project.canonicalPath);
     const normalized = await normalizePrompt(request.prompt, session.interactionMode, canonicalRoot, this.canonicalize);
+    if (normalized.images.length > 0) {
+      const readiness = await this.options.controller.requireProviderExtension?.();
+      if (!readiness || readiness.features["provider-input-images-v1"] !== 1) {
+        throw new BridgeError("unsupported_prompt_content", "The controller does not accept prompt images");
+      }
+    }
     const promptNormalizeMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
 
     if (this.options.durableStore && session.providerTranslation) {
@@ -1573,6 +1592,7 @@ export class AcpBridgeRuntime {
       } : { sessionId: session.sessionId }),
       ...(session.model === undefined ? {} : { model: session.model }),
       ...(session.reasoningEffort === undefined ? {} : { reasoningEffort: session.reasoningEffort }),
+      ...(normalized.images.length === 0 ? {} : { images: normalized.images }),
     });
     const inputSendMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
     this.options.metrics?.observePreSendPhases(session.sessionId, generation, {

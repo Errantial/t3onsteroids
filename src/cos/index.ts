@@ -151,6 +151,8 @@ export interface CosSendInput {
   /** ChatGPT model/effort resolved for this turn; omitted means the controller's current picker. */
   readonly model?: string;
   readonly reasoningEffort?: string;
+  /** Bounded WebP images accompanying the text. */
+  readonly images?: readonly { readonly name: string; readonly dataUrl: string }[];
 }
 
 export interface CosControllerTransport {

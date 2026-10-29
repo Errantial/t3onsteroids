@@ -264,6 +264,62 @@ describe("Phase 3 ACP shell and lazy binding", () => {
     ], "default", "C:\\repo", canonicalize)).rejects.toMatchObject({ code: "resource_link_unavailable" });
   });
 
+  it("accepts bounded WebP images and rejects every other prompt image format", async () => {
+    const canonicalize = async (path: string) => path;
+    const accepted = await normalizePrompt([
+      { type: "text", text: "look" },
+      { type: "image", data: "AAAA", mimeType: "image/webp" },
+    ], "default", "C:\\repo", canonicalize);
+    expect(accepted.images).toEqual([{ name: "image-1.webp", dataUrl: "data:image/webp;base64,AAAA" }]);
+    await expect(normalizePrompt([{ type: "image", data: "AAAA", mimeType: "image/png" }], "default", "C:\\repo", canonicalize))
+      .rejects.toMatchObject({ code: "unsupported_prompt_content" });
+    await expect(normalizePrompt([{ type: "image", data: "not base64!", mimeType: "image/webp" }], "default", "C:\\repo", canonicalize))
+      .rejects.toMatchObject({ code: "unsupported_prompt_content" });
+  });
+
+  it("sends an accepted prompt image and refuses it when the controller feature is absent", async () => {
+    const imageController = {
+      ...makeController(),
+      requireProviderExtension: vi.fn(async () => ({
+        protocol: 1,
+        actionsEnabled: true,
+        actionRoutes: [],
+        app: "chat-on-steroids",
+        features: { "provider-input-images-v1": 1 },
+      })),
+    };
+    const ids = [sessionId, secondId];
+    const runtime = new AcpBridgeRuntime({
+      controller: imageController,
+      store: new MemoryStateStore<SessionState>(),
+      makeUuid: () => ids.shift()!,
+      canonicalize: async (path) => path,
+    });
+    expect(runtime.initialize(1).agentCapabilities?.promptCapabilities).toMatchObject({ image: true });
+    runtime.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    await runtime.prompt({
+      sessionId,
+      prompt: [{ type: "text", text: "look" }, { type: "image", data: "AAAA", mimeType: "image/webp" }],
+    });
+    expect(imageController.send).toHaveBeenCalledWith(expect.objectContaining({
+      images: [{ name: "image-1.webp", dataUrl: "data:image/webp;base64,AAAA" }],
+    }));
+
+    const plain = makeController();
+    const plainIds = [sessionId];
+    const plainRuntime = new AcpBridgeRuntime({
+      controller: plain,
+      store: new MemoryStateStore<SessionState>(),
+      makeUuid: () => plainIds.shift()!,
+      canonicalize: async (path) => path,
+    });
+    plainRuntime.newSession({ cwd: "C:\\repo", mcpServers: [] });
+    await expect(plainRuntime.prompt({
+      sessionId,
+      prompt: [{ type: "text", text: "look" }, { type: "image", data: "AAAA", mimeType: "image/webp" }],
+    })).rejects.toMatchObject({ code: "unsupported_prompt_content" });
+  });
+
   it("enforces the exact 64,000-character admission boundary before send", async () => {
     await expect(normalizePrompt([{ type: "text", text: "x".repeat(MAX_COS_INPUT_CHARS) }], "default", "C:\\repo", async (path) => path)).resolves.toMatchObject({ text: "x".repeat(MAX_COS_INPUT_CHARS) });
     await expect(normalizePrompt([{ type: "text", text: "x".repeat(MAX_COS_INPUT_CHARS + 1) }], "default", "C:\\repo", async (path) => path)).rejects.toMatchObject({ code: "input_too_large" });

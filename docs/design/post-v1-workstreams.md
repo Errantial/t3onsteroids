@@ -39,7 +39,7 @@ New read route, authenticated and side-effect free:
 POST /v1/workspaces/resolve
 { "path": "<absolute T3 cwd>" }
 → {
-    "kind": "project" | "worktree",
+    "kind": "project" | "worktree" | "subdirectory",
     "projectId": "<CoS project that supplies grouping/instructions>",
     "projectName": "...",
     "canonicalPath": "<canonical real path of the supplied cwd>",
@@ -52,13 +52,20 @@ Rules:
 - The supplied path is resolved through CoS's existing approved-root/canonical-path owner
   (`resolvePath`) and must be an existing directory. It is not re-implemented in the bridge.
 - `kind=project` means the path is exactly one catalog project root. Existing v1 behavior.
-- `kind=worktree` means the path is a linked Git worktree. Derive the repository identity with the
-  existing worktree helper (`git rev-parse --show-toplevel --absolute-git-dir --git-common-dir`),
-  take the main repository root from the common Git directory, and require it to match exactly one
-  non-ungrouped CoS project. Zero or multiple matches is `workspace_unmapped`, never a guess.
-- A plain subdirectory that is not a worktree root is **not** accepted in v1. It has no unambiguous
-  project root for instructions and no worktree identity to revalidate. This can be relaxed later
-  with an explicit "workspace is a subdirectory of project X" contract.
+- `kind=worktree` means the path is inside a linked Git worktree. Derive the repository identity
+  with the existing worktree helper (`git rev-parse --show-toplevel --absolute-git-dir
+  --git-common-dir`), take the main repository root from the common Git directory, and require it
+  to match exactly one non-ungrouped CoS project. The workspace is the supplied path, which may be
+  the worktree root or a subdirectory inside it.
+- `kind=subdirectory` means the path is inside a catalog project's root (or a linked worktree's
+  root) but is not that root. Choose the deepest catalog project whose canonical root contains the
+  path; a tie or zero matches is `workspace_unmapped`. Never scan upward for a directory marker or
+  infer a project from cwd.
+- `canonicalPath` is always the supplied cwd's canonical real path, so tools start where T3 started
+  the thread. `sourceProjectPath` is the owning project's root and is what supplies instructions.
+- A path that is a Git repository but not a linked worktree of a catalog project (bare repo,
+  submodule, uncatalogued main root) fails closed. A path inside a catalog project that is not a
+  Git repository resolves as `subdirectory` by ancestor containment.
 - Bare repositories, submodules, worktrees whose common directory is not a normal `.git`, and
   paths whose repository identity changes under reparse points fail closed.
 - No project catalog, ChatGPT project id, Git remote URL or configuration is exposed.
@@ -79,25 +86,29 @@ creation. An existing session never changes its workspace.
 `SessionSummary` gains an immutable, optional workspace:
 
 ```text
-workspace?: { path: string }   // canonical real path; present only for kind=worktree sessions
+workspace?: { path: string }   // canonical real path; present for worktree/subdirectory sessions
 ```
 
-`getSessionProject(sessionId)` returns the session workspace when present, after re-resolving it
-under the current approved roots and proving it is still a directory; otherwise it keeps the
-project-root behavior. A workspace that disappeared, moved or left the approved roots is a broken
-session (`workspace_changed`), never a fallback to the project root.
+The `projectId` remains the ChatGPT Project/grouping identity and supplies the source project root.
+Two reads stay explicit:
 
-The `projectId` remains the ChatGPT Project/grouping identity and supplies the project name.
-Instructions, the default tool working directory and prompt headers come from the session
-workspace, so a worktree's own `AGENTS.md` and files win. The prompt header should say "working
-directory" rather than "selected project directory" when a workspace override is present.
+- `getSessionProject(sessionId)` keeps returning the **source project root**; it supplies
+  `AGENTS.md` and the project name, so a subdirectory or worktree still gets the repository's
+  instructions.
+- `getSessionWorkspace(sessionId)` returns the session workspace when present (after re-resolving
+  it under the current approved roots and proving it is still a directory), otherwise the project
+  root. Tool defaults and the prompt's working-directory header use this.
+
+A workspace that disappeared, moved or left the approved roots is a broken session
+(`workspace_changed`), never a fallback to the project root. The prompt header should name the
+workspace as the working directory and the project root as the instruction source.
 
 ### Bridge changes
 
 - Feature gate: `provider-session-workspace-v1` and the `/v1/workspaces/resolve` route.
-- First prompt: try exact project resolve; if it fails, resolve the workspace. A `worktree` result
-  is created with `{ projectId, workspacePath, providerPolicy }`. A `project` result keeps the
-  existing creation shape.
+- First prompt: try exact project resolve; if it fails, resolve the workspace. A `worktree` or
+  `subdirectory` result is created with `{ projectId, workspacePath, providerPolicy }`. A `project`
+  result keeps the existing creation shape.
 - Every subsequent prompt and `session/resume`: re-resolve the T3 cwd and require the same
   `projectId` and canonical workspace. Fail `workspace_changed` before any POST.
 - Journal adds `workspacePath?` and `workspaceKind` so resume can prove the binding.
@@ -108,14 +119,19 @@ directory" rather than "selected project directory" when a workspace override is
 
 Controller:
 
-- worktree of a catalog project resolves to that project + the worktree path;
-- worktree of an uncatalogued repository, ambiguous main-root match, plain subdirectory, bare repo,
-  path outside approved roots, and non-directory all fail closed;
+- worktree root and a subdirectory inside a worktree resolve to the owning project + the supplied
+  path;
+- a plain subdirectory of a project resolves by deepest ancestor containment;
+- nested/ambiguous ancestor projects, zero match, bare repo, submodule, path outside approved roots
+  and non-directory all fail closed;
+- a path that looks like a project subdirectory is never promoted to the project root, and no
+  upward marker scan applies;
 - new-chat admission revalidates and stores the workspace atomically; a mismatched `projectId`
   fails before the outbox row;
-- `getSessionProject` returns the workspace for a worktree session and still the root for a normal
-  session; a removed/remapped workspace fails rather than falling back;
-- prompt building reads the worktree's `AGENTS.md` and names the worktree directory;
+- `getSessionWorkspace` returns the workspace for worktree/subdirectory sessions and the root for a
+  normal session; `getSessionProject` still returns the source root; a removed/remapped workspace
+  fails rather than falling back;
+- prompt building reads the source project's `AGENTS.md` and names the workspace directory;
 - an existing session cannot be given a new workspace.
 
 Bridge:

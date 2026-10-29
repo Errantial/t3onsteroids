@@ -74,3 +74,24 @@ Complete.
 - 4/8-chat concurrency stays parked at `supportedConcurrency=2`.
 
 - Evidence: provider build d77cdca, bridge pin 63db337, full bridge suite 297/297, candidate healthy with all nine features. Run 20261029T230611Z-twochat-requal-retry2 passed all eight cases (baseline pre-send/drain/post p95 109/933/89 ms; two-chat 142/719/94 ms; RSS 82/87 MB per process) on T3 6d450a42 and CoS base 87ae9d63, executable SHA-256 AAFEE508A39EA6C696B39E629410A8CB5C442215919087807F2DD24B32AA87AE. Two earlier attempts failed one flaky case each and are recorded in docs/evidence/post-v1-concurrency-qualification.md; the passing run is the qualifying evidence.
+
+## M6. Native background work projection (pending-work fence)
+
+Complete for the pending-work/late-completion fence. Enabling the policy remains a separate,
+explicit change.
+
+- Controller 954147b: `provider-background-work-v1` adds
+  `GET /v1/sessions/{id}/background-work`. It lists non-terminal workers attached to the
+  session's prime conversation; a disabled provider session with pending work is reported as
+  `violated` so the bridge cannot mistake it for an idle turn.
+- Bridge dbafc9: the client reads the projection; `assertBackgroundWorkSettled` runs after the
+  authoritative drain and fails `turn_drain_pending` when pending work remains. A controller
+  without the feature keeps protocol-1 behavior (no projection, no extra claim).
+- Late-completion contract: settlement requires an empty pending set; the controller's drain marker
+  already forbids new provider-visible rows after drain, and the bridge never releases the lease or
+  reports success while a registered work item is pending.
+- Scope stated honestly: the projection covers workers. Goal/Loop continuations and a per-work
+  cancellation route are required before the provider policy can move off `backgroundWork=disabled`;
+  that policy is unchanged.
+- Evidence: control-API reads/test/actions 140/140; bridge `cos-client` 40/40,
+  `acp-phase3` 17/17, full suite **300/300**.

@@ -87,6 +87,7 @@ export {
   MAX_CONCURRENT_TURNS_ENV,
   QUALIFIED_MAX_CONCURRENT_TURNS,
   resolveLeaseCapacity,
+  scaledPollMs,
 } from "./concurrency.js";
 export type {
   DurableAdmissionLeaseOptions,

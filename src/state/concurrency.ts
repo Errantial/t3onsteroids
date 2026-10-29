@@ -1,5 +1,7 @@
 import { MAX_LEASE_SLOTS } from "./lease.js";
 
+export { scaledPollMs } from "./poll.js";
+
 /**
  * Concurrent bridged turns the release is qualified for. Raising this is a qualification result
  * (PLAN.md post-v1 roadmap), never a configuration choice: concurrency must be advertised from

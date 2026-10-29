@@ -135,6 +135,11 @@ export class DurableAdmissionLease {
   private readonly identity: WindowsProcessIdentity;
   private readonly capacity: number;
 
+  /** Turns this lease admits at once; polling loops scale their interval by it. */
+  get maxConcurrentTurns(): number {
+    return this.capacity;
+  }
+
   constructor(
     private readonly stateRoot: string,
     readonly controllerIdentityHash: string,

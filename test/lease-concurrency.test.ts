@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { releaseReadiness } from "../src/release.js";
 import {
   CONCURRENCY_QUALIFICATION_ENV,
   DurableAdmissionLease,
@@ -12,6 +13,7 @@ import {
   QUALIFIED_MAX_CONCURRENT_TURNS,
   leaseReferencedSessionIds,
   resolveLeaseCapacity,
+  scaledPollMs,
   type ProcessIdentityResult,
   type WindowsProcessIdentity,
 } from "../src/state/index.js";
@@ -174,5 +176,36 @@ describe("evidence-gated concurrency configuration", () => {
     for (const value of ["0", "-1", "two", "1.5", "10", "01"]) {
       expect(() => resolveLeaseCapacity({ [MAX_CONCURRENT_TURNS_ENV]: value })).toThrow();
     }
+  });
+});
+
+describe("shared controller budget", () => {
+  const READS_PER_MINUTE_CAP = 600;
+  // The turn-start wait loop reads the input and the session on every pass.
+  const waitReadsPerMinute = (turns: number, capacity: number): number =>
+    turns * 2 * (60_000 / scaledPollMs(500, capacity));
+
+  it("keeps the combined wait-loop read rate at the single-turn rate however many turns run", () => {
+    const singleTurn = waitReadsPerMinute(1, 1);
+    for (let capacity = 1; capacity <= MAX_LEASE_SLOTS; capacity++) {
+      expect(waitReadsPerMinute(capacity, capacity)).toBeLessThanOrEqual(singleTurn);
+      expect(waitReadsPerMinute(capacity, capacity)).toBeLessThan(READS_PER_MINUTE_CAP);
+    }
+  });
+
+  it("leaves the V1 polling interval unchanged at capacity 1 and rejects nonsense", () => {
+    expect(scaledPollMs(500, 1)).toBe(500);
+    expect(scaledPollMs(50, 4)).toBe(200);
+    expect(() => scaledPollMs(0, 1)).toThrow();
+    expect(() => scaledPollMs(500, 0)).toThrow();
+  });
+
+  it("exposes the lease capacity that callers scale by", () => {
+    expect(leaseFor("unused").maxConcurrentTurns).toBe(1);
+    expect(leaseFor("unused", 3).maxConcurrentTurns).toBe(3);
+  });
+
+  it("keeps the advertised release concurrency equal to the qualified ceiling", () => {
+    expect(releaseReadiness().supportedConcurrency).toBe(QUALIFIED_MAX_CONCURRENT_TURNS);
   });
 });

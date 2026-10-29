@@ -16,6 +16,7 @@ import type { ProviderTurnTranslationState } from "../src/translate/events.js";
 
 const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const secondSessionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const thirdSessionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const turnId = "turn-durable-1";
 const profileHash = "a".repeat(64);
 const journalLeaseId = "11111111-1111-4111-8111-111111111111";
@@ -54,13 +55,14 @@ function controller(overrides: Partial<BridgeController> = {}): BridgeController
   };
 }
 
-function durable(root: string) {
+function durable(root: string, capacity = 1) {
   const identity = new TestIdentity();
   const store = new DurableSessionStore(root, {
     probeFilesystem: false,
     mutex: { identity, timeoutMs: 1_000, pollMs: 2 },
   });
   const lease = new DurableAdmissionLease(root, profileHash, {
+    capacity,
     identity,
     mutex: { identity, timeoutMs: 1_000, pollMs: 2 },
   });
@@ -884,6 +886,49 @@ describe("durable ACP runtime boundaries", () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(result.session).toMatchObject({ generation: 3, activeInputId: nextId, inputDispatchState: "dispatched" });
     await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { inputId: nextId, generation: 3 } });
+  });
+
+  it("admits two sessions on separate slots and isolates their journals and leases", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root, 2);
+    const ids = [sessionId, secondSessionId, thirdSessionId];
+    const bridge = runtime(controller(), store, lease, () => ids.shift()!);
+
+    expect(bridge.newSession({ cwd: "C:\\repo", mcpServers: [] }).sessionId).toBe(sessionId);
+    expect(bridge.newSession({ cwd: "C:\\repo", mcpServers: [] }).sessionId).toBe(secondSessionId);
+    await bridge.prompt({ sessionId, prompt: [{ type: "text", text: "one" }] });
+    await bridge.prompt({ sessionId: secondSessionId, prompt: [{ type: "text", text: "two" }] });
+
+    const slots = await lease.readSlots();
+    expect(slots.status).toBe("ok");
+    if (slots.status !== "ok") throw new Error("unreachable");
+    expect(slots.held.map((entry) => entry.lease.sessionId).sort()).toEqual([sessionId, secondSessionId]);
+    expect(new Set(slots.held.map((entry) => entry.lease.leaseId)).size).toBe(2);
+
+    // A third session cannot be admitted while both slots are held, and neither holder's lease is
+    // displaced or rewritten by the refused admission.
+    expect(bridge.newSession({ cwd: "C:\\repo", mcpServers: [] }).sessionId).toBe(thirdSessionId);
+    await expect(bridge.prompt({ sessionId: thirdSessionId, prompt: [{ type: "text", text: "three" }] }))
+      .rejects.toMatchObject({ code: "input_busy" });
+    const afterRefusal = await lease.readSlots();
+    expect(afterRefusal.status).toBe("ok");
+    if (afterRefusal.status !== "ok") throw new Error("unreachable");
+    expect(afterRefusal.held).toEqual(slots.held);
+
+    // Cancelling one session's turn records intent only on that session's journal.
+    await bridge.cancel(secondSessionId);
+    await expect(store.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { cancelIntent: "none", activeInputId: sessionId },
+    });
+    await expect(store.readSession(secondSessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { cancelIntent: "requested", activeInputId: secondSessionId },
+    });
+    const afterCancel = await lease.readSlots();
+    expect(afterCancel.status).toBe("ok");
+    if (afterCancel.status !== "ok") throw new Error("unreachable");
+    expect(afterCancel.held).toEqual(slots.held);
   });
 
   it("keeps a missing dispatched input ambiguous when CoS's different drain is newer than the persisted cursor", async () => {

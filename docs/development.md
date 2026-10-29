@@ -132,4 +132,6 @@ T3COS_MAX_CONCURRENT_TURNS=2 T3COS_CONCURRENCY_QUALIFICATION=1
 
 Asking for more than the qualified ceiling without `T3COS_CONCURRENCY_QUALIFICATION=1` fails at startup instead of being clamped. The lease also enforces one active turn per session, keeps honoring every existing slot if capacity is lowered, and fails closed if any slot file is corrupt. Slot 0 keeps the V1 file name, so existing state needs no migration.
 
+The controller's read budget is shared by every turn, so its internal polling loops stretch their interval by the lease capacity (`scaledPollMs`). At capacity 1 the V1 intervals are unchanged; with more turns admitted, the combined wait-loop and Stop-loop read rate stays at the single-turn rate instead of exhausting the 600 reads/minute budget.
+
 Raising `QUALIFIED_MAX_CONCURRENT_TURNS` in `src/state/concurrency.ts` is a qualification result: it needs live evidence for browser reliability, queue depth, memory, controller utilization, latency, cancellation isolation and stale-event isolation first (see the post-v1 roadmap in `PLAN.md`). Do not advertise or document concurrent chats as supported before then.

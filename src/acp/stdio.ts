@@ -95,7 +95,13 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
   };
   const userDataDir = cosUserDataDirectory(env);
   const state = await createProductionStateContext(userDataDir, env, { warmProcessIdentity: true });
-  const controller = new CosControllerClient(() => discoverCosController(userDataDir), undefined, undefined, metrics);
+  const controller = new CosControllerClient(
+    () => discoverCosController(userDataDir),
+    undefined,
+    undefined,
+    metrics,
+    state.admissionLease.maxConcurrentTurns,
+  );
   // Prime Node/fetch/controller discovery while T3 is still completing the ACP handshake. The
   // response is deliberately discarded: prompt admission still takes its own fresh provider
   // readiness snapshot, so a restart, token rotation, disabled actions, or provenance change

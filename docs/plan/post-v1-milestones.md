@@ -160,3 +160,15 @@ Live verification of provider  520fce (2026-10-29):
 - **PNG/JPEG and non-image attachments.** The bridge has no image transcoder and CoS accepts only
   WebP data URLs for prompt images. Supporting other formats needs either a permitted transcoder
   dependency or a CoS-side conversion, plus the corresponding attachment contract.
+
+Requalification attempt on  520fce (20261029T234052Z-twochat-requal-0520fce):
+
+- Functional cases passed; the single-chat baseline missed the drain budget by 11 ms
+  (drainP95 1011 vs 1000; pre-send 130, post-drain 98). Across builds the baseline drain p95 has
+  ranged 933–1262 ms, so the 1 s p95 gate is at the noise floor of hidden-tab completion detection.
+- This is a gate/budget decision, not a functional regression: the 20-turn two-chat workload and
+  every isolation case pass on the same build.
+
+User decision required: keep the 1 s drain budget and accept intermittent 2-chat requalification
+failures, or approve a documented budget adjustment for this environment. The budget has not been
+changed unilaterally; the last clean 2-chat tuple remains d77cdca.

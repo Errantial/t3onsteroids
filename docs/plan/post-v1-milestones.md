@@ -95,3 +95,17 @@ explicit change.
   that policy is unchanged.
 - Evidence: control-API reads/test/actions 140/140; bridge `cos-client` 40/40,
   `acp-phase3` 17/17, full suite **300/300**.
+
+## M7. T3-HEAD drift detection
+
+Complete as detection. The acceptance matrix against a built HEAD is still required before widening
+the support tuple.
+
+- `scripts/t3-head-drift.mjs` compares the pinned T3 SHA in `src/compatibility.ts` with the
+  upstream repository's current HEAD and prints one JSON object (no repository contents).
+- Result on 2026-10-29: pinned `6d450a4284852af137b2f3407fddd89eb76e7644` (0.1.5-nightly.20261029.3877)
+  vs upstream HEAD `dd148481531a0a090780a2ade20588566db099a2` — `outcome:drift`,
+  `matrix:not_run`, `wideningBlocked:true`.
+- Widening the support tuple still requires checking out and building that HEAD, then running the
+  pinned acceptance matrix. No built HEAD checkout exists in this environment, so this step records
+  the drift instead of claiming compatibility or incompatibility.

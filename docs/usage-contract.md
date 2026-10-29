@@ -1,6 +1,8 @@
 # Provider usage contract (draft)
 
-Status: **draft, not implemented.** Backs PLAN.md post-v1 items 1 (usage page) and 2 (tokens/sec). Nothing here is advertised until CoS reports a matching feature and the pinned tuple is requalified.
+Status: **parked.** Decision: the ChatGPT/CoS provider is left out of tokens/sec and usage for now (the readout and usage work target other providers). This contract is kept for when that is revisited; nothing below is scheduled. Until then the bridge must report no usage, which `test/no-usage-reporting.test.ts` enforces.
+
+Original status: **draft, not implemented.** Backs PLAN.md post-v1 items 1 (usage page) and 2 (tokens/sec). Nothing here is advertised until CoS reports a matching feature and the pinned tuple is requalified.
 
 ## What CoS can actually report (source review, CoS base `87ae9d63`)
 

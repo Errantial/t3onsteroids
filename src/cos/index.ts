@@ -72,7 +72,11 @@ export interface CosControllerReadiness {
 export interface CosResolvedProject {
   readonly projectId: string;
   readonly name: string;
+  /** Canonical working directory: the project root, a worktree, or a project subdirectory. */
   readonly canonicalPath: string;
+  /** Present when the controller resolved a workspace inside the project rather than its root. */
+  readonly kind?: "project" | "worktree" | "subdirectory";
+  readonly sourceProjectPath?: string;
 }
 
 export interface CosAssistantContentChunk {
@@ -129,6 +133,8 @@ export interface CosSendInput {
   readonly sessionId?: string;
   readonly projectId?: string;
   readonly providerPolicy?: { readonly backgroundWork: "disabled" };
+  /** New provider chat only: a working directory inside the supplied project. */
+  readonly workspacePath?: string;
 }
 
 export interface CosControllerTransport {
@@ -396,6 +402,7 @@ export class CosControllerClient {
   private readonly eventStreamEpochs = new Map<string, number>();
   private readonly pendingEventStreams = new Map<string, number>();
   private eventStreamMuxCache: { readonly value: boolean; readonly expiresAt: number } | undefined;
+  private workspaceResolveCache: { readonly value: boolean; readonly expiresAt: number } | undefined;
   private muxHub: MuxHub | undefined;
   private metricsState = {
     readAttempts: 0,
@@ -419,6 +426,7 @@ export class CosControllerClient {
       this.discovery = undefined;
       this.providerExtensionReadiness = undefined;
       this.eventStreamMuxCache = undefined;
+      this.workspaceResolveCache = undefined;
     }
     if (force || !this.discovery) this.discovery = await this.discover();
     return this.discovery;
@@ -443,6 +451,7 @@ export class CosControllerClient {
         this.discovery = undefined;
         this.providerExtensionReadiness = undefined;
         this.eventStreamMuxCache = undefined;
+        this.workspaceResolveCache = undefined;
       },
       onConnect: () => {
         this.metricsState.sseConnectAttempts += 1;
@@ -533,6 +542,10 @@ export class CosControllerClient {
       value: readiness.features["provider-event-stream-mux-v1"] === 1,
       expiresAt: Date.now() + 60_000,
     };
+    this.workspaceResolveCache = {
+      value: readiness.features["provider-session-workspace-v1"] === 1,
+      expiresAt: Date.now() + 60_000,
+    };
     return readiness;
   }
 
@@ -559,7 +572,9 @@ export class CosControllerClient {
 
   async resolveProject(path: string): Promise<CosResolvedProject> {
     await this.requireProviderExtensionWithinAdmission();
-    const response = await this.request("/v1/projects/resolve", {
+    const workspaceRoute = this.workspaceResolveCache !== undefined && this.workspaceResolveCache.expiresAt > Date.now() &&
+      this.workspaceResolveCache.value;
+    const response = await this.request(workspaceRoute ? "/v1/workspaces/resolve" : "/v1/projects/resolve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
@@ -571,10 +586,20 @@ export class CosControllerClient {
       throw new CosControllerError("schema_mismatch", "project resolve response is malformed JSON");
     }
     const row = asRecord(value, "project resolve response");
+    const projectId = asString(row.projectId, "project resolve response.projectId");
+    const name = asString(row.name, "project resolve response.name");
+    const canonicalPath = asString(row.canonicalPath, "project resolve response.canonicalPath");
+    if (!workspaceRoute) return { projectId, name, canonicalPath };
+    const kind = asString(row.kind, "workspace resolve response.kind");
+    if (kind !== "project" && kind !== "worktree" && kind !== "subdirectory") {
+      throw new CosControllerError("schema_mismatch", `Unknown workspace kind ${kind}`);
+    }
     return {
-      projectId: asString(row.projectId, "project resolve response.projectId"),
-      name: asString(row.name, "project resolve response.name"),
-      canonicalPath: asString(row.canonicalPath, "project resolve response.canonicalPath"),
+      projectId,
+      name,
+      canonicalPath,
+      kind,
+      sourceProjectPath: asString(row.sourceProjectPath, "workspace resolve response.sourceProjectPath"),
     };
   }
 
@@ -731,6 +756,14 @@ export class CosControllerClient {
   private validateMutation(input: CosSendInput): void {
     if (!UUID_RE.test(input.id)) throw new CosControllerError("schema_mismatch", "CoS input id must be a lowercase UUID");
     if (input.text.length > 64_000) throw new CosControllerError("schema_mismatch", "CoS input text exceeds 64,000 characters");
+    if (input.workspacePath !== undefined) {
+      if (input.sessionId !== undefined || input.projectId === undefined || input.providerPolicy === undefined) {
+        throw new CosControllerError("schema_mismatch", "A workspace belongs to a new provider chat with a project");
+      }
+      if (input.workspacePath.length === 0 || input.workspacePath.length > 32_768) {
+        throw new CosControllerError("schema_mismatch", "CoS workspace path is invalid");
+      }
+    }
   }
 
   async send(input: CosSendInput): Promise<CosInputRecord> {

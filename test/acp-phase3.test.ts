@@ -101,6 +101,40 @@ describe("Phase 3 ACP shell and lazy binding", () => {
     }));
   });
 
+  it("creates a worktree session with its workspace and reuses it without resending the workspace", async () => {
+    const controller = makeController();
+    const workspace = "C:\\repo\\.worktrees\\feature";
+    controller.resolveProject.mockResolvedValue({
+      projectId: "project-1",
+      canonicalPath: workspace,
+      kind: "worktree",
+      sourceProjectPath: "C:\\repo",
+    });
+    const ids = [sessionId, secondId];
+    const runtime = new AcpBridgeRuntime({
+      controller,
+      store: new MemoryStateStore<SessionState>(),
+      makeUuid: () => ids.shift()!,
+      canonicalize: async (path) => path,
+    });
+    runtime.newSession({ cwd: workspace, mcpServers: [] });
+
+    await runtime.prompt({ sessionId, prompt: [{ type: "text", text: "first" }] });
+    await runtime.prompt({ sessionId, prompt: [{ type: "text", text: "second" }] });
+
+    expect(controller.send).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      id: sessionId,
+      projectId: "project-1",
+      workspacePath: workspace,
+      providerPolicy: { backgroundWork: "disabled" },
+    }));
+    expect(controller.send).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      id: secondId,
+      sessionId,
+    }));
+    expect(controller.send.mock.calls[1]?.[0]).not.toHaveProperty("workspacePath");
+  });
+
   it("persists create_pending before the first POST", async () => {
     const controller = makeController();
     const store = new MemoryStateStore<SessionState>();

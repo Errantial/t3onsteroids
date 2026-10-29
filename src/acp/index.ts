@@ -72,6 +72,8 @@ export function createSessionDraft(sessionId: string, cwd: string): AcpSessionDr
 export interface ProjectBinding {
   readonly projectId: string;
   readonly canonicalPath: string;
+  readonly kind?: "project" | "worktree" | "subdirectory";
+  readonly sourceProjectPath?: string;
 }
 
 export interface BridgeController {
@@ -1194,7 +1196,8 @@ export class AcpBridgeRuntime {
     const project = await this.options.controller.resolveProject(cwd);
     const projectResolveMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
     phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
-    const canonicalRoot = await this.canonicalize(project.canonicalPath);
+    const canonicalWorkspace = await this.canonicalize(project.canonicalPath);
+    const canonicalRoot = await this.canonicalize(project.sourceProjectPath ?? project.canonicalPath);
     const normalized = await normalizePrompt(request.prompt, session.interactionMode, canonicalRoot, this.canonicalize);
     const promptNormalizeMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
 
@@ -1206,7 +1209,7 @@ export class AcpBridgeRuntime {
       }
 
       if (session.bindingState === "create_pending" &&
-          (session.canonicalCwd !== canonicalRoot || session.cosProjectId !== project.projectId)) {
+          (session.canonicalCwd !== canonicalWorkspace || session.cosProjectId !== project.projectId)) {
         await this.markBroken(session, "project_remapped");
         throw new BridgeError("project_unmapped", "Pending provider binding no longer resolves to the same CoS project");
       }
@@ -1222,7 +1225,7 @@ export class AcpBridgeRuntime {
             inputId: pendingInputId,
             generation,
             bindingState: "bound",
-            canonicalCwd: canonicalRoot,
+            canonicalCwd: canonicalWorkspace,
             cosProjectId: project.projectId,
           });
         }
@@ -1311,7 +1314,7 @@ export class AcpBridgeRuntime {
                 inputId: pendingInputId,
                 generation,
                 bindingState: "bound",
-                canonicalCwd: canonicalRoot,
+                canonicalCwd: canonicalWorkspace,
                 cosProjectId: project.projectId,
               });
             }
@@ -1335,7 +1338,7 @@ export class AcpBridgeRuntime {
       session = {
         ...session,
         bindingState: "bound",
-        canonicalCwd: canonicalRoot,
+        canonicalCwd: canonicalWorkspace,
         cosProjectId: project.projectId,
       };
       await this.persistWholeForReference(session);
@@ -1343,7 +1346,7 @@ export class AcpBridgeRuntime {
     }
 
     if (session.bindingState === "bound") {
-      if (session.canonicalCwd !== canonicalRoot || session.cosProjectId !== project.projectId) {
+      if (session.canonicalCwd !== canonicalWorkspace || session.cosProjectId !== project.projectId) {
         await this.markBroken(session, "project_remapped");
         throw new BridgeError("project_unmapped", "Bound project root no longer resolves to the same CoS project");
       }
@@ -1372,7 +1375,7 @@ export class AcpBridgeRuntime {
         const prepared: SessionState = {
           ...session,
           bindingState: "create_pending",
-          canonicalCwd: canonicalRoot,
+          canonicalCwd: canonicalWorkspace,
           cosProjectId: project.projectId,
           activeInputId: inputId,
           inputDispatchState: "prepared",
@@ -1408,7 +1411,7 @@ export class AcpBridgeRuntime {
             inputId,
             generation,
             bindingState: "create_pending",
-            canonicalCwd: canonicalRoot,
+            canonicalCwd: canonicalWorkspace,
             cosProjectId: project.projectId,
           });
         }
@@ -1453,7 +1456,7 @@ export class AcpBridgeRuntime {
         session = {
           ...session,
           bindingState: "create_pending",
-          canonicalCwd: canonicalRoot,
+          canonicalCwd: canonicalWorkspace,
           cosProjectId: project.projectId,
           activeInputId: inputId,
         };
@@ -1465,7 +1468,11 @@ export class AcpBridgeRuntime {
     const input = await this.options.controller.send({
       id: inputId,
       text: normalized.text,
-      ...(first ? { projectId: project.projectId, providerPolicy: v1ProviderSessionPolicy } : { sessionId: session.sessionId }),
+      ...(first ? {
+        projectId: project.projectId,
+        ...(project.kind !== undefined && project.kind !== "project" ? { workspacePath: project.canonicalPath } : {}),
+        providerPolicy: v1ProviderSessionPolicy,
+      } : { sessionId: session.sessionId }),
     });
     const inputSendMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
     this.options.metrics?.observePreSendPhases(session.sessionId, generation, {
@@ -1498,7 +1505,7 @@ export class AcpBridgeRuntime {
             inputId,
             generation,
             bindingState: "bound",
-            canonicalCwd: canonicalRoot,
+            canonicalCwd: canonicalWorkspace,
             cosProjectId: project.projectId,
           });
         }
@@ -1512,7 +1519,7 @@ export class AcpBridgeRuntime {
       session = {
         ...session,
         bindingState: "bound",
-        canonicalCwd: canonicalRoot,
+        canonicalCwd: canonicalWorkspace,
         cosProjectId: project.projectId,
         activeInputId: input.id,
       };

@@ -762,3 +762,102 @@ describe("CoS protocol-1 controller client", () => {
     expect(bodyCancelled || requestAborted).toBe(true);
   });
 });
+
+describe("provider workspace resolution", () => {
+  const requiredFeatures = {
+    "provider-project-resolve-v1": 1,
+    "provider-assistant-content-v1": 1,
+    "provider-session-policy-v1": 1,
+    "provider-turn-drain-v1": 1,
+    "provider-turn-recovery-v1": 1,
+  };
+  const workspaceHealth = {
+    protocol: 1,
+    app: "chat-on-steroids",
+    actions: { enabled: true, routes: [...COS_REQUIRED_ACTION_ROUTES] },
+    features: { ...requiredFeatures, "provider-session-workspace-v1": 1 },
+    providerExtension: { apiVersion: 1, buildId: compatibility.cos.providerExtension.buildId },
+  };
+
+  it("uses the workspace route when advertised and keeps the source project distinct", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/v1/health") return jsonResponse(workspaceHealth);
+      if (path === "/v1/workspaces/resolve") {
+        expect(JSON.parse(String(init?.body))).toEqual({ path: "C:\\repo\\.worktrees\\feature" });
+        return jsonResponse({
+          kind: "worktree",
+          projectId: "11111111-1111-4111-8111-111111111111",
+          name: "Repo",
+          canonicalPath: "C:\\repo\\.worktrees\\feature",
+          sourceProjectPath: "C:\\repo",
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "token" }), { fetch });
+    await expect(client.resolveProject("C:\\repo\\.worktrees\\feature")).resolves.toEqual({
+      kind: "worktree",
+      projectId: "11111111-1111-4111-8111-111111111111",
+      name: "Repo",
+      canonicalPath: "C:\\repo\\.worktrees\\feature",
+      sourceProjectPath: "C:\\repo",
+    });
+  });
+
+  it("keeps the protocol-1 project route when the controller does not advertise workspaces", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/v1/health") return jsonResponse({
+        ...health,
+        actions: { enabled: true, routes: [...COS_REQUIRED_ACTION_ROUTES] },
+        features: requiredFeatures,
+        providerExtension: { apiVersion: 1, buildId: compatibility.cos.providerExtension.buildId },
+      });
+      if (path === "/v1/projects/resolve") {
+        return jsonResponse({
+          projectId: "22222222-2222-4222-8222-222222222222",
+          name: "Root",
+          canonicalPath: "C:\\root",
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "token" }), { fetch });
+    await expect(client.resolveProject("C:\\root")).resolves.toEqual({
+      projectId: "22222222-2222-4222-8222-222222222222",
+      name: "Root",
+      canonicalPath: "C:\\root",
+    });
+  });
+
+  it("sends a workspace only with a new provider chat and rejects attaching one to a session", async () => {
+    let sent: unknown;
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/v1/health") return jsonResponse(workspaceHealth);
+      if (path === "/v1/inputs") {
+        sent = JSON.parse(String(init?.body));
+        return jsonResponse({ replayed: false, input: { id: "33333333-3333-4333-8333-333333333333", delivery: "sent" } });
+      }
+      return jsonResponse({}, 404);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "token" }), { fetch });
+    await client.send({
+      id: "33333333-3333-4333-8333-333333333333",
+      text: "Work here",
+      projectId: "44444444-4444-4444-8444-444444444444",
+      workspacePath: "C:\\repo\\src",
+      providerPolicy: { backgroundWork: "disabled" },
+    });
+    expect(sent).toMatchObject({ workspacePath: "C:\\repo\\src", projectId: "44444444-4444-4444-8444-444444444444" });
+
+    await expect(client.send({
+      id: "55555555-5555-4555-8555-555555555555",
+      text: "Wrong shape",
+      sessionId: "session-aaaaaaaa",
+      workspacePath: "C:\\repo\\src",
+      providerPolicy: { backgroundWork: "disabled" },
+    })).rejects.toMatchObject({ code: "schema_mismatch" });
+  });
+});

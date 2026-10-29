@@ -4,7 +4,7 @@ import { isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ContentBlock, InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption, SetSessionConfigOptionRequest } from "@agentclientprotocol/sdk";
 
-import type { CosControllerReadiness, CosInputRecord, CosModelCatalog, CosSessionSummary } from "../cos/index.js";
+import type { CosBackgroundWork, CosControllerReadiness, CosInputRecord, CosModelCatalog, CosSessionSummary } from "../cos/index.js";
 import { v1ProviderSessionPolicy } from "../policy/index.js";
 import { isReasoningEffort, newUnboundSession, type InteractionMode, type ReasoningEffort, type SessionState, withInteractionMode } from "../session/index.js";
 import {
@@ -48,7 +48,8 @@ export type BridgeErrorCode =
   | "model_catalog_unavailable"
   | "unsupported_model"
   | "model_required"
-  | "unsupported_reasoning_effort";
+  | "unsupported_reasoning_effort"
+  | "turn_drain_pending";
 
 export class BridgeError extends Error {
   constructor(readonly code: BridgeErrorCode, message: string) {
@@ -87,6 +88,7 @@ export interface BridgeController {
   requireBackgroundWorkDisabled?(sessionId: string): Promise<{ backgroundWork: "disabled"; enforced: true }>;
   resolveProject(path: string): Promise<ProjectBinding>;
   models?(): Promise<CosModelCatalog>;
+  backgroundWork?(sessionId: string): Promise<CosBackgroundWork | undefined>;
   input?(inputId: string): Promise<CosInputRecord | undefined>;
   session?(sessionId: string): Promise<CosSessionSummary>;
   assistantContentChunk?: ProviderTurnController["assistantContentChunk"];
@@ -321,6 +323,18 @@ export class AcpBridgeRuntime {
       });
     }
     return options;
+  }
+
+  /**
+   * Refuses to settle an ACP turn while native work attached to the provider session is still
+   * pending. A controller without the projection is treated as having none, preserving protocol-1
+   * behavior.
+   */
+  async assertBackgroundWorkSettled(sessionId: string): Promise<void> {
+    const projection = await this.options.controller.backgroundWork?.(sessionId);
+    if (projection && projection.pending.length > 0) {
+      throw new BridgeError("turn_drain_pending", "Native background work is still pending for this provider session");
+    }
   }
 
   /** Applies one ACP config selection and returns the refreshed full option set. */

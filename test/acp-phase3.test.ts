@@ -8,6 +8,7 @@ import {
   type BridgeController,
 } from "../src/acp/index.js";
 import { MemoryStateStore } from "../src/state/index.js";
+import type { CosBackgroundWork } from "../src/cos/index.js";
 import type { SessionState } from "../src/session/index.js";
 
 const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -318,6 +319,27 @@ describe("Phase 3 ACP shell and lazy binding", () => {
       sessionId,
       prompt: [{ type: "text", text: "look" }, { type: "image", data: "AAAA", mimeType: "image/webp" }],
     })).rejects.toMatchObject({ code: "unsupported_prompt_content" });
+  });
+
+  it("refuses to settle while projected background work is pending", async () => {
+    const controller = makeController();
+    const backgroundWork = vi.fn(async (): Promise<CosBackgroundWork> => ({
+      state: "pending" as const,
+      pending: [{ id: "worker-1", label: "research", state: "active" }],
+    }));
+    controller.backgroundWork = backgroundWork;
+    const runtime = new AcpBridgeRuntime({
+      controller,
+      store: new MemoryStateStore<SessionState>(),
+      canonicalize: async (path) => path,
+    });
+    await expect(runtime.assertBackgroundWorkSettled(sessionId)).rejects.toMatchObject({ code: "turn_drain_pending" });
+
+    backgroundWork.mockResolvedValue({ state: "none", pending: [] });
+    await expect(runtime.assertBackgroundWorkSettled(sessionId)).resolves.toBeUndefined();
+
+    delete controller.backgroundWork;
+    await expect(runtime.assertBackgroundWorkSettled(sessionId)).resolves.toBeUndefined();
   });
 
   it("enforces the exact 64,000-character admission boundary before send", async () => {

@@ -918,3 +918,57 @@ describe("provider model catalog", () => {
     await expect(client.models()).rejects.toMatchObject({ code: "model_catalog_unavailable" });
   });
 });
+
+describe("provider background work projection", () => {
+  const backgroundHealth = {
+    protocol: 1,
+    app: "chat-on-steroids",
+    actions: { enabled: true, routes: [...COS_REQUIRED_ACTION_ROUTES] },
+    features: {
+      "provider-project-resolve-v1": 1,
+      "provider-assistant-content-v1": 1,
+      "provider-session-policy-v1": 1,
+      "provider-turn-drain-v1": 1,
+      "provider-turn-recovery-v1": 1,
+      "provider-background-work-v1": 1,
+    },
+    providerExtension: { apiVersion: 1, buildId: compatibility.cos.providerExtension.buildId },
+  };
+
+  it("reads the pending projection and returns undefined without the feature", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/v1/health") return jsonResponse(backgroundHealth);
+      if (path === "/v1/sessions/session-aaaaaaaa/background-work") {
+        return jsonResponse({ state: "pending", pending: [{ id: "worker-1", label: "research", state: "active" }] });
+      }
+      return jsonResponse({}, 404);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "token" }), { fetch });
+    await expect(client.backgroundWork("session-aaaaaaaa")).resolves.toEqual({
+      state: "pending",
+      pending: [{ id: "worker-1", label: "research", state: "active" }],
+    });
+  });
+
+  it("treats an older controller as having no background-work projection", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      if (new URL(String(url)).pathname === "/v1/health") return jsonResponse({
+        protocol: 1,
+        app: "chat-on-steroids",
+        actions: { enabled: true, routes: [...COS_REQUIRED_ACTION_ROUTES] },
+        features: {
+          "provider-project-resolve-v1": 1,
+          "provider-assistant-content-v1": 1,
+          "provider-session-policy-v1": 1,
+          "provider-turn-drain-v1": 1,
+          "provider-turn-recovery-v1": 1,
+        },
+        providerExtension: { apiVersion: 1, buildId: compatibility.cos.providerExtension.buildId },
+      });
+      return jsonResponse({}, 404);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "token" }), { fetch });
+    await expect(client.backgroundWork("session-aaaaaaaa")).resolves.toBeUndefined();
+  });
+});

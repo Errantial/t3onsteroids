@@ -184,6 +184,7 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
           },
         });
         if (!result.terminal) throw new Error("Provider event stream ended before authoritative terminal proof");
+        await runtime.assertBackgroundWorkSettled(params.sessionId);
         metrics.increment("acpTerminalSent");
         metrics.markTurn(params.sessionId, result.state.generation, "acp_terminal_sent");
         await persistMetrics();

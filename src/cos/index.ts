@@ -86,6 +86,17 @@ export interface CosChatModel {
   readonly efforts: readonly string[];
 }
 
+export interface CosBackgroundWorkItem {
+  readonly id: string;
+  readonly label: string;
+  readonly state: string;
+}
+
+export interface CosBackgroundWork {
+  readonly state: "disabled" | "none" | "pending" | "violated";
+  readonly pending: readonly CosBackgroundWorkItem[];
+}
+
 export interface CosModelCatalog {
   readonly state: "unknown" | "pending" | "ready" | "unavailable";
   readonly observedAt: number | null;
@@ -422,6 +433,7 @@ export class CosControllerClient {
   private eventStreamMuxCache: { readonly value: boolean; readonly expiresAt: number } | undefined;
   private workspaceResolveCache: { readonly value: boolean; readonly expiresAt: number } | undefined;
   private modelCatalogCache: { readonly value: boolean; readonly expiresAt: number } | undefined;
+  private backgroundWorkCache: { readonly value: boolean; readonly expiresAt: number } | undefined;
   private muxHub: MuxHub | undefined;
   private metricsState = {
     readAttempts: 0,
@@ -447,6 +459,7 @@ export class CosControllerClient {
       this.eventStreamMuxCache = undefined;
       this.workspaceResolveCache = undefined;
       this.modelCatalogCache = undefined;
+      this.backgroundWorkCache = undefined;
     }
     if (force || !this.discovery) this.discovery = await this.discover();
     return this.discovery;
@@ -473,6 +486,7 @@ export class CosControllerClient {
         this.eventStreamMuxCache = undefined;
         this.workspaceResolveCache = undefined;
         this.modelCatalogCache = undefined;
+        this.backgroundWorkCache = undefined;
       },
       onConnect: () => {
         this.metricsState.sseConnectAttempts += 1;
@@ -571,6 +585,10 @@ export class CosControllerClient {
       value: readiness.features["provider-model-catalog-v1"] === 1,
       expiresAt: Date.now() + 60_000,
     };
+    this.backgroundWorkCache = {
+      value: readiness.features["provider-background-work-v1"] === 1,
+      expiresAt: Date.now() + 60_000,
+    };
     return readiness;
   }
 
@@ -656,6 +674,28 @@ export class CosControllerClient {
       return { id, label, efforts: model.efforts as string[] };
     });
     return { state, observedAt: observedAt as number | null, models };
+  }
+
+  async backgroundWork(sessionId: string): Promise<CosBackgroundWork | undefined> {
+    await this.requireProviderExtensionWithinAdmission();
+    const cached = this.backgroundWorkCache;
+    if (cached === undefined || cached.expiresAt <= Date.now() || !cached.value) return undefined;
+    const value = await this.readJson(`/v1/sessions/${encodeURIComponent(sessionId)}/background-work`);
+    const row = asRecord(value, "background work");
+    const state = asString(row.state, "background work.state");
+    if (state !== "disabled" && state !== "none" && state !== "pending" && state !== "violated") {
+      throw new CosControllerError("schema_mismatch", `Unknown background work state ${state}`);
+    }
+    if (!Array.isArray(row.pending)) throw new CosControllerError("schema_mismatch", "background work.pending must be an array");
+    const pending = row.pending.map((candidate, index) => {
+      const item = asRecord(candidate, `background work.pending[${index}]`);
+      return {
+        id: asString(item.id, `background work.pending[${index}].id`),
+        label: asString(item.label, `background work.pending[${index}].label`),
+        state: asString(item.state, `background work.pending[${index}].state`),
+      };
+    });
+    return { state, pending };
   }
 
   async assistantContentChunk(sessionId: string, seq: number, offset = 0, limit = 16_384): Promise<CosAssistantContentChunk> {

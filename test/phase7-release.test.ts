@@ -45,7 +45,7 @@ describe("Phase 7 release readiness", () => {
     const readiness = releaseReadiness();
     expect(readiness).toMatchObject({
       bridgeVersion: "1.0.0",
-      supportedConcurrency: 1,
+      supportedConcurrency: 2,
       platform: "win32-x64",
       t3Pinned: true,
       cosPinned: true,
@@ -146,7 +146,7 @@ describe("Phase 7 release readiness", () => {
   it("prints release support boundaries through the side-effect-free CLI", async () => {
     const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     await expect(main(["--release-readiness"])).resolves.toBe(0);
-    expect(write).toHaveBeenCalledWith(expect.stringContaining('"supportedConcurrency":1'));
+    expect(write).toHaveBeenCalledWith(expect.stringContaining('"supportedConcurrency":2'));
     write.mockRestore();
   });
 });

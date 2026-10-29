@@ -90,3 +90,17 @@ Run `20261029T180339Z-twochat-8b907ee-nightly` (8 cases):
 - SSE-reconnect case failed with a harness `TypeError` in its evidence path (`a.result` read when the prompt outcome was not `ok`). Fixed with optional chaining plus recorded prompt outcomes; the isolated rerun `20261029T181405Z-sse-reconnect-only` PASSed (`sseReconnectCount=1`, `maxActiveLeases=2`).
 
 Latency profile: every phase except `inputSendMs` is stable (persisted read 1-7 ms, project 5-23 ms, readiness 3-14 ms, durable prepare 18-28 ms, lease acquire 15-42 ms, mark dispatched 16-29 ms). The failures are isolated to controller input acceptance: `inputSendMs` was 24-121 ms on most turns but 334 ms (first turn) and 544 ms (third turn) in the baseline. No provider semantics were changed for this run.
+
+## 2026-10-29 two-chat gate PASS
+
+Root cause of the earlier pre-send spikes: the isolated CoS profile had `tunnel.kind = "openai"` with empty tunnel IDs. Every input triggered a connection start that immediately failed, tore down its loopback server, and logged `connect failed: Enter a tunnel ID...`. Admission-phase measurement showed this churn, not fsync: a direct benchmark of the admission sidecar write (2 KB JSON, fsync + rename, 200 iterations) measured p50 2.7 ms, p95 3.7 ms, max 6.9 ms.
+
+Fix: set `tunnel.kind = "manual"` in `cos-profile-live-01/config.json` (a copy of the previous config is kept as `config.pre-tunnel-manual.json`) and restart the candidate. Log verification after the change: zero `connect failed` entries and one server start for the whole session.
+
+Results:
+
+- Baseline only (`20261029T185258Z-baseline-tunnel-manual`): PASS, pre-send p95 135 ms (samples 62-135 ms), drain p95 443 ms, post-drain p95 94 ms.
+- Two-chat only (`20261029T190454Z-twochat-only-tunnel-manual`): PASS, 20/20 turns, pre-send p95 119 ms, drain p95 672 ms, post-drain p95 98 ms, `maxActiveLeases=2`.
+- Full matrix (`20261029T191009Z-twochat-full-tunnel-manual`): **all eight cases PASS** - single-chat baseline, two-chat workload, queue-cancel-slot-reuse, independent-active-cancellation, sse-reconnect-with-two-active, crash-restart-with-two-active, cross-session-stale-event, long-output-slow-consumer-rss. Baseline pre-send p95 110 ms / drain 591 ms / post 111 ms; two-chat pre-send p95 209 ms / drain 460 ms / post 105 ms; long-output bridge RSS 97.8 MiB; aggregate two-chat bridge RSS 169.3 MiB.
+
+Advertised capability raised from 1 to **2** on this branch (`releaseReadiness().supportedConcurrency = 2`), with production queue capacity enabled by the existing scheduler. Four-chat qualification is next: it must show the controller's four-SSE global cap still leaves room for other CoS activity, or a versioned multiplexed stream contract is required first. The v1 release tuple and its `releaseQualified` gates are unchanged.

@@ -28,7 +28,7 @@ export function releaseReadiness(): ReleaseReadiness {
     Object.values(gates).every((gate) => gate.status === "pass");
   return {
     bridgeVersion: BRIDGE_VERSION,
-    supportedConcurrency: 1,
+    supportedConcurrency: 2,
     platform: compatibility.platform.primary,
     t3Pinned: true,
     cosPinned: true,

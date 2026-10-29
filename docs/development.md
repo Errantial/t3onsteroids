@@ -72,7 +72,9 @@ V1 is same-host, **same OS user/profile** only. The bridge discovers the current
 
 The pinned v1 release contract admits one active bridged turn per stable CoS profile/controller identity. That release uses a durable profile-wide lease, and a second simultaneous turn receives a deterministic busy result; controller port/token rotation does not create a new admission domain.
 
-On branch feat/post-v1-concurrency, rebased commit `22d561f` implements the post-v1 durable profile-wide scheduler directly above the released v1.0.0 base (`5681f812...`): a bounded active set, FIFO waiting queue, exact queued cancellation/release, and legacy single-lease state compatibility. The production concurrency capability is intentionally still `supportedConcurrency: 1` until isolated live qualification passes at two chats. Do not infer support for two or four chats from the implementation, the v1 release result, or offline tests alone; qualify four separately against the controller's four-stream global cap.
+On branch feat/post-v1-concurrency, rebased commit `22d561f` implements the post-v1 durable profile-wide scheduler directly above the released v1.0.0 base (`5681f812...`): a bounded active set, FIFO waiting queue, exact queued cancellation/release, and legacy single-lease state compatibility. The isolated two-chat qualification gate passed on 2026-10-29, so the branch now advertises `supportedConcurrency: 2`; four chats remain unqualified and gated on the controller's four-stream global cap. Do not infer support for four chats from the implementation, the v1 release result, or offline tests alone.
+
+The qualification lane's CoS profile must use `tunnel.kind: "manual"`. An `openai` tunnel with empty IDs makes the app start and fail a tunnel on every input, adding 300-500 ms pre-send spikes; the full matrix passes only after removing that churn.
 
 ## Terminal semantics and background work
 

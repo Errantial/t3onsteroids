@@ -134,3 +134,29 @@ Background-work projection additions (provider 0520fce, staged for the next buil
   owner exposes a cancel primitive. The route is gated by Allow actions and listed in
   `CONTROL_API_ACTION_ROUTES`.
 - Evidence: controller control-API actions/reads **133/133**; typecheck clean.
+
+Live verification of provider  520fce (2026-10-29):
+
+- Candidate health: uildId=0520fcedcd003bd89c43e649d1228333a4d2305f,
+  provider-background-work-v1:1; the Allow-actions list now includes
+  POST /v1/sessions/{id}/background-work/{workId}/cancel.
+- Live provider session projection: {"state":"disabled","pending":[]}.
+- Live cancel route: unknown worker id ? 404 ackground_work_not_found; goal: id ? 409
+  unsupported_background_work_kind with the explicit detail that Goal/Loop cancellation is not
+  exposed by this build.
+- The Goal/Loop owed-reply projection is compiled into the route; a live owed reply cannot be
+  created while the provider policy is disabled, so it remains covered by code and unit tests.
+- The 954147b requalification run passed every functional case but failed the single-chat
+  baseline drain p95 (1262 ms vs 1000); the last fully passing 2-chat tuple remains d77cdca.
+
+## Blockers that need the user
+
+- **T3-HEAD acceptance matrix.** Running the pinned matrix against upstream HEAD dd14848 requires
+  a source-built HEAD checkout and a disposable T3 server/desktop profile/UI lane. The local 
+/
+  checkout is a fork at e340aae, not upstream HEAD; building and launching upstream HEAD beside
+  the user's active T3 instance is not something this lane can do unattended. Needed: the user's
+  go-ahead to build/run a second T3 instance, or a prepared HEAD build/profile.
+- **PNG/JPEG and non-image attachments.** The bridge has no image transcoder and CoS accepts only
+  WebP data URLs for prompt images. Supporting other formats needs either a permitted transcoder
+  dependency or a CoS-side conversion, plus the corresponding attachment contract.

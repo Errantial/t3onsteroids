@@ -56,6 +56,7 @@ const faultEvidence = {
   sseDropRequested: dropSseOnce,
   sseDropPerformed: false,
   afterSeq: null,
+  afterSessionKey: null,
   reconnectFrom: null,
   streamRequests: 0,
   staleEventRequested: Boolean(staleEventPath),
@@ -144,11 +145,33 @@ function responseWithDroppedSse(response) {
           while ((boundary = frameBoundary(buffer))) {
             const frame = buffer.slice(0, boundary.end);
             const normalized = frame.replace(/\r/g, "");
+            // A per-session stream identifies its rows with an SSE `id`; the multiplexed stream
+            // carries `sessionId`/`seq` in the JSON data instead, because one connection spans
+            // independent journals. The fault has to recognize both shapes.
+            let seq = null;
+            let sessionId = null;
             const idMatch = /^id:\s*(\d+)\s*$/m.exec(normalized);
-            if (idMatch && /^data:/m.test(normalized)) {
+            if (idMatch) {
+              seq = Number(idMatch[1]);
+            } else {
+              const dataMatch = /^data:\s*(\{.*\})\s*$/m.exec(normalized);
+              if (dataMatch) {
+                try {
+                  const row = JSON.parse(dataMatch[1]);
+                  if (Number.isSafeInteger(row.seq)) {
+                    seq = row.seq;
+                    sessionId = typeof row.sessionId === "string" ? row.sessionId : null;
+                  }
+                } catch { /* not a row frame */ }
+              }
+            }
+            if (seq !== null && /^data:/m.test(normalized)) {
               controller.enqueue(encoder.encode(frame));
               faultEvidence.sseDropPerformed = true;
-              faultEvidence.afterSeq = Number(idMatch[1]);
+              faultEvidence.afterSeq = seq;
+              faultEvidence.afterSessionKey = sessionId === null
+                ? null
+                : createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
               await saveFaultEvidence();
               await reader.cancel("post-v1 qualification SSE reconnect").catch(() => undefined);
               controller.close();
@@ -176,8 +199,21 @@ function qualificationTransport() {
       const isStream = url.pathname.endsWith("/events/stream");
       if (isStream) {
         faultEvidence.streamRequests += 1;
-        if (faultEvidence.sseDropPerformed && faultEvidence.reconnectFrom === null && url.searchParams.has("from")) {
-          const from = Number(url.searchParams.get("from"));
+        if (faultEvidence.sseDropPerformed && faultEvidence.reconnectFrom === null) {
+          let from = null;
+          if (url.searchParams.has("from")) {
+            from = Number(url.searchParams.get("from"));
+          } else if (url.searchParams.has("cursors")) {
+            for (const entry of (url.searchParams.get("cursors") ?? "").split(",")) {
+              const [sessionId, seq] = entry.split(":");
+              if (!sessionId || seq === undefined) continue;
+              const key = createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
+              if (faultEvidence.afterSessionKey === null || key === faultEvidence.afterSessionKey) {
+                from = Number(seq);
+                break;
+              }
+            }
+          }
           faultEvidence.reconnectFrom = Number.isInteger(from) ? from : null;
           await saveFaultEvidence();
         }

@@ -167,16 +167,18 @@ Controller side (implemented in `5e32b52`):
   the outbox, and records the resolved identity on the input. The existing browser model-selection
   path applies it; an unavailable catalog fails `model_catalog_unavailable` rather than guessing.
 
-Bridge side (next):
+Bridge side (implemented in `70ce675`):
 
-- Advertise a `model` config option (and a `thought_level` option for the selected model's
-  efforts) at `session/new` and resume from a cached, read-only `/v1/models` call. Do not trigger
-  discovery from ACP.
-- Handle `session/set_config_option` for those ids, persist the selection in durable session state,
-  and send it on every prompt. Revalidate the catalog after resume.
-- Attestation: CoS records the observed model on the session. The bridge must compare it with the
-  requested identity after admission/drain and fail `unsupported_model`/`model_mismatch` rather than
-  claiming a selection took effect. Until that check exists, do not advertise the picker.
+- `session/new` and resume advertise a `model` select and a `thought_level` select for the selected
+  model's efforts, from a cached, read-only `/v1/models` call. A controller without the feature
+  exposes no config options.
+- `session/set_config_option` validates the id/value, records the choice through a durable
+  `select_model` transition, and returns the refreshed options. Every prompt carries the selected
+  model and effort.
+- Attestation gap: the controller validates the model against the catalog before the outbox and the
+  extension reports `model_unconfirmed` when its picker does not accept the choice, but the bridge
+  does not yet compare the session's observed model after drain. Until it does, the bridge claims
+  only that a model was requested and accepted, not proven post-drain.
 
 ## 3. Attachments and slash commands
 

@@ -1,22 +1,23 @@
 # Post-v1 concurrency qualification
 
-Status: offline bridge gate passed, including cancellation-reconciliation hardening; isolated live qualification is blocked at authentication/controller readiness. No live test prompts have been sent.
+Status: rebased/offline bridge gate passed, including cancellation-reconciliation hardening; isolated live qualification is blocked only at the real external Chrome extension pairing step. No live test prompts have been sent by the current final-v1 candidate lane.
 
 ## Scope and safety boundary
 
 - Worktree: C:\Users\Emil\t3onsteroids-post-v1
 - Branch: feat/post-v1-concurrency
-- Scheduler implementation base: b8640281c52b932bc7f8cd3d6f5048164a7beb0a
+- Released v1 base: `5681f812e5ca81fd8fa1176212e64ba34b1f7899` (`v1.0.0`)
+- Rebased scheduler implementation: `22d561f`; qualification harness: `cf3f50e`; cancellation hardening: `c13cf4b0b1d893acbe61f95eb6f3696b7d0e0ec7`
 - The pinned v1 checkout and its release evidence, manifest, and active CoS candidate are outside this qualification lane.
-- The live candidate is built from an isolated clone of the CoS provider-extension source at 73e52028cb87ed2dd6fdc8c1a03a79669b8302bc. The source clone and candidate profile live under .local-evidence/post-v1-concurrency.
-- CoS base compatibility is 2.1.39 / 87ae9d631f82d8da2f462d910410031ad8f97ac5; controller protocol 1; provider extension build id 73e52028cb87ed2dd6fdc8c1a03a79669b8302bc.
+- The current live candidate is built from the isolated CoS clone at final v1 provider build `495e3e96504d9b865c18478f7b42915280712f84`. The source clone and candidate profile live under `.local-evidence/post-v1-concurrency`.
+- CoS base compatibility is 2.1.39 / 87ae9d631f82d8da2f462d910410031ad8f97ac5; controller protocol 1; final provider extension build id `495e3e96504d9b865c18478f7b42915280712f84`.
 - The candidate uses a separate CoS user-data directory, a separate browser profile, and separate bridge state directories. No live traffic has been sent by this qualification harness yet.
 
 ## Offline bridge verification
 
 Final command: npm run verify
 
-Result: PASS on the updated worktree. Typecheck and ESLint passed; 25 test files and 253 tests passed; package smoke passed. The smoke readiness output reported supportedConcurrency=1 and releaseQualified=false.
+Result after rebasing onto released v1.0.0: PASS. Typecheck and ESLint passed; 25 test files and 266 tests passed; package smoke passed. The focused concurrency/recovery selection passed 128/128 tests. Package smoke reports `supportedConcurrency=1`; the inherited v1 release manifest reports `releaseQualified=true` for the already-qualified v1 tuple, which is separate from this higher-concurrency gate.
 
 Cancellation-reconciliation audit: `src/acp/index.ts` now uses one shared exact-generation predicate for every not-sent settlement acceptance path. It requires the active input/turn and provider translation to be absent, cancellation target/intent to be cleared, dispatch and lease metadata to be absent, pending mode-transition metadata to be absent, and `bindingState` not to be `create_pending`. `test/acp-durable-runtime.test.ts` covers each residual field independently and checks generation equality. `src/acp/stdio.ts` remains the transport/error-mapping boundary; no separate settlement predicate was present there.
 
@@ -26,14 +27,14 @@ Additional focused checks:
 - Node syntax checks passed for post-v1-concurrency-runner.mjs and post-v1-concurrency-live.mjs.
 - npm run lint passed after the qualification harness was added.
 - git diff --check passed.
-- Latest focused selection: `npx vitest run test/acp-durable-runtime.test.ts test/state-durable.test.ts test/state-process.test.ts test/integration/acp-stdio.test.ts --maxWorkers=1` — PASS, 123 tests across four files.
+- Latest focused selection after rebase: `npx vitest run test/acp-durable-runtime.test.ts test/state-durable.test.ts test/state-process.test.ts test/integration/acp-stdio.test.ts --maxWorkers=1` — PASS, 128 tests across four files.
 
 ## CoS candidate source checks
 
-- npm ci passed in the isolated source clone.
-- Focused provider-extension/controller suites passed 152/152 tests across six files: control-api actions, reads, core API, SSE stream, provider turn drain, and provider build id.
+- `npm ci` passed in the refreshed isolated source clone at `495e3e96504d9b865c18478f7b42915280712f84`.
+- Focused provider-extension/controller suites passed 176/176 tests across eight files: control API core/actions/reads/stream/workers, kernel provider-turn, provider turn drain, and provider build id.
 - An additional full CoS npm run verify attempt was interrupted after broader process/UI-timing suites reported failures in plugins-manager, input-delivery, and Continue-flow tests under load. That run is not considered green; those failures were not all rerun in isolation.
-- The exact-source unpacked package build and packaged-runtime smoke passed with npm run dist:dir:x64. The executable SHA-256 is C490DE96B0C5D6349AD5586465A5BD8D33D912B26A53FF51DEEC43E60672EF1B. The browser extension stamp is 45ee28157713; the provider-extension source build id remains 73e52028cb87ed2dd6fdc8c1a03a79669b8302bc.
+- The refreshed exact-source unpacked package build and packaged-runtime smoke passed with `npm run dist:dir:x64`. The executable SHA-256 is `D2A99BC116FEAFE66318AA3912042ED52610EEDAA3569E5C5FFC364FB6307034`, exactly matching final v1 release evidence. The browser extension stamp is `6c66160b96d3`; the provider-extension source/build id is `495e3e96504d9b865c18478f7b42915280712f84`.
 
 ## Live measurement rules
 
@@ -44,12 +45,36 @@ Additional focused checks:
 - Per-process bridge RSS budget: below 256 MiB in the long-output/slow-consumer case. Aggregate bridge RSS across concurrent ACP processes is recorded separately and is not substituted for per-process RSS.
 - The live matrix must verify two simultaneous active leases, independent active cancellation, queued cancellation before any CoS input is sent, slot reuse after release, crash/restart with another session active, an intentional SSE disconnect/reconnect with both sessions active, and a stale terminal event from another session that cannot settle the target turn.
 - Four-chat qualification runs only after the full two-chat gate passes. The fifth-stream probe must show whether four bridged sessions leave room for other CoS activity. If it does not, implement and test a versioned multiplexed event-stream contract before advertising four.
-- supportedConcurrency stays at 1 until the two-chat gate passes. releaseQualified stays false while any v1 release gate is pending.
+- `supportedConcurrency` stays at 1 until the two-chat gate passes. The already-complete v1 release qualification remains separate and does not qualify this post-v1 concurrency gate.
 
 ## Live results
 
-Candidate package identity checks: the candidate executable SHA-256 remains `C490DE96B0C5D6349AD5586465A5BD8D33D912B26A53FF51DEEC43E60672EF1B`; the isolated candidate extension and copied profile extension both have build stamp `45ee28157713`; source commit/build ID is `73e52028cb87ed2dd6fdc8c1a03a79669b8302bc`. The candidate process uses `cos-profile-live-01`, and Chrome uses `chrome-profile-live-01`; Chrome's extension settings resolve to the isolated `cos-profile-live-01\extension` path. The packaged extension identity is present in the isolated profile, but the running extension has not reported a successful pairing/build handshake to the candidate.
+Current candidate package identity checks: executable SHA-256 `D2A99BC116FEAFE66318AA3912042ED52610EEDAA3569E5C5FFC364FB6307034`; isolated candidate extension and copied profile extension stamp `6c66160b96d3`; source/build ID `495e3e96504d9b865c18478f7b42915280712f84`. These exactly match the final v1 release candidate tuple while remaining in the dedicated `cos-profile-live-01` / `chrome-profile-live-01` lane. Local control API and Allow actions are enabled, discovery files exist, controller protocol/build/features and all three required action routes pass, and exact project resolution to `C:\Users\Emil\t3onsteroids-post-v1` succeeds.
 
 Setup-invalid attempt: `.local-evidence/post-v1-concurrency/live-runs/20261019T232918Z-preflight-not-ready/manifest.json`. Reproducible command (run from the post-v1 worktree): `node scripts/post-v1-concurrency-live.mjs --profile '.local-evidence\post-v1-concurrency\cos-profile-live-01' --project 'C:\Users\Emil\t3onsteroids-post-v1' --out-dir '.local-evidence\post-v1-concurrency\live-runs\20261019T232918Z-preflight-not-ready' --expected-build-id '73e52028cb87ed2dd6fdc8c1a03a79669b8302bc' --candidate-exe-sha256 'C490DE96B0C5D6349AD5586465A5BD8D33D912B26A53FF51DEEC43E60672EF1B'`. Result: `SETUP_INVALID`, preflight `isolated_candidate_or_project_unavailable`, exit code 2. No ACP peer was started and no test prompt was sent. The isolated Chrome profile is at ChatGPT's login dialog; the candidate setup UI says it is waiting for the browser extension. The candidate `control-api/endpoint.json` and `control-api/token` discovery files are absent, so controller health, pairing, actions-enabled state, and exact project resolution cannot yet be verified. A CoS in-app update notice for 2.1.42 was left uninstalled to preserve the pinned candidate artifact.
 
-Live qualification remains pending until the user completes authentication in the isolated Chrome profile and the isolated CoS candidate is paired, has Local control API and Allow actions enabled, and reports protocol/build/features/required routes ready. After that, rerun the full eight-case two-chat matrix with a fresh evidence directory. Keep `supportedConcurrency=1` and `releaseQualified=false` until the two-chat gate passes. Four-chat qualification remains gated on that pass.
+The older setup-invalid attempts using the `73e52028...` / `C490...` / `45ee...` candidate are preserved as historical evidence and are superseded for current qualification by the finished-v1 refresh above. They are not counted as final-v1 live failures.
+
+Current final-v1 setup-invalid attempt: `.local-evidence/post-v1-concurrency/live-runs/20261023T165923Z-final-v1-browser-unpaired/manifest.json`. It records bridge commit `c13cf4b0b1d893acbe61f95eb6f3696b7d0e0ec7`, provider build `495e3e96504d9b865c18478f7b42915280712f84`, candidate SHA-256 `D2A99BC116FEAFE66318AA3912042ED52610EEDAA3569E5C5FFC364FB6307034`, and `SETUP_INVALID / candidate_health_browser_actions_or_project_mismatch`. The redacted preflight confirms protocol 1, exact extension build match, and actions enabled; browser connection is false. Manual readiness inspection separately confirms all required routes and exact project resolution pass. The harness stopped before starting ACP peers or sending any test prompt.
+
+Live qualification remains pending only on the real isolated Chrome companion extension becoming loaded/connected/paired with the refreshed candidate and ChatGPT page. The candidate itself is controller-ready and exact-project-ready. Once the extension is actually running, pairing is automatic in the released CoS contract; rerun preflight, then the full eight-case two-chat matrix with a fresh evidence directory. Keep `supportedConcurrency=1` until the two-chat gate passes. Four-chat qualification remains gated on that pass.
+
+## 2026-10-27 optimized-provider two-chat qualification status
+
+The historical final-v1 setup notes above are superseded for the active post-v1 performance lane. The current exact provider source/build is `93e69429a65a608c7e89e56c87006359acf79e1c` (`Cache provider input policy lifecycle tail`) in `.local-evidence/post-v1-concurrency/cos-source`. The exact unpacked candidate executable SHA-256 is `0CC862148BC7D828400449890AFF3084AF124A97A993718B7DA45A1FB62D73B5`; the bridge compatibility tuple and fixture are pinned to the same provider build. Focused provider validation passed 334/334 tests across durable, provider-turn-drain, opening-input, session-input, and control-api-actions suites. Focused bridge validation after the compatibility update passed 52/52 tests across step7 live smoke, performance harness, and CoS client suites.
+
+The preceding exact candidate `f5ec2f1e37a1d314f7c7e5b27e61bf57214c42c7` completed a valid strict two-chat workload with 20/20 measured exact no-tool turns, 10 per chat, and `maxActiveLeases=2`. Drain p95 was 606 ms and post-drain p95 was 106 ms, but pre-send p95 was 707 ms, so the unchanged 250 ms pre-send gate failed. The current `93e6942` lifecycle-tail cache is the narrow follow-up optimization for that remaining input-policy read cost; it has not yet received a valid live latency sample.
+
+Two strict `93e6942` attempts are preserved at `.local-evidence/post-v1-concurrency/live-runs/20261027T193145Z-twochat-policycache-93e6942` and `.local-evidence/post-v1-concurrency/live-runs/20261027T193600Z-twochat-policycache-93e6942-v2`. Both preflights passed with `browserReady=true`, `actionsEnabled=true`, and `exactBuild=true`, then failed during eligibility probing with `two_chat_probe_prompt_failed`. These are not latency failures and are not counted as measured qualification samples.
+
+Direct DevTools inspection of the isolated `chrome-profile-live-01` lane showed `https://chatgpt.com/` at `Just a moment...` with an active Cloudflare Turnstile iframe. A same-profile reload on 2026-10-27 returned HTTP 403 with `Cf-Mitigated: challenge` for the main document and HTTP 403 for `https://chatgpt.com/api/auth/session`. The browser response remote address was the public Cloudflare address `172.64.155.209`, while Turnstile assets came directly from `104.18.95.41`; an explicit `curl --noproxy '*' https://chatgpt.com/` also returned the same 403 challenge. This ruled out the local isolation proxy as the cause, but the challenge was not a provider failure.
+
+An earlier working theory blamed `--remote-debugging-port=0`, because that launch shape exposed `navigator.webdriver === true` and a fixed local DevTools port removed that signal. The subsequent fixed-port run at `.local-evidence/post-v1-concurrency/live-runs/20261027T200552Z-twochat-policycache-93e6942-fixeddevtools` disproved that as the primary blocker: it still failed during the two-chat eligibility probe. The stronger A/B is the network egress. During the challenged period, no-proxy Cloudflare trace reported public source `128.138.65.44`, whose PTR is `viz4.rc.colorado.edu` in University of Colorado Boulder Research Computing / AS104; ChatGPT returned HTTP 403 `Cf-Mitigated: challenge`, and challenge subservices showed `522`/timeout behavior. On 2026-10-28 the same Chrome-for-Testing binary, same `chrome-profile-live-01`, same cookies, same extension, same isolated CoS candidate, and same local proxy/bypass configuration were relaunched after the host egress changed to `71.218.226.86` (CenturyLink/Qwest). ChatGPT then loaded normally and authenticated `https://chatgpt.com/api/auth/session` returned HTTP 200. This isolates the challenged network path / IP reputation as the primary blocker; Chrome automation signaling may be an additive risk factor but was not sufficient to explain the failure. Preserve the same profile and fixed DevTools port for diagnostics, and resume strict two-chat on exact `93e6942` without changing provider semantics or qualification gates.
+
+## 2026-10-29 baseline move and re-verification
+
+The lane now targets T3 `0.1.5-nightly.20261029.3877` / `6d450a4284852af137b2f3407fddd89eb76e7644` (development baseline), matching the bridge repository. The release tuple is unchanged: `v1ReleaseGateManifest.qualifiedT3Sha` still records `ffb4af8d...`, and readiness now reports `t3BaselineQualified=false` / `releaseQualified=false` until live requalification.
+
+Offline gate on the updated tree: typecheck PASS, ESLint PASS (one pre-existing `prefer-const` in `src/state/durable.ts` fixed), build PASS, `25/25` test files and `283/283` tests PASS. This includes the queueing scheduler, cancellation-reconciliation hardening, and the controller read-retry/history paging work already in this branch.
+
+Live qualification remains pending on the same two external blockers recorded above: the isolated Chrome companion extension is not currently paired (`bridgePresent=false`), and the newest valid two-chat sample still fails the 250 ms pre-send p95 gate (`8b907ee`: 388/232/407/241/130/189 ms, two samples over budget). No new live prompts were sent during this baseline move.

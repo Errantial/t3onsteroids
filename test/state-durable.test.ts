@@ -161,6 +161,72 @@ describe("Windows hard-link state mutex", () => {
     await expect(fs.stat(path.join(locks, "critical.lock"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("does not spawn stale-owner identity proof for ordinary short lock contention", async () => {
+    const root = await tempRoot();
+    const locks = path.join(root, "locks");
+    const firstIdentity = new FakeIdentity(111, "638962560000000111");
+    const first = await new HardLinkMutex(locks, "critical", { identity: firstIdentity }).acquire();
+    const secondIdentity = new FakeIdentity(222, "638962560000000222");
+    const query = vi.spyOn(secondIdentity, "query");
+    const pending = new HardLinkMutex(locks, "critical", { identity: secondIdentity, timeoutMs: 500, pollMs: 2 }).acquire();
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    await first.release();
+    const second = await pending;
+    expect(query).not.toHaveBeenCalledWith(111);
+    await second.release();
+  });
+
+  it("reuses one durable owner temp across ordinary contention retries", async () => {
+    const root = await tempRoot();
+    const locks = path.join(root, "locks");
+    const first = await new HardLinkMutex(locks, "critical", {
+      identity: new FakeIdentity(111, "638962560000000111"),
+    }).acquire();
+
+    let releaseSleep!: () => void;
+    const sleeping = new Promise<void>((resolve) => { releaseSleep = resolve; });
+    let enteredSleep!: () => void;
+    const sleepEntered = new Promise<void>((resolve) => { enteredSleep = resolve; });
+    const pending = new HardLinkMutex(locks, "critical", {
+      identity: new FakeIdentity(222, "638962560000000222"),
+      timeoutMs: 500,
+      pollMs: 2,
+      sleep: async () => {
+        enteredSleep();
+        await sleeping;
+      },
+    }).acquire();
+
+    await sleepEntered;
+    const tempDir = path.join(locks, "tmp");
+    const ownerTemps = (await fs.readdir(tempDir)).filter((name) => name.startsWith("critical.") && name.endsWith(".owner"));
+    expect(ownerTemps).toHaveLength(1);
+
+    await first.release();
+    releaseSleep();
+    const second = await pending;
+    await second.release();
+    expect((await fs.readdir(tempDir)).filter((name) => name.startsWith("critical.") && name.endsWith(".owner"))).toHaveLength(0);
+  });
+
+  it("creates only the owner temp directory and skips cleanup after the owner temp was unlinked", async () => {
+    const root = await tempRoot();
+    const locks = path.join(root, "locks");
+    const originalMkdir = fs.mkdir.bind(fs);
+    const originalRm = fs.rm.bind(fs);
+    const mkdirSpy = vi.spyOn(fs, "mkdir").mockImplementation((...args: Parameters<typeof fs.mkdir>) => originalMkdir(...args));
+    const rmSpy = vi.spyOn(fs, "rm").mockImplementation((...args: Parameters<typeof fs.rm>) => originalRm(...args));
+
+    const handle = await new HardLinkMutex(locks, "critical", {
+      identity: new FakeIdentity(111, "638962560000000111"),
+    }).acquire();
+    await handle.release();
+
+    expect(mkdirSpy.mock.calls.some(([target]) => String(target) === locks)).toBe(false);
+    expect(mkdirSpy.mock.calls.some(([target]) => String(target) === path.join(locks, "tmp"))).toBe(true);
+    expect(rmSpy.mock.calls.some(([target]) => String(target).includes("critical.") && String(target).endsWith(".owner"))).toBe(false);
+  });
+
   it.each(["not_found", "pid_reused"] as const)("reclaims a short mutex only with positive stale proof: %s", async (reason) => {
     const root = await tempRoot();
     const locks = path.join(root, "locks");
@@ -174,6 +240,35 @@ describe("Windows hard-link state mutex", () => {
     expect(replacement.owner.pid).toBe(222);
     expect(replacement.owner.nonce).not.toBe(abandoned.owner.nonce);
     await replacement.release();
+  });
+
+  it("elects only one stale-owner reclaimer so a delayed contender cannot delete the replacement lock", async () => {
+    const root = await tempRoot();
+    const locks = path.join(root, "locks");
+    const abandonedIdentity = new FakeIdentity(111, "638962560000000111");
+    await new HardLinkMutex(locks, "critical", { identity: abandonedIdentity }).acquire();
+
+    const firstIdentity = new FakeIdentity(222, "638962560000000222");
+    const secondIdentity = new FakeIdentity(333, "638962560000000333");
+    firstIdentity.queries.set(111, { status: "not_found" });
+    secondIdentity.queries.set(111, { status: "not_found" });
+    // Once one contender replaces the abandoned owner, the other must fail closed on that live
+    // replacement rather than treating its earlier stale proof as authority to remove it.
+    firstIdentity.queries.set(333, { status: "live", processStartTicks: secondIdentity.ticks });
+    secondIdentity.queries.set(222, { status: "live", processStartTicks: firstIdentity.ticks });
+
+    const first = new HardLinkMutex(locks, "critical", { identity: firstIdentity, timeoutMs: 250, pollMs: 2 }).acquire();
+    const second = new HardLinkMutex(locks, "critical", { identity: secondIdentity, timeoutMs: 250, pollMs: 2 }).acquire();
+    const settled = await Promise.allSettled([first, second]);
+    const fulfilled = settled.filter((row): row is PromiseFulfilledResult<Awaited<typeof first>> => row.status === "fulfilled");
+    const rejected = settled.filter((row) => row.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.reason).toBeInstanceOf(StateLockBusyError);
+
+    const fixed = JSON.parse(await fs.readFile(path.join(locks, "critical.lock"), "utf8"));
+    expect(fixed.nonce).toBe(fulfilled[0]!.value.owner.nonce);
+    await fulfilled[0]!.value.release();
   });
 
   it("never reclaims on identity ambiguity or matching live identity", async () => {
@@ -208,6 +303,85 @@ describe("Windows hard-link state mutex", () => {
 });
 
 describe("durable tagged session state", () => {
+  it("starts healthy quarantine and journal reads together while retaining quarantine precedence", async () => {
+    const root = await tempRoot();
+    const durable = store(root);
+    await durable.updateSession(sessionId, { kind: "create", state: initial() });
+    const sessionPath = path.join(root, "sessions", `${sessionId}.json`);
+    const quarantinePath = path.join(root, "quarantine", `${sessionId}.json`);
+    const source = await fs.readFile(sessionPath);
+    const originalReadFile = fs.readFile.bind(fs);
+    let relevantReads = 0;
+    let releaseBoth!: () => void;
+    const bothStarted = new Promise<void>((resolve) => { releaseBoth = resolve; });
+    const readSpy = vi.spyOn(fs, "readFile").mockImplementation(async (...args: Parameters<typeof fs.readFile>) => {
+      const target = String(args[0]);
+      if (target === sessionPath || target === quarantinePath) {
+        relevantReads += 1;
+        if (relevantReads === 2) releaseBoth();
+        await bothStarted;
+        if (target === quarantinePath) throw Object.assign(new Error("missing fixture quarantine"), { code: "ENOENT" });
+        return source as Awaited<ReturnType<typeof fs.readFile>>;
+      }
+      return originalReadFile(...args);
+    });
+
+    try {
+      await expect(durable.readSession(sessionId)).resolves.toMatchObject({ status: "found", value: { sessionId } });
+    } finally {
+      readSpy.mockRestore();
+    }
+    expect(relevantReads).toBe(2);
+  });
+
+  it("keeps an existing quarantine authoritative over a concurrent journal read failure", async () => {
+    const root = await tempRoot();
+    const durable = store(root);
+    await durable.init();
+    const sessionPath = path.join(root, "sessions", `${sessionId}.json`);
+    const quarantinePath = path.join(root, "quarantine", `${sessionId}.json`);
+    await fs.writeFile(quarantinePath, JSON.stringify({
+      schemaVersion: 1,
+      reason: "state_corrupt",
+      sourceSha256: "1".repeat(64),
+      detectedAt: 1,
+    }));
+    const originalReadFile = fs.readFile.bind(fs);
+    const readSpy = vi.spyOn(fs, "readFile").mockImplementation(async (...args: Parameters<typeof fs.readFile>) => {
+      if (String(args[0]) === sessionPath) throw Object.assign(new Error("fixture journal failure"), { code: "EIO" });
+      return originalReadFile(...args);
+    });
+
+    try {
+      await expect(durable.readSession(sessionId)).resolves.toEqual({ status: "corrupt", sha256: "1".repeat(64) });
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it("does not remove a session temp after a successful atomic rename", async () => {
+    const root = await tempRoot();
+    const durable = store(root);
+    await durable.updateSession(sessionId, { kind: "create", state: initial() });
+    const originalRename = fs.rename.bind(fs);
+    const originalRm = fs.rm.bind(fs);
+    let renamedTemp = "";
+    const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (...args: Parameters<typeof fs.rename>) => {
+      if (String(args[1]).endsWith(`${sessionId}.json`)) renamedTemp = String(args[0]);
+      return originalRename(...args);
+    });
+    const rmSpy = vi.spyOn(fs, "rm").mockImplementation((...args: Parameters<typeof fs.rm>) => originalRm(...args));
+
+    try {
+      await durable.updateSession(sessionId, { kind: "begin_input", inputId, generation: 1 });
+    } finally {
+      renameSpy.mockRestore();
+      rmSpy.mockRestore();
+    }
+    expect(renamedTemp).not.toBe("");
+    expect(rmSpy.mock.calls.some(([target]) => String(target) === renamedTemp)).toBe(false);
+  });
+
   it.runIf(process.platform === "win32")("retries a lock-free session-journal read after transient Windows sharing errors", async () => {
     const root = await tempRoot();
     const durable = store(root);

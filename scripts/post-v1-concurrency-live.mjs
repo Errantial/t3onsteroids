@@ -11,7 +11,8 @@ import { compatibility } from "../dist/compatibility.js";
 import { COS_REQUIRED_ACTION_ROUTES, CosControllerClient, discoverCosController } from "../dist/cos/index.js";
 import { canonicalProfileIdentityHash } from "../dist/state/index.js";
 import { directNoToolPrompt } from "./step7-performance-live-lib.mjs";
-import { controllerMetadata, createNewEvidenceRoot, isRestartCheckpointLifecycleUpdate, parseOptions, requiredOption, writeEvidence } from "./step7-live-smoke-lib.mjs";
+import { buildCrossSessionStaleFixture, controllerMetadata, createNewEvidenceRoot, isRestartCheckpointLifecycleUpdate, parseOptions, providerBrowserReady, requiredOption, writeEvidence } from "./step7-live-smoke-lib.mjs";
+import { step7ToolEligibility } from "./step7-tool-eligibility.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const qualificationRoot = resolve(repoRoot, ".local-evidence", "post-v1-concurrency");
@@ -23,7 +24,10 @@ const expectedBuildId = options["expected-build-id"] ?? compatibility.cos.provid
 const candidateExeSha256 = options["candidate-exe-sha256"] ?? null;
 const includeFour = options["include-four"] === "true";
 const onlyFour = options["only-four"] === "true";
+const onlyCase = options["only-case"] ?? null;
 const longOutputWords = Number(options["long-output-words"] ?? "800");
+const shortNoToolTarget = 10;
+const shortNoToolPairProbeAttempts = 3;
 const bridgeCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
 const startedAtUtc = new Date().toISOString();
 
@@ -48,9 +52,30 @@ function errorCategory(error) {
   if (error && typeof error === "object") {
     if (typeof error.code === "string" && /^[a-z0-9_-]{1,48}$/i.test(error.code)) return error.code;
     if (typeof error.category === "string") return error.category;
+    if (typeof error.message === "string" && /^[a-z0-9_-]{1,64}$/i.test(error.message)) return error.message;
     if (typeof error.name === "string") return error.name;
   }
   return "unknown";
+}
+function errorEvidence(error) {
+  if (!error || typeof error !== "object") return { category: errorCategory(error) };
+  const detail = {
+    category: errorCategory(error),
+    ...(typeof error.name === "string" ? { name: error.name.slice(0, 80) } : {}),
+    ...(typeof error.message === "string" ? { message: error.message.slice(0, 300) } : {}),
+    ...(Number.isInteger(error.status) ? { status: error.status } : {}),
+    ...(typeof error.retryable === "boolean" ? { retryable: error.retryable } : {}),
+    ...(error.qualificationContext && typeof error.qualificationContext === "object"
+      ? { qualificationContext: error.qualificationContext } : {}),
+  };
+  if (error.cause && typeof error.cause === "object") detail.cause = errorEvidence(error.cause);
+  return detail;
+}
+function qualificationFailure(error, qualificationContext) {
+  const wrapped = new Error("qualification_stage_failed", { cause: error });
+  wrapped.code = errorCategory(error);
+  wrapped.qualificationContext = qualificationContext;
+  return wrapped;
 }
 function nearestRank(values, quantile = 0.95) {
   if (!values.length) return null;
@@ -108,6 +133,29 @@ async function waitForLeaseState(stateDir, predicate, timeoutMs = 15000) {  cons
   let latest = null;
   while (Date.now() < deadline) {
     latest = await readLeaseState(stateDir);
+    if (latest && predicate(latest)) return latest;
+    await delay(25);
+  }
+  throw new Error("lease_state_timeout");
+}
+async function waitForLeaseStateOrPromptFailure(stateDir, predicate, pending, timeoutMs = 15000) {
+  const observed = pending.map(() => ({ done: false, value: null }));
+  for (let index = 0; index < pending.length; index += 1) {
+    void pending[index].then((value) => { observed[index] = { done: true, value }; });
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const failedIndex = observed.findIndex((row) => row.done && row.value?.ok === false);
+    if (failedIndex >= 0) {
+      const failed = observed[failedIndex];
+      const error = new Error("paired_prompt_failed_before_expected_lease_state", {
+        ...(failed?.value?.error && typeof failed.value.error === "object" ? { cause: failed.value.error } : {}),
+      });
+      error.category = failed.value.errorCategory;
+      error.qualificationContext = { stage: "paired_prompt_lease_wait", peerIndex: failedIndex };
+      throw error;
+    }
+    const latest = await readLeaseState(stateDir);
     if (latest && predicate(latest)) return latest;
     await delay(25);
   }
@@ -220,7 +268,7 @@ function longNoToolPrompt(words) {
 }
 async function safeOutcome(promise) {
   try { return { ok: true, result: await promise }; }
-  catch (error) { return { ok: false, errorCategory: errorCategory(error) }; }
+  catch (error) { return { ok: false, errorCategory: errorCategory(error), error }; }
 }
 async function cancelPeer(peer) {
   await peer.ctx.notify(acp.methods.agent.session.cancel, { sessionId: peer.sessionId });
@@ -254,6 +302,16 @@ async function waitForTurnState(client, sessionId, desired, timeoutMs = 180000) 
     await delay(100);
   }
   throw new Error("provider_turn_state_timeout");
+}
+async function waitForInputAccepted(client, inputId, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await client.input(inputId).catch(() => undefined);
+    if (latest?.delivery === "sent" || latest?.delivery === "pending") return latest;
+    await delay(100);
+  }
+  throw new Error("provider_input_acceptance_timeout");
 }
 async function startRssSampler(peers, stateDir) {
   let running = true;
@@ -290,7 +348,7 @@ async function startRssSampler(peers, stateDir) {
   };
 }
 async function sessionProof(client, sessionId, expectedInputCount) {
-  const events = await client.events(sessionId, 0);
+  const events = await client.eventHistory(sessionId, { from: 0, maxEvents: 2_000 });
   const userInputs = events.filter((event) => event.kind === "user_message" && event.inputDelivery === "confirmed");
   const drained = events.filter((event) => event.kind === "turn_drained");
   const inputIds = userInputs.map((event) => event.inputId).filter((value) => typeof value === "string");
@@ -347,10 +405,26 @@ async function runCase(id, body) {
     return { id, status, result };
   } catch (error) {
     const status = error instanceof SetupInvalid ? "SETUP_INVALID" : "FAIL";
-    await writeEvidence(resolve(outRoot, evidenceName), { schemaVersion: 1, caseId: id, status, errorCategory: errorCategory(error) });
+    await writeEvidence(resolve(outRoot, evidenceName), {
+      schemaVersion: 1, caseId: id, status, errorCategory: errorCategory(error), error: errorEvidence(error),
+    });
     await recordCase(id, status, started, evidenceName, error);
     return { id, status, errorCategory: errorCategory(error) };
   }
+}
+const selectableTwoChatCases = new Set([
+  "single-chat-baseline",
+  "two-chat-workload",
+  "queue-cancel-slot-reuse",
+  "independent-active-cancellation",
+  "sse-reconnect-with-two-active",
+  "crash-restart-with-two-active",
+  "cross-session-stale-event",
+  "long-output-slow-consumer-rss",
+]);
+async function maybeRunCase(id, body) {
+  if (onlyCase && id !== onlyCase) return null;
+  return runCase(id, body);
 }
 const discovery = await discoverCosController(profile).catch(() => null);
 if (!isWithin(qualificationRoot, profile) || resolve(projectPath).toLowerCase() !== repoRoot.toLowerCase() ||
@@ -362,6 +436,54 @@ if (!isWithin(qualificationRoot, profile) || resolve(projectPath).toLowerCase() 
   process.exit(2);
 }
 const cosClient = new CosControllerClient(() => discoverCosController(profile));
+async function classifyShortNoToolAttempt(peer, sample) {
+  const events = await cosClient.eventHistory(peer.sessionId, { from: 0, maxEvents: 2_000 });
+  const user = [...events].reverse().find((event) =>
+    event.kind === "user_message" && event.inputDelivery === "confirmed" && typeof event.inputId === "string",
+  );
+  const drain = user && [...events].reverse().find((event) =>
+    event.kind === "turn_drained" && event.inputId === user.inputId && typeof event.turnId === "string",
+  );
+  if (!user || !drain) {
+    return { ...sample, eligibleNoTool: false, noToolReason: "turn_window_unprovable", authoritativeToolLikeCount: 0, inputKey: null };
+  }
+  const eligibility = step7ToolEligibility(events, { inputId: user.inputId, turnId: drain.turnId });
+  const projectedClean = sample.toolLikeCount === 0;
+  return {
+    ...sample,
+    eligibleNoTool: eligibility.eligibleNoTool && projectedClean,
+    noToolReason: eligibility.eligibleNoTool ? (projectedClean ? null : "projected_tool_activity") : eligibility.reason,
+    authoritativeToolLikeCount: eligibility.toolLikeCount,
+    inputKey: hash(user.inputId).slice(0, 16),
+  };
+}
+function shortAttemptEvidence(sample, index, extra = {}) {
+  return {
+    index,
+    ...extra,
+    counted: sample.counted ?? (sample.eligibleNoTool === true && sample.stopReason === "end_turn" && sample.finalMatched === true),
+    stopReason: sample.stopReason,
+    finalMatched: sample.finalMatched,
+    projectedToolLikeCount: sample.toolLikeCount,
+    authoritativeToolLikeCount: sample.authoritativeToolLikeCount ?? null,
+    eligibleNoTool: sample.eligibleNoTool === true,
+    noToolReason: sample.noToolReason ?? null,
+    inputKey: sample.inputKey ?? null,
+    endToEndMs: sample.endToEndMs,
+    preSendMs: sample.preSendMs,
+    drainMs: sample.drainMs,
+    postDrainMs: sample.postDrainMs,
+  };
+}
+async function stopActiveQualificationTurn(peer) {
+  if (!peer?.sessionId) return;
+  try {
+    const session = await cosClient.session(peer.sessionId);
+    if (session.providerTurn?.state === "active" && typeof session.providerTurn.turnId === "string") {
+      await cosClient.requestStopExactTurn(peer.sessionId, session.providerTurn.turnId);
+    }
+  } catch { /* Best-effort cleanup must not mask the qualification result. */ }
+}
 let health;
 let browserBefore;
 let project;
@@ -370,26 +492,39 @@ try {
   browserBefore = await controllerMetadata(discovery);
   project = await cosClient.resolveProject(projectPath);
   manifest.cosProfileIdentityHash = await canonicalProfileIdentityHash(profile);
-  const healthy = browserBefore.connectionState === "connected" && browserBefore.bridgePaired === true && browserBefore.bridgePresent === true;
+  // `connectionState` is the app's Core MCP tunnel, not the browser-extension bridge. The
+  // provider qualification lane uses the local control API plus the browser bridge and does
+  // not require an OpenAI tunnel ID/API key. Gate only on the browser facts here; keep the Core
+  // connection state in evidence as a diagnostic so it is never confused with pairing again.
+  const browserReady = providerBrowserReady(browserBefore);
   const exactBuild = health.providerExtension?.buildId === expectedBuildId && health.providerExtension?.apiVersion === compatibility.cos.providerExtension.apiVersion;
   const featuresReady = Object.entries(compatibility.cos.providerExtension.features).every(([name, version]) => health.features[name] === version);
   const routesReady = compatibility.cos.controlApiProtocol === health.protocol && health.actionsEnabled === true &&
     COS_REQUIRED_ACTION_ROUTES.every((route) => health.actionRoutes.includes(route));
   const exactProject = resolve(project.canonicalPath).toLowerCase() === projectPath.toLowerCase();
-  if (!healthy || !exactBuild || !featuresReady || !routesReady || !exactProject) throw new SetupInvalid("candidate_health_browser_actions_or_project_mismatch");
+  if (!browserReady || !exactBuild || !featuresReady || !routesReady || !exactProject) throw new SetupInvalid("candidate_health_browser_actions_or_project_mismatch");
   await writeEvidence(resolve(outRoot, "preflight.json"), {
     schemaVersion: 1, status: "PASS",
     candidate: { app: health.app, protocol: health.protocol, extensionBuildId: health.providerExtension.buildId, actionsEnabled: health.actionsEnabled },
     browser: browserBefore,
     project: { label: basename(projectPath), canonicalProjectIdentityHash: manifest.canonicalProjectIdentityHash, exactCanonicalPath: exactProject },
     profileIdentityHash: manifest.cosProfileIdentityHash,
-  });  await recordCase("preflight", "PASS", startedAtUtc, "preflight.json", null, { browserHealthy: healthy, actionsEnabled: health.actionsEnabled, exactBuild });
+  });  await recordCase("preflight", "PASS", startedAtUtc, "preflight.json", null, {
+    browserReady,
+    coreConnectionState: browserBefore.connectionState,
+    actionsEnabled: health.actionsEnabled,
+    exactBuild,
+  });
 } catch (error) {
   const status = error instanceof SetupInvalid ? "SETUP_INVALID" : "FAIL";
   await writeEvidence(resolve(outRoot, "preflight.json"), { schemaVersion: 1, status, errorCategory: errorCategory(error),
     candidateApp: health?.app ?? null, protocol: health?.protocol ?? null,
     extensionBuildIdMatches: health?.providerExtension?.buildId === expectedBuildId,
-    actionsEnabled: health?.actionsEnabled === true, browserConnected: browserBefore?.connectionState === "connected" });
+    actionsEnabled: health?.actionsEnabled === true,
+    browserPaired: browserBefore?.bridgePaired === true,
+    browserPresent: browserBefore?.bridgePresent === true,
+    coreConnectionState: browserBefore?.connectionState ?? null,
+  });
   await recordCase("preflight", status, startedAtUtc, "preflight.json", error);
   manifest.finalStatus = status;
   await saveManifest();
@@ -399,6 +534,14 @@ try {
 
 const results = [];
 let twoChatStatus = "PENDING";
+if (onlyCase && (!selectableTwoChatCases.has(onlyCase) || onlyFour || includeFour)) {
+  const error = new SetupInvalid("invalid_only_case_selection");
+  await recordCase("only-case-selection", "SETUP_INVALID", new Date().toISOString(), null, error);
+  manifest.finalStatus = "SETUP_INVALID";
+  await saveManifest();
+  process.stdout.write(JSON.stringify({ status: manifest.finalStatus, runId: basename(outRoot), failedCase: "only-case-selection" }) + "\n");
+  process.exit(2);
+}
 if (onlyFour) {
   const priorPath = options["prior-two-chat-manifest"] ? resolve(options["prior-two-chat-manifest"]) : null;
   const prior = priorPath && isWithin(qualificationRoot, priorPath) ? await readJsonOptional(priorPath) : null;
@@ -418,79 +561,151 @@ if (onlyFour) {
   twoChatStatus = "PASS";
 }
 if (!onlyFour) {
-const baseline = await runCase("single-chat-baseline", async () => {
+const baseline = await maybeRunCase("single-chat-baseline", async () => {
   const stateDir = await createStateDir("single-chat-baseline");
   const peer = await startPeer({ label: "baseline", stateDir, slots: 1, queueCapacity: 0 });
   const stopSampler = await startRssSampler([peer], stateDir);
   const samples = [];
   try {
-    for (let index = 1; index <= 10; index += 1) {
+    for (let index = 1; index <= shortNoToolTarget; index += 1) {
       const expected = shortPromptToken("PV1-BASELINE");
-      samples.push(await prompt(peer, directNoToolPrompt(expected), expected));
+      const result = await classifyShortNoToolAttempt(peer, await prompt(peer, directNoToolPrompt(expected), expected));
+      if (result.stopReason !== "end_turn" || !result.finalMatched) throw new Error("baseline_non_exact_or_nonterminal");
+      samples.push(result);
     }
     const rss = await stopSampler();
     const metrics = peer.metrics ?? await readJsonOptional(peer.metricsPath);
-    const proof = await sessionProof(cosClient, peer.sessionId, 10);
+    const proof = await sessionProof(cosClient, peer.sessionId, shortNoToolTarget);
     const policy = await cosClient.requireBackgroundWorkDisabled(peer.sessionId);
-    const latency = summarizeLatency(samples);
-    const pass = samples.every((sample) => sample.stopReason === "end_turn" && sample.finalMatched && sample.toolLikeCount === 0) &&
+    const cleanSamples = samples.filter((sample) => sample.eligibleNoTool === true);
+    const latency = summarizeLatency(cleanSamples);
+    const toolContaminatedTurnCount = samples.length - cleanSamples.length;
+    const pass = samples.length === shortNoToolTarget && toolContaminatedTurnCount === 0 &&
       proof.pass && policy.backgroundWork === "disabled" && policy.enforced === true && latency.budgetPass &&
       Number(metrics?.rssHighWaterBytes) < 256 * 1024 * 1024 && rss.rssSampleCount > 0;
     return { pass, evidence: { schemaVersion: 1, promptClass: "short-exact-no-tool", turnCount: samples.length,
-      samples: samples.map((sample, index) => ({ index: index + 1, stopReason: sample.stopReason, finalMatched: sample.finalMatched,
-        toolLikeCount: sample.toolLikeCount, endToEndMs: sample.endToEndMs, preSendMs: sample.preSendMs, drainMs: sample.drainMs, postDrainMs: sample.postDrainMs })),
+      toolContaminatedTurnCount,
+      samples: samples.map((sample, index) => shortAttemptEvidence(sample, index + 1)),
       latency, sessionProof: proof, providerPolicyAttested: true, bridgeRssHighWaterBytes: metrics?.rssHighWaterBytes ?? null,
       aggregateBridgeRssHighWaterBytes: rss.aggregateRssHighWaterBytes, aggregateRssSampleCount: rss.rssSampleCount,
       maxActiveLeases: rss.maxActiveLeases, maxWaitingLeases: rss.maxWaitingLeases },
-      summary: { turnCount: samples.length, latencyBudgetPass: latency.budgetPass, bridgeRssHighWaterBytes: metrics?.rssHighWaterBytes ?? null } };
+      summary: { turnCount: samples.length, toolContaminatedTurnCount,
+        latencyBudgetPass: latency.budgetPass, bridgeRssHighWaterBytes: metrics?.rssHighWaterBytes ?? null } };
   } finally { await stopSampler(); await closePeer(peer); }
 });
-results.push(baseline);
+if (baseline) results.push(baseline);
 
-const twoChat = await runCase("two-chat-workload", async () => {
+const twoChat = await maybeRunCase("two-chat-workload", async () => {
   const stateDir = await createStateDir("two-chat-workload");
-  const peers = await Promise.all([
-    startPeer({ label: "two-a", stateDir, slots: 2, queueCapacity: 2 }),
-    startPeer({ label: "two-b", stateDir, slots: 2, queueCapacity: 2 }),
-  ]);
+  let peers = null;
+  let eligibilityProbe = null;
+  let pairProbeAttempt = 0;
+  for (let attempt = 1; attempt <= shortNoToolPairProbeAttempts; attempt += 1) {
+    const candidatePeers = await Promise.all([
+      startPeer({ label: `two-a-probe-${attempt}`, stateDir, slots: 2, queueCapacity: 2 }),
+      startPeer({ label: `two-b-probe-${attempt}`, stateDir, slots: 2, queueCapacity: 2 }),
+    ]);
+    try {
+      const expectedA = shortPromptToken("PV1-TWO-PROBE-A");
+      const expectedB = shortPromptToken("PV1-TWO-PROBE-B");
+      const pending = [
+        safeOutcome(prompt(candidatePeers[0], directNoToolPrompt(expectedA), expectedA)),
+        safeOutcome(prompt(candidatePeers[1], directNoToolPrompt(expectedB), expectedB)),
+      ];
+      await waitForLeaseStateOrPromptFailure(stateDir, (state) => state.active.length === 2 &&
+        candidatePeers.every((peer) => state.active.some((row) => row.sessionId === peer.sessionId)), pending, 15000);
+      const [a, b] = await Promise.all(pending);
+      if (!a.ok || !b.ok) throw new Error("two_chat_probe_prompt_failed");
+      const classified = await Promise.all([
+        classifyShortNoToolAttempt(candidatePeers[0], a.result),
+        classifyShortNoToolAttempt(candidatePeers[1], b.result),
+      ]);
+      pairProbeAttempt = attempt;
+      if (classified.every((sample) => sample.stopReason === "end_turn" && sample.finalMatched && sample.eligibleNoTool === true)) {
+        peers = candidatePeers;
+        eligibilityProbe = classified;
+        break;
+      }
+    } finally {
+      if (peers !== candidatePeers) await Promise.all(candidatePeers.map(closePeer));
+    }
+  }
+  if (!peers || !eligibilityProbe) throw new SetupInvalid("two_chat_clean_pair_unavailable");
   const stopSampler = await startRssSampler(peers, stateDir);
-  const samples = [];
+  const samplesByPeer = [[], []];
   try {
-    for (let index = 1; index <= 10; index += 1) {
+    for (let index = 1; index <= shortNoToolTarget; index += 1) {
       const expectedA = shortPromptToken("PV1-TWO-A");
       const expectedB = shortPromptToken("PV1-TWO-B");
       const outcomeA = safeOutcome(prompt(peers[0], directNoToolPrompt(expectedA), expectedA));
       const outcomeB = safeOutcome(prompt(peers[1], directNoToolPrompt(expectedB), expectedB));
-      await waitForLeaseState(stateDir, (state) => state.active.length === 2 &&
-        state.active.some((row) => row.sessionId === peers[0].sessionId) && state.active.some((row) => row.sessionId === peers[1].sessionId), 15000);
+      await waitForLeaseStateOrPromptFailure(stateDir, (state) => state.active.length === 2 &&
+        state.active.some((row) => row.sessionId === peers[0].sessionId) && state.active.some((row) => row.sessionId === peers[1].sessionId),
+      [outcomeA, outcomeB], 15000);
       const [a, b] = await Promise.all([outcomeA, outcomeB]);
       if (!a.ok || !b.ok) throw new Error("two_chat_prompt_failed");
-      samples.push(a.result, b.result);
+      let classifiedA;
+      let classifiedB;
+      try {
+        [classifiedA, classifiedB] = await Promise.all([
+          classifyShortNoToolAttempt(peers[0], a.result),
+          classifyShortNoToolAttempt(peers[1], b.result),
+        ]);
+      } catch (error) {
+        throw qualificationFailure(error, { stage: "round_classification", round: index });
+      }
+      const classified = [classifiedA, classifiedB];
+      for (let peerIndex = 0; peerIndex < classified.length; peerIndex += 1) {
+        const sample = classified[peerIndex];
+        if (sample.stopReason !== "end_turn" || !sample.finalMatched) throw new Error("two_chat_non_exact_or_nonterminal");
+        samplesByPeer[peerIndex].push({ ...sample, peerIndex, round: index, counted: true });
+      }
+      const measuredSoFar = [...samplesByPeer[0], ...samplesByPeer[1]];
+      const preSendOverBudget = measuredSoFar.filter((sample) => Number.isFinite(sample.preSendMs) && sample.preSendMs > 250);
+      // With exactly 20 measured samples, nearest-rank p95 is the 19th sorted value. Two
+      // samples above 250 ms therefore make the unchanged pre-send gate mathematically
+      // impossible to pass, so stop instead of consuming the remaining qualification turns.
+      if (preSendOverBudget.length >= 2) {
+        throw qualificationFailure(new Error("two_chat_pre_send_p95_doomed"), {
+          stage: "measured_round",
+          round: index,
+          measuredSampleCount: measuredSoFar.length,
+          preSendOverBudgetCount: preSendOverBudget.length,
+          measuredPreSendMs: measuredSoFar.map((sample) => sample.preSendMs),
+        });
+      }
     }
+    const samples = [...samplesByPeer[0], ...samplesByPeer[1]];
+    const cleanSamples = samples.filter((sample) => sample.eligibleNoTool === true);
     const rss = await stopSampler();
     const metrics = await Promise.all(peers.map((peer) => readJson(peer.metricsPath)));
-    const proof = await Promise.all(peers.map((peer) => sessionProof(cosClient, peer.sessionId, 10)));
+    const proof = await Promise.all(peers.map((peer) => sessionProof(cosClient, peer.sessionId, shortNoToolTarget + 1)));
     const policy = await Promise.all(peers.map((peer) => cosClient.requireBackgroundWorkDisabled(peer.sessionId)));
-    const latency = summarizeLatency(samples);
+    const latency = summarizeLatency(cleanSamples);
     const perProcessRss = metrics.map((row) => row.rssHighWaterBytes);
-    const pass = samples.every((sample) => sample.stopReason === "end_turn" && sample.finalMatched && sample.toolLikeCount === 0) &&
+    const toolContaminatedTurnCount = samples.length - cleanSamples.length;
+    const pass = samplesByPeer.every((rows) => rows.length === shortNoToolTarget) && toolContaminatedTurnCount === 0 &&
       proof.every((row) => row.pass) && policy.every((row) => row.backgroundWork === "disabled" && row.enforced === true) &&
       latency.budgetPass && rss.maxActiveLeases === 2 && perProcessRss.every((value) => value < 256 * 1024 * 1024) && rss.rssSampleCount > 0;
     return { pass, evidence: { schemaVersion: 1, chatCount: 2, turnsPerChat: 10,
-      samples: samples.map((sample) => ({ stopReason: sample.stopReason, finalMatched: sample.finalMatched, toolLikeCount: sample.toolLikeCount,
-        endToEndMs: sample.endToEndMs, preSendMs: sample.preSendMs, drainMs: sample.drainMs, postDrainMs: sample.postDrainMs })),
+      eligibilityProbeAttempt: pairProbeAttempt,
+      eligibilityProbe: eligibilityProbe.map((sample, index) => shortAttemptEvidence({ ...sample, counted: false }, index + 1, { peerIndex: index })),
+      toolContaminatedTurnCount,
+      qualifyingTurnsPerChat: samplesByPeer.map((rows) => rows.filter((sample) => sample.eligibleNoTool === true).length),
+      samples: samples.map((sample, index) => shortAttemptEvidence(sample, index + 1, { peerIndex: sample.peerIndex, round: sample.round })),
       latency, sessionProofs: proof, providerPoliciesAttested: policy.every((row) => row.backgroundWork === "disabled" && row.enforced === true),
       maxActiveLeases: rss.maxActiveLeases, maxWaitingLeases: rss.maxWaitingLeases, perProcessBridgeRssHighWaterBytes: perProcessRss,
       aggregateBridgeRssHighWaterBytes: rss.aggregateRssHighWaterBytes, aggregateRssSampleCount: rss.rssSampleCount,
       summedSseConnectCount: metrics.reduce((sum, row) => sum + row.sseConnectCount, 0),
       summedSseReconnectCount: metrics.reduce((sum, row) => sum + row.sseReconnectCount, 0),
       summedBackoffCount: metrics.reduce((sum, row) => sum + row.backoffCount, 0) },
-      summary: { turns: samples.length, maxActiveLeases: rss.maxActiveLeases, latencyBudgetPass: latency.budgetPass, aggregateBridgeRssHighWaterBytes: rss.aggregateRssHighWaterBytes } };
+      summary: { turns: samples.length, eligibilityProbeAttempt: pairProbeAttempt, toolContaminatedTurnCount,
+        maxActiveLeases: rss.maxActiveLeases, latencyBudgetPass: latency.budgetPass, aggregateBridgeRssHighWaterBytes: rss.aggregateRssHighWaterBytes } };
   } finally { await stopSampler(); await Promise.all(peers.map(closePeer)); }
 });
-results.push(twoChat);
+if (twoChat) results.push(twoChat);
 
-const queue = await runCase("queue-cancel-slot-reuse", async () => {
+const queue = await maybeRunCase("queue-cancel-slot-reuse", async () => {
   const stateDir = await createStateDir("queue-cancel-slot-reuse");
   const peers = [];
   const start = async (label) => { const peer = await startPeer({ label, stateDir, slots: 2, queueCapacity: 2 }); peers.push(peer); return peer; };
@@ -534,22 +749,56 @@ const queue = await runCase("queue-cancel-slot-reuse", async () => {
       summary: { queuedCancelPass: true, slotReusePass: true, maxWaitingLeases: rss.maxWaitingLeases } };
   } finally { await stopSampler(); await Promise.all(peers.map(closePeer)); }
 });
-results.push(queue);
+if (queue) results.push(queue);
 
-const cancellation = await runCase("independent-active-cancellation", async () => {
+const cancellation = await maybeRunCase("independent-active-cancellation", async () => {
   const stateDir = await createStateDir("independent-active-cancellation");
   const peers = await Promise.all([
     startPeer({ label: "cancel-a", stateDir, slots: 2, queueCapacity: 2 }),
     startPeer({ label: "cancel-b", stateDir, slots: 2, queueCapacity: 2 }),
   ]);
   const stopSampler = await startRssSampler(peers, stateDir);
-  const aTask = safeOutcome(prompt(peers[0], longNoToolPrompt(1000)));
-  const bTask = safeOutcome(prompt(peers[1], longNoToolPrompt(1000)));
+  let aTask = null;
+  let bTask = null;
   try {
-    await waitForLeaseState(stateDir, (state) => state.active.length === 2, 20000);
+    // Warm both browser sessions before the cancellation trial. First-turn/new-chat startup can take
+    // tens of seconds in the browser and is a separate qualification concern; this case is intended
+    // to prove cancellation isolation once two already-established chats have exact active turns.
+    const warmAExpected = shortPromptToken("PV1-CANCEL-WARM-A");
+    const warmBExpected = shortPromptToken("PV1-CANCEL-WARM-B");
+    const [warmA, warmB] = await Promise.all([
+      prompt(peers[0], directNoToolPrompt(warmAExpected), warmAExpected),
+      prompt(peers[1], directNoToolPrompt(warmBExpected), warmBExpected),
+    ]);
+    if (warmA.stopReason !== "end_turn" || !warmA.finalMatched || warmB.stopReason !== "end_turn" || !warmB.finalMatched) {
+      throw new Error("cancellation_warmup_failed");
+    }
+
+    aTask = safeOutcome(prompt(peers[0], longNoToolPrompt(4000)));
+    const aLeaseState = await waitForLeaseState(stateDir, (state) => state.active.some((row) => row.sessionId === peers[0].sessionId), 20000);
+    const aLease = aLeaseState.active.find((row) => row.sessionId === peers[0].sessionId);
+    if (!aLease?.inputId) throw new Error("active_cancel_a_lease_missing_input");
+    const acceptedA = await waitForInputAccepted(cosClient, aLease.inputId, 30000);
+    await waitForTurnState(cosClient, peers[0].sessionId, "active", 60000);
+
+    bTask = safeOutcome(prompt(peers[1], longNoToolPrompt(1200)));
+    const bothLeaseState = await waitForLeaseState(stateDir, (state) => state.active.length === 2 &&
+      state.active.some((row) => row.sessionId === peers[0].sessionId) &&
+      state.active.some((row) => row.sessionId === peers[1].sessionId), 20000);
+    const bLease = bothLeaseState.active.find((row) => row.sessionId === peers[1].sessionId);
+    if (!bLease?.inputId) throw new Error("active_cancel_b_lease_missing_input");
+    const acceptedB = await waitForInputAccepted(cosClient, bLease.inputId, 30000);
+    await waitForTurnState(cosClient, peers[1].sessionId, "active", 60000);
     const before = await readLeaseState(stateDir);
     const aWasActive = before.active.some((row) => row.sessionId === peers[0].sessionId);
     const bWasActive = before.active.some((row) => row.sessionId === peers[1].sessionId);
+    const [activeA, activeB] = await Promise.all([
+      cosClient.session(peers[0].sessionId),
+      cosClient.session(peers[1].sessionId),
+    ]);
+    if (activeA.providerTurn?.state !== "active" || activeB.providerTurn?.state !== "active") {
+      throw new Error("provider_turns_not_simultaneously_active");
+    }
     await cancelPeer(peers[0]);
     const [a, b] = await Promise.all([aTask, bTask]);
     const rss = await stopSampler();
@@ -559,16 +808,23 @@ const cancellation = await runCase("independent-active-cancellation", async () =
       b.result.stopReason === "end_turn" && b.result.toolLikeCount === 0 && bSession.providerTurn?.state === "drained" &&
       aSession.providerTurn?.state === "drained" && rss.maxActiveLeases === 2;
     return { pass, evidence: { schemaVersion: 1, bothWereActiveBeforeCancel: aWasActive && bWasActive,
+      warmedExistingSessions: true,
+      inputsAcceptedBeforeCancel: [acceptedA.delivery, acceptedB.delivery],
+      providerTurnsActiveBeforeCancel: activeA.providerTurn?.state === "active" && activeB.providerTurn?.state === "active",
       cancelledSession: { stopReason: a.ok ? a.result.stopReason : "error", sessionKey: hash(peers[0].sessionId).slice(0, 16) },
       unaffectedSession: { stopReason: b.ok ? b.result.stopReason : "error", finalNonempty: b.ok && b.result.assistantChars > 0, sessionKey: hash(peers[1].sessionId).slice(0, 16) },
       providerTurnsDrained: aSession.providerTurn?.state === "drained" && bSession.providerTurn?.state === "drained",
       maxActiveLeases: rss.maxActiveLeases, aggregateBridgeRssHighWaterBytes: rss.aggregateRssHighWaterBytes, aggregateRssSampleCount: rss.rssSampleCount },
       summary: { independentCancellationPass: pass, maxActiveLeases: rss.maxActiveLeases } };
-  } finally { await stopSampler(); await Promise.all(peers.map(closePeer)); }
+  } finally {
+    await stopSampler();
+    await Promise.all(peers.map(stopActiveQualificationTurn));
+    await Promise.all(peers.map(closePeer));
+  }
 });
-results.push(cancellation);
+if (cancellation) results.push(cancellation);
 
-const sse = await runCase("sse-reconnect-with-two-active", async () => {
+const sse = await maybeRunCase("sse-reconnect-with-two-active", async () => {
   const stateDir = await createStateDir("sse-reconnect-with-two-active");
   const peers = await Promise.all([
     startPeer({ label: "sse-drop-a", stateDir, slots: 2, queueCapacity: 2, dropSseOnce: true }),
@@ -599,9 +855,9 @@ const sse = await runCase("sse-reconnect-with-two-active", async () => {
       summary: { reconnectPass: pass, sseReconnectCount: metrics.sseReconnectCount, maxActiveLeases: rss.maxActiveLeases } };
   } finally { await stopSampler(); await Promise.all(peers.map(closePeer)); }
 });
-results.push(sse);
+if (sse) results.push(sse);
 
-const restart = await runCase("crash-restart-with-two-active", async () => {
+const restart = await maybeRunCase("crash-restart-with-two-active", async () => {
   const stateDir = await createStateDir("crash-restart-with-two-active");  const a = await startPeer({ label: "restart-a-before", stateDir, slots: 2, queueCapacity: 2 });
   const b = await startPeer({ label: "restart-b", stateDir, slots: 2, queueCapacity: 2 });
   const peers = [a, b];
@@ -611,6 +867,14 @@ const restart = await runCase("crash-restart-with-two-active", async () => {
   try {
     const active = await waitForLeaseState(stateDir, (state) => state.active.length === 2 &&
       state.active.some((row) => row.sessionId === a.sessionId) && state.active.some((row) => row.sessionId === b.sessionId), 20000);
+    // An active lease proves send authority, not that the controller has already durably accepted
+    // the POST. Killing in the narrow mark_dispatched -> send gap deliberately creates an
+    // ambiguous operation that production must fail closed rather than replay. This case is meant
+    // to qualify recovery *after* exact provider acceptance, so wait for both input journals first.
+    const [acceptedA, acceptedB] = await Promise.all([
+      waitForInputAccepted(cosClient, a.sessionId),
+      waitForInputAccepted(cosClient, b.sessionId),
+    ]);
     await killPeer(a);
     const crashedPrompt = await aTask;
     const afterCrash = await readLeaseState(stateDir);
@@ -621,7 +885,7 @@ const restart = await runCase("crash-restart-with-two-active", async () => {
     const expected = shortPromptToken("PV1-RESTART-RESUMED");
     const resumedTurn = await prompt(resumed, directNoToolPrompt(expected), expected);
     const bResult = await bTask;
-    const events = await cosClient.events(a.sessionId, 0);
+    const events = await cosClient.eventHistory(a.sessionId, { from: 0, maxEvents: 2_000 });
     const inputs = events.filter((event) => event.kind === "user_message" && event.inputDelivery === "confirmed");
     const inputIds = inputs.map((event) => event.inputId).filter((value) => typeof value === "string");
     const drained = events.filter((event) => event.kind === "turn_drained");
@@ -631,6 +895,7 @@ const restart = await runCase("crash-restart-with-two-active", async () => {
       resumedTurn.stopReason === "end_turn" && resumedTurn.finalMatched && bResult.ok && bResult.result.stopReason === "end_turn" &&
       proof.pass && new Set(inputIds).size === 2 && drained.length >= 2 && rss.maxActiveLeases === 2;
     return { pass, evidence: { schemaVersion: 1, crashObservedWhileTwoLeasesActive: active.active.length === 2,
+      inputsAcceptedBeforeCrash: [acceptedA.delivery, acceptedB.delivery],
       crashedSessionKey: hash(a.sessionId).slice(0, 16), unaffectedSessionKey: hash(b.sessionId).slice(0, 16),
       unaffectedLeaseRetainedAfterCrash: bStillActiveAfterCrash, promptPipeClosedOnCrash: crashedPrompt.ok === false,
       resumeSucceededOnSameSession: resumed.sessionId === a.sessionId, resumedTurnFinalMatched: resumedTurn.finalMatched,
@@ -640,9 +905,9 @@ const restart = await runCase("crash-restart-with-two-active", async () => {
       summary: { crashRecoveryPass: pass, uniqueInputIdCount: new Set(inputIds).size, maxActiveLeases: rss.maxActiveLeases } };
   } finally { await stopSampler(); await Promise.all(peers.map(closePeer)); }
 });
-results.push(restart);
+if (restart) results.push(restart);
 
-const stale = await runCase("cross-session-stale-event", async () => {
+const stale = await maybeRunCase("cross-session-stale-event", async () => {
   const stateDir = await createStateDir("cross-session-stale-event");
   const staleFixturePath = resolve(outRoot, "faults", "stale-event-fixture.json");
   const b = await startPeer({ label: "stale-target-b", stateDir, slots: 2, queueCapacity: 2, staleEventPath: staleFixturePath });
@@ -658,32 +923,31 @@ const stale = await runCase("cross-session-stale-event", async () => {
     const second = await prompt(b, directNoToolPrompt(expectedB2), expectedB2);
     if (!first.every((row) => row.stopReason === "end_turn" && row.finalMatched) ||
         second.stopReason !== "end_turn" || !second.finalMatched) throw new Error("stale_event_fixture_setup_turn_failed");
-    const sourceEvents = await cosClient.events(a.sessionId, 0);
-    const sourceTurnEnd = [...sourceEvents].reverse().find((event) => event.kind === "turn_end" && typeof event.turnId === "string" && typeof event.inputId === "string");
-    const targetEvents = await cosClient.events(b.sessionId, 0);
-    const targetLastSeq = Math.max(...targetEvents.map((event) => event.seq));
-    if (!sourceTurnEnd || sourceTurnEnd.seq >= targetLastSeq) throw new SetupInvalid("could_not_prepare_old_cross_session_event");
-    const fixture = { seq: sourceTurnEnd.seq, position: sourceTurnEnd.position, time: sourceTurnEnd.time, kind: "turn_end",
-      source: sourceTurnEnd.source, turnId: sourceTurnEnd.turnId, inputId: sourceTurnEnd.inputId,      sessionId: a.sessionId, outcome: sourceTurnEnd.outcome ?? "completed" };
+    const sourceEvents = await cosClient.eventHistory(a.sessionId, { from: 0, maxEvents: 2_000 });
+    const targetEvents = await cosClient.eventHistory(b.sessionId, { from: 0, maxEvents: 2_000 });
+    const staleSetup = buildCrossSessionStaleFixture(sourceEvents, targetEvents, a.sessionId);
+    if (!staleSetup) throw new SetupInvalid("could_not_prepare_old_cross_session_event");
+    const { fixture, sourceEventSequence, targetLastSeq } = staleSetup;
     await fs.mkdir(dirname(staleFixturePath), { recursive: true });
     await fs.writeFile(staleFixturePath, JSON.stringify(fixture) + "\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
     const expectedB3 = shortPromptToken("PV1-STALE-B3");
     const third = await prompt(b, directNoToolPrompt(expectedB3), expectedB3);
     const fault = await readJson(b.faultEvidencePath);
-    const finalEvents = await cosClient.events(b.sessionId, 0);
+    const finalEvents = await cosClient.eventHistory(b.sessionId, { from: 0, maxEvents: 2_000 });
     const proof = await sessionProof(cosClient, b.sessionId, 3);
     const pass = third.stopReason === "end_turn" && third.finalMatched && third.toolLikeCount === 0 &&
       fault.staleEventInjected === true && fault.staleSeq < targetLastSeq && proof.pass && proof.duplicateSequenceCount === 0;
     return { pass, evidence: { schemaVersion: 1, staleEventInjectedFromOtherSession: fault.staleEventInjected,
-      staleEventSequence: fault.staleSeq, targetCursorBeforeInjection: targetLastSeq, staleSourceSessionKey: fault.staleSessionKey,
+      staleEventSequence: fault.staleSeq, sourceEventSequence, targetCursorBeforeInjection: targetLastSeq,
+      staleSourceSessionKey: fault.staleSessionKey,
       targetFinalMatched: third.finalMatched, targetSessionProof: proof, targetPersistedEventCount: finalEvents.length,
       targetDuplicateSequenceCount: proof.duplicateSequenceCount },
       summary: { staleEventIgnored: pass, targetFinalMatched: third.finalMatched, duplicateSequenceCount: proof.duplicateSequenceCount } };
   } finally { await Promise.all([closePeer(a), closePeer(b)]); }
 });
-results.push(stale);
+if (stale) results.push(stale);
 
-const longOutput = await runCase("long-output-slow-consumer-rss", async () => {
+const longOutput = await maybeRunCase("long-output-slow-consumer-rss", async () => {
   const stateDir = await createStateDir("long-output-slow-consumer-rss");
   const peer = await startPeer({ label: "long-output-slow", stateDir, slots: 2, queueCapacity: 2, slowConsumer: true });
   const stopSampler = await startRssSampler([peer], stateDir);
@@ -701,7 +965,7 @@ const longOutput = await runCase("long-output-slow-consumer-rss", async () => {
       summary: { longOutputPass: pass, assistantChars: result.assistantChars, bridgeRssHighWaterBytes: metrics?.rssHighWaterBytes ?? null } };
   } finally { await stopSampler(); await closePeer(peer); }
 });
-results.push(longOutput);
+if (longOutput) results.push(longOutput);
 twoChatStatus = results.every((row) => row.status === "PASS") ? "PASS" : "FAIL";
 }
 

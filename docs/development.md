@@ -6,7 +6,7 @@ The v1 bridge is Windows-first, uses Node directly, and is versioned as `1.0.0`.
 
 The first v1 support tuple is:
 
-- T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`;
+- T3 `0.1.5-nightly.20261029.3877` / `6d450a4284852af137b2f3407fddd89eb76e7644` (development baseline; release tuple remains `ffb4af8d…`);
 - CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`;
 - CoS provider-extension build `495e3e96504d9b865c18478f7b42915280712f84`;
 - controller protocol 1 with `provider-project-resolve-v1`, `provider-assistant-content-v1`, `provider-session-policy-v1`, `provider-turn-drain-v1`, and `provider-turn-recovery-v1` all at version 1;
@@ -72,7 +72,7 @@ V1 is same-host, **same OS user/profile** only. The bridge discovers the current
 
 The pinned v1 release contract admits one active bridged turn per stable CoS profile/controller identity. That release uses a durable profile-wide lease, and a second simultaneous turn receives a deterministic busy result; controller port/token rotation does not create a new admission domain.
 
-On branch feat/post-v1-concurrency, commit b8640281c52b932bc7f8cd3d6f5048164a7beb0a implements the post-v1 durable profile-wide scheduler: a bounded active set, FIFO waiting queue, exact queued cancellation/release, and legacy single-lease state compatibility. The production capability is intentionally still supportedConcurrency: 1 until isolated live qualification passes at two chats. Do not infer support for two or four chats from the implementation or offline tests alone; qualify four separately against the controller's four-stream global cap.
+On branch feat/post-v1-concurrency, rebased commit `22d561f` implements the post-v1 durable profile-wide scheduler directly above the released v1.0.0 base (`5681f812...`): a bounded active set, FIFO waiting queue, exact queued cancellation/release, and legacy single-lease state compatibility. The production concurrency capability is intentionally still `supportedConcurrency: 1` until isolated live qualification passes at two chats. Do not infer support for two or four chats from the implementation, the v1 release result, or offline tests alone; qualify four separately against the controller's four-stream global cap.
 
 ## Terminal semantics and background work
 

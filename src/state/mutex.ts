@@ -163,6 +163,12 @@ export interface HardLinkMutexOptions {
   readonly sleep?: (ms: number) => Promise<void>;
 }
 
+// A healthy mutation holds this lock only long enough to read/replace one small durable record.
+// Give that ordinary contention a short opportunity to finish before spawning PowerShell to prove
+// the owner stale. Measure the grace from this contender's first observation of the exact owner,
+// not the owner's persisted wall-clock timestamp; recovery must not trust a future/skewed clock.
+const STALE_OWNER_PROBE_GRACE_MS = 100;
+
 export interface HardLinkMutexHandle {
   readonly owner: LockOwnerRecord;
   release(): Promise<void>;
@@ -201,74 +207,155 @@ export class HardLinkMutex {
   }
 
   private async fixedOwner(): Promise<LockOwnerRecord | null> {
+    return this.ownerAt(this.fixedPath());
+  }
+
+  private async ownerAt(file: string): Promise<LockOwnerRecord | null> {
     try {
-      return parseOwner(await fs.readFile(this.fixedPath(), "utf8"));
+      return parseOwner(await fs.readFile(file, "utf8"));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
   }
 
-  private async reclaimIfProvenStale(owner: LockOwnerRecord): Promise<boolean> {
+  private reclaimElectionPath(staleOwner: LockOwnerRecord, predecessorNonce?: string): string {
+    const dir = path.join(this.locksRoot, "tmp");
+    const suffix = predecessorNonce ? `.after-${predecessorNonce}` : ".root";
+    return path.join(dir, `${this.name}.${staleOwner.nonce}.reclaim${suffix}`);
+  }
+
+  private async claimReclamationAuthority(
+    staleOwner: LockOwnerRecord,
+    contender: LockOwnerRecord,
+  ): Promise<string | null> {
+    const dir = path.join(this.locksRoot, "tmp");
+    await fs.mkdir(dir, { recursive: true });
+    const claim = path.join(dir, `${this.name}.${staleOwner.nonce}.${contender.nonce}.reclaimer`);
+    await writeAndSync(claim, JSON.stringify(contender));
+    try {
+      let electionPath = this.reclaimElectionPath(staleOwner);
+      for (let hop = 0; hop < 64; hop += 1) {
+        try {
+          await fs.link(claim, electionPath);
+          return electionPath;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
+
+        const winner = await this.ownerAt(electionPath);
+        if (!winner) continue;
+        if (winner.nonce === contender.nonce && winner.pid === contender.pid &&
+            winner.processStartTicks === contender.processStartTicks) return electionPath;
+
+        const winnerIdentity = await this.identity.query(winner.pid);
+        const winnerStale = winnerIdentity.status === "not_found" ||
+          (winnerIdentity.status === "live" && winnerIdentity.processStartTicks !== winner.processStartTicks);
+        if (!winnerStale) return null;
+        electionPath = this.reclaimElectionPath(staleOwner, winner.nonce);
+      }
+      throw new StateLockBusyError("State mutex stale-owner recovery election exceeded its bounded chain");
+    } finally {
+      await fs.rm(claim, { force: true }).catch(() => undefined);
+    }
+  }
+
+  private async reclaimIfProvenStale(owner: LockOwnerRecord, contender: LockOwnerRecord): Promise<boolean> {
     const identity = await this.identity.query(owner.pid);
     const stale = identity.status === "not_found" ||
       (identity.status === "live" && identity.processStartTicks !== owner.processStartTicks);
     if (!stale) return false;
-    const stalePath = `${this.fixedPath()}.stale-${randomUUID()}`;
+
+    // Stale proof is intentionally expensive and can complete concurrently in multiple processes.
+    // Elect exactly one live reclaimer for this exact owner nonce before touching the fixed path.
+    // Election links are immutable: if a winner crashes, a successor links a takeover path named
+    // after that stale winner rather than replacing a shared election file. This prevents a delayed
+    // proof from deleting a fresh replacement lock.
+    const authorityPath = await this.claimReclamationAuthority(owner, contender);
+    if (!authorityPath) return false;
     try {
-      await fs.rename(this.fixedPath(), stalePath);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") return true;
-      if (code === "EACCES" || code === "EPERM") return false;
-      throw error;
+      const current = await this.fixedOwner();
+      if (!current) return true;
+      if (current.nonce !== owner.nonce || current.pid !== owner.pid ||
+          current.processStartTicks !== owner.processStartTicks) return false;
+      const stalePath = `${this.fixedPath()}.stale-${randomUUID()}`;
+      try {
+        await fs.rename(this.fixedPath(), stalePath);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return true;
+        if (code === "EACCES" || code === "EPERM") return false;
+        throw error;
+      }
+      await fs.rm(stalePath, { force: true });
+      return true;
+    } finally {
+      // A live winner relinquishes its exact election link after this attempt. If it crashes before
+      // here, later contenders can safely extend the immutable takeover chain after positive proof.
+      await fs.rm(authorityPath, { force: true }).catch(() => undefined);
     }
-    await fs.rm(stalePath, { force: true });
-    return true;
   }
 
   async acquire(): Promise<HardLinkMutexHandle> {
-    await fs.mkdir(this.locksRoot, { recursive: true });
     const identity = await this.identity.current();
     const deadline = this.now() + this.timeoutMs;
-    for (;;) {
-      const owner: LockOwnerRecord = {
-        pid: identity.pid,
-        processStartTicks: identity.processStartTicks,
-        nonce: randomUUID(),
-        acquiredAt: this.now(),
-      };
-      const temp = await this.ownerTemp(owner);
-      try {
-        await fs.link(temp, this.fixedPath());
-        await fs.unlink(temp);
-        let released = false;
-        return {
-          owner,
-          release: async () => {
-            if (released) return;
-            const current = await this.fixedOwner();
-            if (!current || current.nonce !== owner.nonce || current.pid !== owner.pid ||
-                current.processStartTicks !== owner.processStartTicks) {
-              throw new StateLockBusyError("State mutex ownership changed before release");
-            }
-            await fs.unlink(this.fixedPath());
-            released = true;
-          },
-        };
-      } catch (error) {
-        await fs.rm(temp, { force: true }).catch(() => undefined);
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      }
+    const owner: LockOwnerRecord = {
+      pid: identity.pid,
+      processStartTicks: identity.processStartTicks,
+      nonce: randomUUID(),
+      acquiredAt: this.now(),
+    };
+    let contendedOwnerNonce: string | null = null;
+    let contendedSince = 0;
+    // The owner record and nonce are immutable for this acquire attempt. Persist one complete
+    // owner temp and reuse the same inode for every hard-link retry. Recreating/fsyncing identical
+    // metadata on each ordinary EEXIST retry adds avoidable contention latency without improving
+    // the atomicity or stale-owner proof of the fixed hard link.
+    const temp = await this.ownerTemp(owner);
+    let tempExists = true;
+    try {
+      for (;;) {
+        try {
+          await fs.link(temp, this.fixedPath());
+          await fs.unlink(temp);
+          tempExists = false;
+          let released = false;
+          return {
+            owner,
+            release: async () => {
+              if (released) return;
+              const current = await this.fixedOwner();
+              if (!current || current.nonce !== owner.nonce || current.pid !== owner.pid ||
+                  current.processStartTicks !== owner.processStartTicks) {
+                throw new StateLockBusyError("State mutex ownership changed before release");
+              }
+              await fs.unlink(this.fixedPath());
+              released = true;
+            },
+          };
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
 
-      const existing = await this.fixedOwner();
-      if (existing && await this.reclaimIfProvenStale(existing)) continue;
-      // A malformed fixed lock can only come from external corruption; never guess that it is stale.
-      if (!existing && await fs.stat(this.fixedPath()).then(() => true, () => false)) {
-        throw new StateLockBusyError("State mutex owner metadata is unreadable");
+        const existing = await this.fixedOwner();
+        if (existing) {
+          if (contendedOwnerNonce !== existing.nonce) {
+            contendedOwnerNonce = existing.nonce;
+            contendedSince = this.now();
+          }
+          const observedNow = this.now();
+          if ((Math.max(0, observedNow - contendedSince) >= STALE_OWNER_PROBE_GRACE_MS || observedNow >= deadline) &&
+              await this.reclaimIfProvenStale(existing, owner)) continue;
+        }
+        // A malformed fixed lock can only come from external corruption; never guess that it is stale.
+        if (!existing && await fs.stat(this.fixedPath()).then(() => true, () => false)) {
+          throw new StateLockBusyError("State mutex owner metadata is unreadable");
+        }
+        if (this.now() >= deadline) throw new StateLockBusyError();
+        await this.sleep(this.pollMs);
       }
-      if (this.now() >= deadline) throw new StateLockBusyError();
-      await this.sleep(this.pollMs);
+    } finally {
+      if (tempExists) await fs.rm(temp, { force: true }).catch(() => undefined);
     }
   }
 

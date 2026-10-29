@@ -46,7 +46,11 @@ export async function createProductionStateContext(
   const supportedConcurrency = options.maxConcurrentTurns ?? releaseReadiness().supportedConcurrency;
   const admissionLease = new DurableAdmissionLease(stateDirectory, profileIdentityHash, {
     identity: processIdentity,
-    mutex: { identity: processIdentity },
+    // Profile admission is the one intentionally contended short mutex when multiple T3 threads
+    // start together. Poll it more closely than the general-purpose 25 ms mutex default so a
+    // contender does not pay one or more full 25 ms sleeps after the fsynced lease-state write has
+    // already released. Stale-owner proof still uses the mutex's independent 100 ms grace.
+    mutex: { identity: processIdentity, pollMs: 5 },
     maxConcurrentTurns: supportedConcurrency,
     maxQueuedTurns: options.maxQueuedTurns ?? (supportedConcurrency > 1 ? 8 : 0),
   });

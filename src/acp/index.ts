@@ -273,6 +273,37 @@ export class AcpBridgeRuntime {
     return latest;
   }
 
+  private async reconcileDrainedHistoricalProviderTurn(
+    session: SessionState,
+    pendingInputId: string,
+  ): Promise<SessionState | null> {
+    const sessionRead = this.options.controller.session;
+    const requireBackgroundWorkDisabled = this.options.controller.requireBackgroundWorkDisabled;
+    const assistantContentChunk = this.options.controller.assistantContentChunk;
+    const streamEvents = this.options.controller.streamEvents;
+    if (!sessionRead || !requireBackgroundWorkDisabled || !assistantContentChunk || !streamEvents) return null;
+    const summary = await sessionRead.call(this.options.controller, session.sessionId);
+    const attested = summary.providerTurn;
+    if (attested?.inputId !== pendingInputId || attested.state !== "drained") return null;
+    const recovered = await this.driveDurableProviderTurn({
+      session: sessionRead.bind(this.options.controller),
+      requireBackgroundWorkDisabled: requireBackgroundWorkDisabled.bind(this.options.controller),
+      assistantContentChunk: assistantContentChunk.bind(this.options.controller),
+      streamEvents: streamEvents.bind(this.options.controller),
+    }, {
+      sessionId: session.sessionId,
+      emit: async () => undefined,
+    });
+    if (!recovered.terminal) {
+      throw new BridgeError("session_broken", "Drained provider turn recovery ended without authoritative terminal proof");
+    }
+    const settled = await this.refreshDurable(session.sessionId);
+    if (settled.providerTranslation || settled.activeInputId || settled.admissionLeaseId) {
+      throw new BridgeError("session_broken", "Drained provider turn recovery did not settle the old durable generation");
+    }
+    return settled;
+  }
+
   private async ensureDurableCreated(session: SessionState): Promise<SessionState> {
     if (!this.options.durableStore) return session;
     const tagged = await this.options.durableStore.readSession(session.sessionId);
@@ -1196,9 +1227,10 @@ export class AcpBridgeRuntime {
           });
         }
         session = await this.applyDurableTransition(session.sessionId, { kind: "promote_mode", inputId: pendingInputId, generation });
-        throw new BridgeError("input_busy", "The previously delivered provider turn must finish before a new prompt is admitted");
-      }
-
+        const settled = await this.reconcileDrainedHistoricalProviderTurn(session, pendingInputId);
+        if (settled) session = settled;
+        else throw new BridgeError("input_busy", "The previously delivered provider turn must finish before a new prompt is admitted");
+      } else {
       const matchingLease = await this.durableLeaseState(session, pendingInputId, generation);
       if (matchingLease === "missing") {
         // No matching profile lease means this prepared input never had authority to POST (or a
@@ -1284,9 +1316,12 @@ export class AcpBridgeRuntime {
               });
             }
             session = await this.applyDurableTransition(session.sessionId, { kind: "promote_mode", inputId: pendingInputId, generation });
-            throw new BridgeError("input_busy", "The previously accepted provider input must finish before a new prompt is admitted");
+            const settled = await this.reconcileDrainedHistoricalProviderTurn(session, pendingInputId);
+            if (settled) session = settled;
+            else throw new BridgeError("input_busy", "The previously accepted provider input must finish before a new prompt is admitted");
           }
         }
+      }
       }
     }
 

@@ -54,9 +54,13 @@ describe("v1 release gate manifest", () => {
     expect(readiness.eventTranslatorReady).toBe(v1ReleaseGateManifest.gates.eventTranslator.status === "pass");
     expect(readiness.durableRecoveryReady).toBe(v1ReleaseGateManifest.gates.durableRecovery.status === "pass");
     expect(readiness.productionAcpEntrypoint).toBe(v1ReleaseGateManifest.gates.acpStdio.status === "pass");
-    expect(readiness.liveAcceptanceRequired).toBe(v1ReleaseGateManifest.gates.liveAcceptance.status !== "pass");
+    const baselineQualified = v1ReleaseGateManifest.qualifiedT3Sha === compatibility.t3.sha;
+    expect(readiness.t3BaselineQualified).toBe(baselineQualified);
+    expect(readiness.liveAcceptanceRequired).toBe(
+      v1ReleaseGateManifest.gates.liveAcceptance.status !== "pass" || !baselineQualified,
+    );
     expect(readiness.currentHeadDriftRequired).toBe(v1ReleaseGateManifest.gates.t3HeadDrift.status !== "pass");
-    expect(readiness.releaseQualified).toBe(allPassed);
-    if (!allPassed) expect(readiness.releaseQualified).toBe(false);
+    expect(readiness.releaseQualified).toBe(allPassed && baselineQualified);
+    if (!allPassed || !baselineQualified) expect(readiness.releaseQualified).toBe(false);
   });
 });

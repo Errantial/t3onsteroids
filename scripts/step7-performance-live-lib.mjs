@@ -36,7 +36,7 @@ export function directNoToolPrompt(expectedText) {
   if (typeof expectedText !== "string" || expectedText.length === 0) {
     throw new TypeError("expectedText must be a non-empty string");
   }
-  return `Reply with exactly this token and nothing else. Do not append citations, source links, app links, plugin links, tool references, markdown, or commentary. Do not use tools. Token: ${expectedText}`;
+  return `Pure text echo test. Reply with exactly this token and nothing else. Use only this message; do not inspect project files, repository contents, instructions, location, apps, links, or the web. Do not invoke any tool or page action. Do not append citations, links, markdown, commentary, or tool references. Token: ${expectedText}`;
 }
 
 export function directProviderInput({ inputId, expectedText, projectId }) {

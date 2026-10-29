@@ -44,6 +44,11 @@ export function browserHealthy(snapshot) {
   return snapshot?.connectionState === "connected" && snapshot?.bridgePaired === true && snapshot?.bridgePresent === true;
 }
 
+/** Browser readiness for the provider-control lane, independent of the app's Core MCP tunnel. */
+export function providerBrowserReady(snapshot) {
+  return snapshot?.bridgePaired === true && snapshot?.bridgePresent === true;
+}
+
 export function summarizeStatus(status) {
   const row = asObject(status);
   const connection = asObject(row.connection);
@@ -66,6 +71,38 @@ export function isRestartCheckpointLifecycleUpdate(update) {
     && /^cos-event:\d+$/.test(row.toolCallId)
     && (row.title === "Executed workflow restart checkpoint"
       || row.title === "Restarted the development workflow");
+}
+
+/**
+ * Build the synthetic stale terminal row used by post-v1 cross-session qualification. Session
+ * sequence numbers are independent, so only the target session decides how old the injected row
+ * is. The provider input identity comes from the authoritative drain row, not turn_end.
+ */
+export function buildCrossSessionStaleFixture(sourceEvents, targetEvents, sourceSessionId) {
+  if (!Array.isArray(sourceEvents) || !Array.isArray(targetEvents) || typeof sourceSessionId !== "string" || !sourceSessionId) return null;
+  const sourceTurnEnd = [...sourceEvents].reverse().find((event) => event?.kind === "turn_end" && typeof event?.turnId === "string");
+  const sourceDrain = sourceTurnEnd
+    ? [...sourceEvents].reverse().find((event) => event?.kind === "turn_drained" && event?.turnId === sourceTurnEnd.turnId && typeof event?.inputId === "string")
+    : null;
+  const targetSequences = targetEvents.map((event) => event?.seq).filter(Number.isSafeInteger);
+  const targetLastSeq = targetSequences.length > 0 ? Math.max(...targetSequences) : Number.NaN;
+  if (!sourceTurnEnd || !sourceDrain?.inputId || !Number.isSafeInteger(targetLastSeq) || targetLastSeq < 2) return null;
+  const injectedSeq = targetLastSeq - 1;
+  return {
+    fixture: {
+      seq: injectedSeq,
+      position: sourceTurnEnd.position,
+      time: sourceTurnEnd.time,
+      kind: "turn_end",
+      source: sourceTurnEnd.source,
+      turnId: sourceTurnEnd.turnId,
+      inputId: sourceDrain.inputId,
+      sessionId: sourceSessionId,
+      outcome: sourceTurnEnd.outcome ?? "completed",
+    },
+    sourceEventSequence: sourceTurnEnd.seq,
+    targetLastSeq,
+  };
 }
 
 export async function controllerMetadata(discovery) {

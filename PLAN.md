@@ -22,7 +22,7 @@ CoS → T3 through T3's outside-agent MCP surface is a later independent capabil
 
 ## Pinned development baseline
 
-- T3 running desktop/server: `0.0.46-nightly.20261013.3040`, source SHA `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`.
+- T3 running desktop/server: `0.1.5-nightly.20261029.3877`, source SHA `6d450a4284852af137b2f3407fddd89eb76e7644`. This is the pinned development baseline; the `v1.0.0` live claim stays on `ffb4af8d…` until requalification.
 - CoS base for development: `2.1.39`, source SHA `87ae9d631f82d8da2f462d910410031ad8f97ac5`, local control API protocol `1`. The usable v1 compatibility tuple is **base SHA + exact provider-extension commit/build + advertised extension feature versions**. Production either requires an upstream CoS release containing those features or an explicitly supported fork/build with equivalent provenance; stock `2.1.39` alone remains sufficient only for the control-protocol spike.
 - ACP TypeScript SDK: pin `@agentclientprotocol/sdk` **1.9.0** exactly for the first implementation lane. Any upgrade is a separate compatibility change with rerun conformance.
 - Windows x64 is the first validated platform.
@@ -1028,13 +1028,16 @@ Do not call the provider compatible until all of the following are true on the p
 
 After v1 is stable, pursue these in this order unless product priorities change:
 
+**Next-release blocker before roadmap qualification:** ordinary integrated-provider Chromium on Windows must remain a normal top-level OS window even when T3 keeps it physically off-screen. Do not map provider `visible:false` to Node `windowsHide:true` / `SW_HIDE`. The 2026-10-26 live regression held one exact provider operation at WAL `highWater=5` for about 24 minutes with healthy T3 polling and no `assistant.final`, terminal or drain; making that exact managed ChatGPT window visible, without restart/cancel/resend, immediately advanced the same operation through sequences 6–20 (`assistant.final`, `operation.terminal`, `operation.drained`) and completed the T3 run at `2026-10-26T22:15:18Z`. Keep `--window-position=-10000,-10000` and the existing renderer/background anti-throttling flags so the managed UX remains off-screen without actually hiding the Windows top-level window. The implementation belongs in the T3 managed-browser Windows launch boundary and must ship with a regression asserting ordinary provider launches do not request `windowsHide:true`; live qualification on the patched packaged build remains required before the next release.
+
 1. **2–4 concurrent CoS chats/threads — implementation complete; qualification pending.** Durable scheduler implementation is committed at b8640281c52b932bc7f8cd3d6f5048164a7beb0a on feat/post-v1-concurrency. It retains one active root turn per bound session, coordinates a bounded profile-wide active set and FIFO queue across processes, and supports exact queued cancellation and safe release/recovery. Offline implementation is not live qualification: first pass the isolated two-chat gate, then the four-chat gate. Record independent cancellation, queue/slot reuse, crash/restart, SSE reconnect, cross-session stale-event behavior, controller utilization, queue depth, latency and aggregate RSS. Compute p95 with the nearest-rank rule and compare against the documented v1 bridge-overhead/drain budgets. Keep supportedConcurrency at 1 until two-chat evidence passes; raise it to 2 only then. Raise it to 4 only after four-chat evidence proves the controller's four-SSE global cap leaves sufficient capacity for controller overhead and other CoS activity. If it does not, implement and test a versioned multiplexed event-stream contract before advertising a higher ceiling. releaseQualified remains derived from the independent v1 release gates and must remain false while any required gate is pending.
-2. model/reasoning selection bound to an exact CoS input;
-3. pre-effect external approval/question routing so T3 can own those interactions;
-4. deliberate T3 MCP forwarding/namespacing into CoS;
-5. CoS worker/subagent projection into T3 native subagent UI;
-6. ACP v2-only features where they add concrete value;
-7. macOS/Linux packaging and conformance;
-8. CoS→T3 outside-agent MCP packaging;
-9. optional legacy T3 `v0.0.42` lane;
-10. native T3 provider only if a measured ACP limitation cannot be solved at the CoS/controller layer.
+2. **Integrate the CoS connector/OpenAI Secure Tunnel directly into T3 Code.** The target end state is that a supported T3 desktop/server installation can publish and maintain its ChatGPT-facing connector route without requiring the user to launch or supervise a separate CoS connector/tunnel process. T3 owns tunnel process lifecycle, startup/shutdown, reconnect/backoff, health/readiness, route publication/revocation, credential rotation, packaging, updates and visible diagnostics. Preserve strict credential separation: the external tunnel/control-plane credential is never reused as the provider/MCP bearer; caller `Authorization` is stripped at the public edge; only the in-memory T3 provider credential is injected toward the scoped local MCP route. Bind each published route immutably to one exact provider session/thread authority and revoke it when that authority ends or rotates. Ambiguous committed MCP mutations are never auto-replayed after reconnect. Existing provider-relay/tunnel prototypes are foundations only and do not count as completion until the shipped T3 runtime owns the whole lifecycle. Qualification must include real hosted ChatGPT custom-MCP discovery, tool call and cancellation; tunnel loss/reconnect and route-settle recovery; provider/tunnel restart; credential rotation; two simultaneous provider sessions proving no cross-session routing or credential leakage; stale/revoked route rejection; and an installed-package smoke proving no separately launched CoS connector/tunnel process is required. This feature is distinct from T3 Connect and must not weaken the native ChatGPT Browser provider's exact operation/session identity guarantees.
+3. model/reasoning selection bound to an exact CoS input;
+4. pre-effect external approval/question routing so T3 can own those interactions;
+5. deliberate T3 MCP forwarding/namespacing into CoS;
+6. CoS worker/subagent projection into T3 native subagent UI;
+7. ACP v2-only features where they add concrete value;
+8. macOS/Linux packaging and conformance;
+9. CoS→T3 outside-agent MCP packaging, using the T3-owned connector/tunnel lifecycle above rather than a separately supervised CoS tunnel;
+10. optional legacy T3 `v0.0.42` lane;
+11. native T3 provider only if a measured ACP limitation cannot be solved at the CoS/controller layer.

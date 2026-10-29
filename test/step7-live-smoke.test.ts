@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildCrossSessionStaleFixture,
   evaluateRestartEvidence,
   evaluateSseReconnectEvidence,
   isRestartCheckpointLifecycleUpdate,
   parseOptions,
+  providerBrowserReady,
   proveProviderSessionInputs,
   summarizeStatus,
 } from "../scripts/step7-live-smoke-lib.mjs";
@@ -122,6 +124,40 @@ describe("Step 7 live-smoke harness evaluation", () => {
       title: "Executed workflow restart checkpoint",
       status: "completed",
     })).toBe(false);
+    for (const title of ["Computed current working directory", "Invoked plugin despite user’s no-tools instruction"]) {
+      expect(isRestartCheckpointLifecycleUpdate({
+        sessionUpdate: "tool_call",
+        toolCallId: "cos-event:99",
+        title,
+        kind: "other",
+        status: "completed",
+      })).toBe(false);
+    }
+  });
+
+  it("builds cross-session stale evidence from drain identity without comparing independent session cursors", () => {
+    const setup = buildCrossSessionStaleFixture([
+      { seq: 900, position: 12, time: 100, kind: "turn_end", source: "extension", turnId: "source-turn", outcome: "completed" },
+      { seq: 901, position: 13, time: 101, kind: "turn_drained", source: "app", turnId: "source-turn", inputId: "source-input" },
+    ], [
+      { seq: 4, kind: "turn_end" },
+      { seq: 5, kind: "turn_drained" },
+    ], "source-session");
+    expect(setup).toEqual({
+      fixture: {
+        seq: 4,
+        position: 12,
+        time: 100,
+        kind: "turn_end",
+        source: "extension",
+        turnId: "source-turn",
+        inputId: "source-input",
+        sessionId: "source-session",
+        outcome: "completed",
+      },
+      sourceEventSequence: 900,
+      targetLastSeq: 5,
+    });
   });
 
   it("parses only explicit option pairs and summarizes browser status without retaining unrelated fields", () => {
@@ -132,5 +168,11 @@ describe("Step 7 live-smoke harness evaluation", () => {
       bridge: { paired: true, present: true, pageText: "private" },
       token: "secret",
     })).toEqual(healthyBrowser);
+  });
+
+  it("treats provider browser readiness as pairing/presence, independent of the Core MCP tunnel", () => {
+    expect(providerBrowserReady({ connectionState: "disconnected", bridgePaired: true, bridgePresent: true })).toBe(true);
+    expect(providerBrowserReady({ connectionState: "connected", bridgePaired: false, bridgePresent: true })).toBe(false);
+    expect(providerBrowserReady({ connectionState: "connected", bridgePaired: true, bridgePresent: false })).toBe(false);
   });
 });

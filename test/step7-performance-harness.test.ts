@@ -18,7 +18,7 @@ const healthyBrowser = { connectionState: "connected", bridgePaired: true, bridg
 describe("Step 7 live performance harness", () => {
   it("uses an explicit no-tool exact-reply prompt for the paired direct baseline", () => {
     expect(directNoToolPrompt("STEP7-DIRECT-01-token")).toBe(
-      "Reply with exactly this token and nothing else. Do not append citations, source links, app links, plugin links, tool references, markdown, or commentary. Do not use tools. Token: STEP7-DIRECT-01-token",
+      "Pure text echo test. Reply with exactly this token and nothing else. Use only this message; do not inspect project files, repository contents, instructions, location, apps, links, or the web. Do not invoke any tool or page action. Do not append citations, links, markdown, commentary, or tool references. Token: STEP7-DIRECT-01-token",
     );
   });
 
@@ -29,7 +29,7 @@ describe("Step 7 live performance harness", () => {
       projectId: "22222222-2222-4222-8222-222222222222",
     })).toEqual({
       id: "11111111-1111-4111-8111-111111111111",
-      text: "Reply with exactly this token and nothing else. Do not append citations, source links, app links, plugin links, tool references, markdown, or commentary. Do not use tools. Token: STEP7-DIRECT-01-token",
+      text: "Pure text echo test. Reply with exactly this token and nothing else. Use only this message; do not inspect project files, repository contents, instructions, location, apps, links, or the web. Do not invoke any tool or page action. Do not append citations, links, markdown, commentary, or tool references. Token: STEP7-DIRECT-01-token",
       projectId: "22222222-2222-4222-8222-222222222222",
       providerPolicy: { backgroundWork: "disabled" },
     });

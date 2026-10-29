@@ -450,6 +450,18 @@ export class CosControllerClient {
           lastError = mapped;
           continue;
         }
+        // GET/read-effect requests are idempotent. The controller deliberately reports transient
+        // owner/read saturation as retryable request_failed (503/504, plus a just-created session
+        // projection as 404). Honor that contract here instead of making callers race the app's
+        // bounded read slots themselves. Mutation requests never set retryRead, and queue_full /
+        // rate_limited keep their existing one-shot behavior.
+        if (options.retryRead && mapped.code === "request_failed" && mapped.retryable && attempt < maxAttempts) {
+          lastError = mapped;
+          const delay = Math.min(this.retryPolicy.baseDelayMs * 2 ** (attempt - 1), this.retryPolicy.maxDelayMs);
+          this.bridgeMetrics?.increment("backoffCount");
+          await sleep(delay);
+          continue;
+        }
         throw mapped;
       } catch (cause) {
         if (cause instanceof CosControllerError) throw cause;
@@ -615,8 +627,14 @@ export class CosControllerClient {
     return { id: asString(row.id, "input.id"), sessionId: optionalString(row.sessionId, "input.sessionId"), delivery: delivery as CosInputRecord["delivery"] };
   }
 
-  async events(sessionId: string, from?: number): Promise<readonly CosEvent[]> {
-    const suffix = from === undefined ? "" : `?from=${encodeURIComponent(String(from))}`;
+  async events(sessionId: string, from?: number, limit?: number): Promise<readonly CosEvent[]> {
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) {
+      throw new CosControllerError("schema_mismatch", "events limit must be an integer between 1 and 100");
+    }
+    const query = new URLSearchParams();
+    if (from !== undefined) query.set("from", String(from));
+    if (limit !== undefined) query.set("limit", String(limit));
+    const suffix = query.size === 0 ? "" : `?${query.toString()}`;
     const value = await this.readJson(`/v1/sessions/${encodeURIComponent(sessionId)}/events${suffix}`);
     const rows = asRecord(value, "events").events;
     if (!Array.isArray(rows)) throw new CosControllerError("schema_mismatch", "events response must contain an events array");
@@ -634,6 +652,37 @@ export class CosControllerClient {
     });
   }
 
+  /**
+   * Read a bounded complete forward history window. The controller caps each events page at 100
+   * rows, so qualification and recovery proofs that need more than one page must advance by the
+   * immutable sequence cursor rather than treating the first page as the whole session.
+   */
+  async eventHistory(sessionId: string, options: { from?: number; maxEvents?: number } = {}): Promise<readonly CosEvent[]> {
+    const maxEvents = options.maxEvents ?? 2_000;
+    if (!Number.isSafeInteger(maxEvents) || maxEvents < 1 || maxEvents > 10_000) {
+      throw new CosControllerError("schema_mismatch", "event history maxEvents must be an integer between 1 and 10000");
+    }
+    let cursor = options.from ?? 0;
+    const result: CosEvent[] = [];
+    for (;;) {
+      const remaining = maxEvents - result.length;
+      if (remaining <= 0) {
+        const overflow = await this.events(sessionId, cursor, 1);
+        if (overflow.length === 0) return result;
+        throw new CosControllerError("schema_mismatch", `event history exceeded bounded limit ${maxEvents}`);
+      }
+      const pageLimit = Math.min(100, remaining);
+      const page = await this.events(sessionId, cursor, pageLimit);
+      if (page.length === 0) return result;
+      let next = cursor;
+      for (const event of page) next = Math.max(next, event.seq + 1);
+      if (next <= cursor) throw new CosControllerError("schema_mismatch", "event history cursor did not advance");
+      result.push(...page);
+      cursor = next;
+      if (page.length < pageLimit) return result;
+    }
+  }
+
   private validateMutation(input: CosSendInput): void {
     if (!UUID_RE.test(input.id)) throw new CosControllerError("schema_mismatch", "CoS input id must be a lowercase UUID");
     if (input.text.length > 64_000) throw new CosControllerError("schema_mismatch", "CoS input text exceeds 64,000 characters");
@@ -641,10 +690,12 @@ export class CosControllerClient {
 
   async send(input: CosSendInput): Promise<CosInputRecord> {
     this.validateMutation(input);
-    const readiness = input.providerPolicy ? await this.requireProviderExtension() : await this.health();
-    if (!readiness.actionsEnabled) throw new CosControllerError("actions_disabled", "CoS controller actions are disabled");
-    if (input.providerPolicy !== undefined && input.providerPolicy.backgroundWork !== "disabled") {
-      throw new CosControllerError("provider_policy_unavailable", "Bridge-created provider sessions require backgroundWork=disabled");
+    if (input.providerPolicy !== undefined) {
+      const readiness = await this.requireProviderExtension();
+      if (!readiness.actionsEnabled) throw new CosControllerError("actions_disabled", "CoS controller actions are disabled");
+      if (input.providerPolicy.backgroundWork !== "disabled") {
+        throw new CosControllerError("provider_policy_unavailable", "Bridge-created provider sessions require backgroundWork=disabled");
+      }
     }
     try {
       const response = await this.request("/v1/inputs", {

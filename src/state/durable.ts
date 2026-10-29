@@ -263,12 +263,12 @@ async function readJournalFile(file: string): Promise<Buffer> {
   throw new StateIoError("read", new Error("Durable state read retry budget exhausted"));
 }
 
-async function replaceSyncedFile(temp: string, target: string, contents: string): Promise<void> {
+async function replaceSyncedFile(temp: string, target: string, contents: string): Promise<"renamed" | "matched"> {
   const maxAttempts = stateIoAttempts();
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       await fs.rename(temp, target);
-      return;
+      return "renamed";
     } catch (error) {
       if (!isWindowsSharingError(error)) throw new StateIoError("replace", error);
 
@@ -277,7 +277,7 @@ async function replaceSyncedFile(temp: string, target: string, contents: string)
       // transition: retry only this already-written+fsynced temp replacement. If the syscall
       // actually committed before surfacing a sharing error, exact byte equality proves it.
       try {
-        if (await fs.readFile(target, "utf8") === contents) return;
+        if (await fs.readFile(target, "utf8") === contents) return "matched";
       } catch {
         // Missing or temporarily unreadable target is not proof of commit; keep the old journal
         // intact and retry the same temp file below.
@@ -286,6 +286,7 @@ async function replaceSyncedFile(temp: string, target: string, contents: string)
       await new Promise((resolve) => setTimeout(resolve, stateIoRetryDelayMs(attempt)));
     }
   }
+  throw new StateIoError("replace", new Error("Durable state replace retry budget exhausted"));
 }
 
 function withoutUndefined<T extends object>(value: T): T {
@@ -673,11 +674,20 @@ export class DurableSessionStore {
 
   async readSession(sessionId: string): Promise<TaggedSessionRead> {
     await this.init();
-    const quarantined = await this.activeQuarantine(sessionId);
+    // Healthy reads need both independent files: the quarantine marker establishes precedence,
+    // while the session journal provides the state. Start those lock-free reads together, then
+    // preserve quarantine precedence even if the journal read concurrently fails.
+    const [quarantineRead, journalRead] = await Promise.allSettled([
+      this.activeQuarantine(sessionId),
+      readJournalFile(this.sessionPath(sessionId)),
+    ]);
+    if (quarantineRead.status === "rejected") throw quarantineRead.reason;
+    const quarantined = quarantineRead.value;
     if (quarantined) {
       if (quarantined.reason === "state_schema_unsupported") {
         try {
-          const bytes = await readJournalFile(this.sessionPath(sessionId));
+          if (journalRead.status === "rejected") throw journalRead.reason;
+          const bytes = journalRead.value;
           const parsed = parseRecord(bytes);
           if (parsed.kind === "unsupported") {
             return { status: "unsupportedSchema", sha256: quarantined.sourceSha256, schemaVersion: parsed.schemaVersion };
@@ -686,13 +696,12 @@ export class DurableSessionStore {
       }
       return { status: "corrupt", sha256: quarantined.sourceSha256 };
     }
-    let bytes: Buffer;
-    try {
-      bytes = await readJournalFile(this.sessionPath(sessionId));
-    } catch (error) {
+    if (journalRead.status === "rejected") {
+      const error = journalRead.reason;
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return { status: "missing" };
       throw error;
     }
+    const bytes = journalRead.value;
     const digest = sha256(bytes);
     const parsed = parseRecord(bytes);
     if (parsed.kind === "found") return { status: "found", value: parsed.value };
@@ -708,16 +717,17 @@ export class DurableSessionStore {
     const target = this.sessionPath(record.sessionId);
     const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
     const contents = JSON.stringify(withoutUndefined(record));
+    let tempExists = true;
     try {
       try {
         await writeAndSync(temp, contents);
-        await replaceSyncedFile(temp, target, contents);
+        if (await replaceSyncedFile(temp, target, contents) === "renamed") tempExists = false;
       } catch (error) {
         if (error instanceof StateIoError) throw error;
         throw new StateIoError("write", error);
       }
     } finally {
-      await fs.rm(temp, { force: true }).catch(() => undefined);
+      if (tempExists) await fs.rm(temp, { force: true }).catch(() => undefined);
     }
   }
 

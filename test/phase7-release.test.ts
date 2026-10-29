@@ -55,10 +55,15 @@ describe("Phase 7 release readiness", () => {
       eventTranslatorReady: v1ReleaseGateManifest.gates.eventTranslator.status === "pass",
       durableRecoveryReady: v1ReleaseGateManifest.gates.durableRecovery.status === "pass",
     });
-    expect(readiness.liveAcceptanceRequired).toBe(v1ReleaseGateManifest.gates.liveAcceptance.status !== "pass");
+    const baselineQualified = v1ReleaseGateManifest.qualifiedT3Sha === compatibility.t3.sha;
+    expect(readiness.t3BaselineQualified).toBe(baselineQualified);
+    expect(readiness.liveAcceptanceRequired).toBe(
+      v1ReleaseGateManifest.gates.liveAcceptance.status !== "pass" || !baselineQualified,
+    );
     expect(readiness.currentHeadDriftRequired).toBe(v1ReleaseGateManifest.gates.t3HeadDrift.status !== "pass");
     expect(readiness.releaseQualified).toBe(
-      Object.values(v1ReleaseGateManifest.gates).every((gate) => gate.status === "pass"),
+      baselineQualified &&
+        Object.values(v1ReleaseGateManifest.gates).every((gate) => gate.status === "pass"),
     );
   });
 

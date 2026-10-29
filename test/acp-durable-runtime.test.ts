@@ -1167,6 +1167,96 @@ describe("durable ACP runtime boundaries", () => {
     expect(ctrl.send).not.toHaveBeenCalled();
   });
 
+  it("reconciles a remotely drained sent generation after restart before admitting the next prompt", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    const pendingId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const nextInputId = secondSessionId;
+    await store.updateSession(sessionId, {
+      kind: "create",
+      state: {
+        sessionId, cwd: "C:\\repo", canonicalCwd: "C:\\repo", cosProjectId: "project-1",
+        bindingState: "bound", interactionMode: "default", cancelIntent: "none", generation: 1,
+      },
+    });
+    await store.updateSession(sessionId, { kind: "begin_input", inputId: pendingId, generation: 2, leaseId: journalLeaseId });
+    await store.updateSession(sessionId, { kind: "mark_dispatched", inputId: pendingId, generation: 2 });
+    await lease.acquire({ sessionId, inputId: pendingId, generation: 2, ownerId: "crashed-owner", leaseId: journalLeaseId });
+    const send = vi.fn(async (input: { id: string; sessionId?: string }) => ({
+      id: input.id, sessionId: input.sessionId ?? sessionId, delivery: "sent" as const,
+    }));
+    const ctrl = controller({
+      input: vi.fn(async (id: string) => ({ id, sessionId, delivery: "sent" as const })),
+      session: vi.fn(async () => ({
+        id: sessionId,
+        providerTurn: { inputId: pendingId, state: "drained" as const, turnId, drainedSeq: 3, finalAssistantSeq: null },
+      })),
+      assistantContentChunk: vi.fn(async () => { throw new Error("no historical assistant body expected"); }),
+      streamEvents: async function* () {
+        yield { seq: 1, position: 1, time: 1, kind: "turn_start" as const, source: "extension" as const, turnId };
+        yield { seq: 2, position: 2, time: 2, kind: "turn_end" as const, source: "extension" as const, turnId, outcome: "completed" as const };
+        yield { seq: 3, position: 3, time: 3, kind: "turn_drained" as const, source: "app" as const, turnId, inputId: pendingId, highWaterSeq: 3, finalAssistantSeq: null };
+      },
+      send,
+    });
+    const restarted = runtime(ctrl, store, lease, () => nextInputId);
+
+    const result = await restarted.prompt({ sessionId, prompt: [{ type: "text", text: "new prompt after crash" }] });
+
+    expect(result.session).toMatchObject({ generation: 3, activeInputId: nextInputId, bindingState: "bound" });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ id: nextInputId, sessionId }));
+    await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { inputId: nextInputId, generation: 3 } });
+    await expect(store.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { generation: 3, activeInputId: nextInputId, cosEventCursor: 3 },
+    });
+  });
+
+  it("reconciles a remotely drained generation when its exact provider turn was already bound before crash", async () => {
+    const root = await tempRoot();
+    const { store, lease } = durable(root);
+    const pendingId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const nextInputId = secondSessionId;
+    await store.updateSession(sessionId, {
+      kind: "create",
+      state: {
+        sessionId, cwd: "C:\\repo", canonicalCwd: "C:\\repo", cosProjectId: "project-1",
+        bindingState: "bound", interactionMode: "default", cancelIntent: "none", generation: 1,
+      },
+    });
+    await store.updateSession(sessionId, { kind: "begin_input", inputId: pendingId, generation: 2, leaseId: journalLeaseId });
+    await store.updateSession(sessionId, { kind: "mark_dispatched", inputId: pendingId, generation: 2 });
+    await store.updateSession(sessionId, { kind: "bind_turn", inputId: pendingId, generation: 2, turnId });
+    await lease.acquire({ sessionId, inputId: pendingId, generation: 2, ownerId: "crashed-owner", leaseId: journalLeaseId });
+    const send = vi.fn(async (input: { id: string; sessionId?: string }) => ({
+      id: input.id, sessionId: input.sessionId ?? sessionId, delivery: "sent" as const,
+    }));
+    const ctrl = controller({
+      session: vi.fn(async () => ({
+        id: sessionId,
+        providerTurn: { inputId: pendingId, state: "drained" as const, turnId, drainedSeq: 3, finalAssistantSeq: null },
+      })),
+      assistantContentChunk: vi.fn(async () => { throw new Error("no historical assistant body expected"); }),
+      streamEvents: async function* () {
+        yield { seq: 2, position: 2, time: 2, kind: "turn_end" as const, source: "extension" as const, turnId, outcome: "completed" as const };
+        yield { seq: 3, position: 3, time: 3, kind: "turn_drained" as const, source: "app" as const, turnId, inputId: pendingId, highWaterSeq: 3, finalAssistantSeq: null };
+      },
+      send,
+    });
+    const restarted = runtime(ctrl, store, lease, () => nextInputId);
+
+    const result = await restarted.prompt({ sessionId, prompt: [{ type: "text", text: "new prompt after bound-turn crash" }] });
+
+    expect(result.session).toMatchObject({ generation: 3, activeInputId: nextInputId, bindingState: "bound" });
+    expect(send).toHaveBeenCalledTimes(1);
+    await expect(lease.read()).resolves.toMatchObject({ status: "found", lease: { inputId: nextInputId, generation: 3 } });
+    await expect(store.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { generation: 3, activeInputId: nextInputId, cosEventCursor: 3 },
+    });
+  });
+
   it("wires the controller driver through narrow durable checkpoints and releases only after accepted drain terminal", async () => {
     const root = await tempRoot();
     const { store, lease } = durable(root);

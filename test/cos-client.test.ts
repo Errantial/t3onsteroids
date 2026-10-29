@@ -174,6 +174,40 @@ describe("CoS protocol-1 controller client", () => {
     await expect(client.send({ id, text: "hello" })).rejects.toMatchObject({ code: "schema_mismatch" });
   });
 
+  it("does not add a redundant health round trip before a follow-up input mutation", async () => {
+    const id = "11111111-1111-4111-8111-222222222222";
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const text = String(url);
+      if (text.endsWith("/v1/inputs") && init?.method === "POST") {
+        return jsonResponse({ input: { id, sessionId: "session-1", delivery: "pending" }, replayed: false }, 202);
+      }
+      throw new Error(`unexpected ${text}`);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch });
+
+    await expect(client.send({ id, sessionId: "session-1", text: "hello" })).resolves.toEqual({
+      id,
+      sessionId: "session-1",
+      delivery: "pending",
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("still maps actions-disabled directly from the follow-up input mutation", async () => {
+    const id = "11111111-1111-4111-8111-333333333333";
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const text = String(url);
+      if (text.endsWith("/v1/inputs") && init?.method === "POST") {
+        return jsonResponse({ error: "actions_disabled" }, 403);
+      }
+      throw new Error(`unexpected ${text}`);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch });
+
+    await expect(client.send({ id, sessionId: "session-1", text: "hello" })).rejects.toMatchObject({ code: "actions_disabled" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("returns delivery_unconfirmed when ambiguous send has no authoritative row", async () => {
     const id = "22222222-2222-4222-8222-222222222222";
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -185,6 +219,68 @@ describe("CoS protocol-1 controller client", () => {
     });
     const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch });
     await expect(client.send({ id, text: "hello" })).rejects.toMatchObject({ code: "delivery_unconfirmed", retryable: false });
+  });
+
+  it("requests an explicit bounded event page when a caller needs more than the default history window", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      const text = String(url);
+      if (text === "http://127.0.0.1:9/v1/sessions/session/events?from=0&limit=100") {
+        return jsonResponse({ events: [], total: 0, nextFrom: 0 });
+      }
+      throw new Error(`unexpected ${text}`);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch });
+    await expect(client.events("session", 0, 100)).resolves.toEqual([]);
+    await expect(client.events("session", 0, 101)).rejects.toMatchObject({ code: "schema_mismatch" });
+  });
+
+  it("paginates bounded event history until the forward cursor is exhausted", async () => {
+    const seen: string[] = [];
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      const text = String(url);
+      seen.push(text);
+      const parsed = new URL(text);
+      const from = Number(parsed.searchParams.get("from"));
+      const limit = Number(parsed.searchParams.get("limit"));
+      if (limit !== 100) throw new Error(`unexpected limit ${limit}`);
+      if (from === 0) {
+        return jsonResponse({
+          events: Array.from({ length: 100 }, (_, index) => ({
+            seq: index + 1, position: index + 1, time: index + 1, kind: "assistant_message", source: "extension",
+          })),
+          total: 101,
+          nextFrom: 101,
+        });
+      }
+      if (from === 101) {
+        return jsonResponse({
+          events: [{ seq: 101, position: 101, time: 101, kind: "turn_drained", source: "app" }],
+          total: 101,
+          nextFrom: 102,
+        });
+      }
+      throw new Error(`unexpected ${text}`);
+    });
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch });
+    const rows = await client.eventHistory("session", { from: 0, maxEvents: 200 });
+    expect(rows).toHaveLength(101);
+    expect(rows.at(-1)).toMatchObject({ seq: 101, kind: "turn_drained" });
+    expect(seen).toEqual([
+      "http://127.0.0.1:9/v1/sessions/session/events?from=0&limit=100",
+      "http://127.0.0.1:9/v1/sessions/session/events?from=101&limit=100",
+    ]);
+  });
+
+  it("fails closed when bounded event history reaches its maximum without exhausting the page", async () => {
+    const fetch = vi.fn(async () => jsonResponse({
+      events: Array.from({ length: 100 }, (_, index) => ({
+        seq: index + 1, position: index + 1, time: index + 1, kind: "assistant_message", source: "extension",
+      })),
+      total: 101,
+      nextFrom: 101,
+    }));
+    const client = new CosControllerClient(async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }), { fetch });
+    await expect(client.eventHistory("session", { from: 0, maxEvents: 100 })).rejects.toMatchObject({ code: "schema_mismatch" });
   });
 
   it("waits for the exact matching turn_end after Stop", async () => {
@@ -400,6 +496,21 @@ describe("CoS protocol-1 controller client", () => {
       status: 503,
       retryable: true,
     });
+  });
+
+  it("retries transient request_failed responses only for safe reads", async () => {
+    const fetch = vi.fn(async () => fetch.mock.calls.length === 1
+      ? jsonResponse({ error: "busy", detail: "too many journal reads in flight; retry shortly" }, 503)
+      : jsonResponse({ session: { id: "session-1", activeTurnId: null } }));
+    const client = new CosControllerClient(
+      async () => ({ baseUrl: "http://127.0.0.1:9", token: "secret" }),
+      { fetch },
+      { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1 },
+    );
+
+    await expect(client.session("session-1")).resolves.toMatchObject({ id: "session-1" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(client.metrics()).toMatchObject({ readAttempts: 2, readRetries: 1 });
   });
 
   it("classifies a bounded controller read deadline as retryable", async () => {

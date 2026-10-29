@@ -1,0 +1,287 @@
+From 073782780594669c41e301601110ef907d701a6f Mon Sep 17 00:00:00 2001
+From: Emil <emil.grotta@colorado.edu>
+Date: Thu, 29 Oct 2026 08:31:26 -0600
+Subject: [PATCH] feat(acp): report per-turn token usage from the prompt
+ response
+
+Map the usage an ACP agent returns with session/prompt into the normalized
+per-turn TurnTokenUsage on the provider turn, so features that read it (such
+as the tokens/sec readout) work for ACP providers.
+
+ACP marks the field unstable and does not say whether outputTokens already
+includes thoughtTokens, so a report that carries thought tokens is recorded as
+partial rather than guessed complete. Malformed counts and absent usage leave
+the turn without a total.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../Adapters/AcpAdapterV2.test.ts             | 91 +++++++++++++++++++
+ packages/provider-acp/src/server/adapter.ts   | 11 +++
+ .../src/server/turnTokenUsage.test.ts         | 49 ++++++++++
+ .../provider-acp/src/server/turnTokenUsage.ts | 42 +++++++++
+ 4 files changed, 193 insertions(+)
+ create mode 100644 packages/provider-acp/src/server/turnTokenUsage.test.ts
+ create mode 100644 packages/provider-acp/src/server/turnTokenUsage.ts
+
+diff --git a/apps/server/src/orchestration-v2/Adapters/AcpAdapterV2.test.ts b/apps/server/src/orchestration-v2/Adapters/AcpAdapterV2.test.ts
+index cfde3367a5..710c08c0ad 100644
+--- a/apps/server/src/orchestration-v2/Adapters/AcpAdapterV2.test.ts
++++ b/apps/server/src/orchestration-v2/Adapters/AcpAdapterV2.test.ts
+@@ -1054,6 +1054,97 @@ describe("AcpAdapterV2", () => {
+     }).pipe(Effect.provide(layerTest), Effect.scoped),
+   );
+ 
++  it.effect.each([
++    {
++      name: "reports complete per-turn usage when the agent returns input and output tokens",
++      usage: { totalTokens: 150, inputTokens: 100, outputTokens: 50 },
++      expected: { usageStatus: "complete", inputTokens: 100, outputTokens: 50 },
++    },
++    {
++      name: "marks usage partial when thought tokens leave the output share ambiguous",
++      usage: { totalTokens: 180, inputTokens: 100, outputTokens: 50, thoughtTokens: 30 },
++      expected: { usageStatus: "partial", inputTokens: 100, outputTokens: 50 },
++    },
++    {
++      name: "leaves usage unset when the agent reports none",
++      usage: undefined,
++      expected: undefined,
++    },
++  ] as const)("$name", ({ usage, expected }) =>
++    Effect.gen(function* () {
++      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
++      const path = yield* Path.Path;
++      const mockAgentPath = yield* path.fromFileUrl(
++        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
++      );
++      const instanceId = ProviderInstanceId.make("acp-turn-token-usage");
++      const adapter = yield* makeAcpAdapterV2({
++        instanceId,
++        selfInvocation: yield* resolveSelfInvocation(),
++        flavor: {
++          driver: ACP_TEST_DRIVER,
++          capabilities: AcpProviderCapabilitiesV2,
++          makeRuntime: makeMockRuntime({
++            childProcessSpawner,
++            mockAgentPath,
++            wrapRuntime: (runtime) => ({
++              ...runtime,
++              prompt: () =>
++                Effect.succeed({
++                  stopReason: "end_turn" as const,
++                  ...(usage === undefined ? {} : { usage }),
++                }),
++            }),
++          }),
++        },
++      });
++      const threadId = ThreadId.make("acp-turn-token-usage");
++      const modelSelection = { instanceId, model: "default" };
++      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
++        runtimeMode: "full-access",
++        interactionMode: "default",
++        cwd: process.cwd(),
++      });
++      const runtime = yield* adapter.openSession({
++        threadId,
++        providerSessionId: ProviderSessionId.make("acp-turn-token-usage-session"),
++        modelSelection,
++        runtimePolicy,
++      });
++      const providerThread = yield* runtime.ensureThread({
++        threadId,
++        modelSelection,
++        runtimePolicy,
++      });
++      yield* runtime.startTurn(
++        makeTurnInput({
++          threadId,
++          providerThread,
++          instanceId,
++          runtimePolicy,
++          now: yield* DateTime.now,
++        }),
++      );
++      const turns = Array.from(
++        yield* runtime.events.pipe(
++          Stream.takeUntil((event) => event.type === "turn.terminal"),
++          Stream.runCollect,
++        ),
++      ).flatMap((event) => (event.type === "provider_turn.updated" ? [event.providerTurn] : []));
++      const completed = turns.findLast((turn) => turn.status === "completed");
++      assert.isDefined(completed);
++      if (expected === undefined) {
++        assert.isUndefined(completed?.turnTokenUsage);
++      } else {
++        assert.deepInclude(completed?.turnTokenUsage, {
++          usageScope: "main_agent",
++          hasSubagents: false,
++          ...expected,
++        });
++      }
++    }).pipe(Effect.provide(layerTest), Effect.scoped),
++  );
++
+   it.effect("persists a bounded subset of streamed root and child tool updates", () =>
+     Effect.gen(function* () {
+       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+diff --git a/packages/provider-acp/src/server/adapter.ts b/packages/provider-acp/src/server/adapter.ts
+index 6e125b2318..5eb9c9aec5 100644
+--- a/packages/provider-acp/src/server/adapter.ts
++++ b/packages/provider-acp/src/server/adapter.ts
+@@ -76,6 +76,7 @@ import {
+   type AcpSessionModeState,
+   type AcpToolCallState,
+ } from "./runtimeModel.ts";
++import { acpTurnTokenUsage } from "./turnTokenUsage.ts";
+ import {
+   acpClientExecuteDisposition,
+   acpMcpToolApprovalElicitationDisposition,
+@@ -1201,6 +1202,8 @@ interface ActiveAcpTurn {
+   /** session/prompt already returned; finalize deferred for background work. */
+   promptSettled: boolean;
+   promptSettledStatus: "completed" | "interrupted" | "failed" | "cancelled" | null;
++  /** Usage the agent reported with the `session/prompt` response, if any. */
++  promptUsage: EffectAcpSchema.Usage | null;
+   /**
+    * Completed the moment `runtime.prompt` resolves on the wire, before the
+    * completion callback requests `runtimeCallbackPermit`. Failure does not
+@@ -6502,6 +6505,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+           lastError: null,
+         };
+ 
++        const optionalTurnTokenUsage = (context: ActiveAcpTurn) => {
++          const turnTokenUsage = acpTurnTokenUsage(context.promptUsage, context.subagents.size > 0);
++          return turnTokenUsage === undefined ? {} : { turnTokenUsage };
++        };
++
+         const providerTurnPayload = (
+           context: ActiveAcpTurn,
+           status: OrchestrationV2ProviderTurn["status"],
+@@ -6520,6 +6528,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+           status,
+           startedAt: context.startedAt,
+           completedAt,
++          ...optionalTurnTokenUsage(context),
+         });
+ 
+         const terminalizeOpenRunOwnedItems = Effect.fnUntraced(function* (
+@@ -7030,6 +7039,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+               finalizedStatus: null,
+               promptSettled: false,
+               promptSettledStatus: null,
++              promptUsage: null,
+               promptWireSettled,
+               backgroundFinalizeGeneration: 0,
+             };
+@@ -7181,6 +7191,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
+                   promptGeneration,
+                   Effect.gen(function* () {
+                     if (context.finalized) return;
++                    context.promptUsage = result.usage ?? null;
+                     const status =
+                       result.stopReason === "cancelled"
+                         ? context.interrupted
+diff --git a/packages/provider-acp/src/server/turnTokenUsage.test.ts b/packages/provider-acp/src/server/turnTokenUsage.test.ts
+new file mode 100644
+index 0000000000..dc3d5e4c0c
+--- /dev/null
++++ b/packages/provider-acp/src/server/turnTokenUsage.test.ts
+@@ -0,0 +1,49 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { acpTurnTokenUsage } from "./turnTokenUsage.ts";
++
++const usage = (extra: Record<string, number | null> = {}) => ({
++  totalTokens: 150,
++  inputTokens: 100,
++  outputTokens: 50,
++  ...extra,
++});
++
++describe("acpTurnTokenUsage", () => {
++  it("reports nothing when the agent sent no usage", () => {
++    expect(acpTurnTokenUsage(undefined, false)).toBeUndefined();
++    expect(acpTurnTokenUsage(null, false)).toBeUndefined();
++  });
++
++  it("maps input and output as a complete total", () => {
++    expect(acpTurnTokenUsage(usage({ cachedReadTokens: 20, cachedWriteTokens: 5 }), false)).toEqual(
++      {
++        usageScope: "main_agent",
++        usageStatus: "complete",
++        hasSubagents: false,
++        inputTokens: 100,
++        outputTokens: 50,
++        cachedInputTokens: 20,
++        cacheCreationTokens: 5,
++      },
++    );
++  });
++
++  it("treats a report with thought tokens as partial because ACP leaves their accounting open", () => {
++    expect(acpTurnTokenUsage(usage({ thoughtTokens: 30 }), false)).toMatchObject({
++      usageStatus: "partial",
++      outputTokens: 50,
++      reasoningTokens: 30,
++    });
++    expect(acpTurnTokenUsage(usage({ thoughtTokens: 0 }), false)?.usageStatus).toBe("complete");
++  });
++
++  it("rejects malformed counts instead of guessing", () => {
++    expect(acpTurnTokenUsage(usage({ outputTokens: -1 }), false)).toBeUndefined();
++    expect(acpTurnTokenUsage(usage({ inputTokens: 1.5 }), false)).toBeUndefined();
++  });
++
++  it("flags subagent turns", () => {
++    expect(acpTurnTokenUsage(usage(), true)?.hasSubagents).toBe(true);
++  });
++});
+diff --git a/packages/provider-acp/src/server/turnTokenUsage.ts b/packages/provider-acp/src/server/turnTokenUsage.ts
+new file mode 100644
+index 0000000000..f5622c5aec
+--- /dev/null
++++ b/packages/provider-acp/src/server/turnTokenUsage.ts
+@@ -0,0 +1,42 @@
++import type { TurnTokenUsage } from "@t3tools/contracts";
++import type * as EffectAcpSchema from "effect-acp/compat";
++
++/**
++ * Maps the usage an ACP agent reports for a finished prompt into T3's
++ * normalized per-turn usage. ACP marks this field unstable and does not say
++ * whether `outputTokens` already includes `thoughtTokens`, so a report that
++ * carries thought tokens is only `partial`: the count is valid but may leave
++ * the reasoning share out, and consumers such as the tokens/sec readout skip
++ * partial totals rather than understate a rate.
++ */
++export function acpTurnTokenUsage(
++  usage: EffectAcpSchema.Usage | null | undefined,
++  hasSubagents: boolean,
++): TurnTokenUsage | undefined {
++  if (usage === null || usage === undefined) return undefined;
++  const valid = (value: number | null | undefined): value is number =>
++    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
++  if (!valid(usage.inputTokens) || !valid(usage.outputTokens)) return undefined;
++
++  const common = {
++    usageScope: "main_agent" as const,
++    hasSubagents,
++    ...(valid(usage.cachedReadTokens) ? { cachedInputTokens: usage.cachedReadTokens } : {}),
++    ...(valid(usage.cachedWriteTokens) ? { cacheCreationTokens: usage.cachedWriteTokens } : {}),
++    ...(valid(usage.thoughtTokens) ? { reasoningTokens: usage.thoughtTokens } : {}),
++  };
++  const mayExcludeThoughts = valid(usage.thoughtTokens) && usage.thoughtTokens > 0;
++  return mayExcludeThoughts
++    ? {
++        ...common,
++        usageStatus: "partial",
++        inputTokens: usage.inputTokens,
++        outputTokens: usage.outputTokens,
++      }
++    : {
++        ...common,
++        usageStatus: "complete",
++        inputTokens: usage.inputTokens,
++        outputTokens: usage.outputTokens,
++      };
++}

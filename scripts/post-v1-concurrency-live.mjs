@@ -55,6 +55,10 @@ function isWithin(root, candidate) {
 }
 function errorCategory(error) {
   if (error && typeof error === "object") {
+    // A failed ACP request carries the bridge's own error code in `data.code`; without it a
+    // qualification failure only ever reads as the generic "Bridge request failed".
+    const data = error.data && typeof error.data === "object" ? error.data : null;
+    if (data && typeof data.code === "string" && /^[a-z0-9_-]{1,48}$/i.test(data.code)) return data.code;
     if (typeof error.code === "string" && /^[a-z0-9_-]{1,48}$/i.test(error.code)) return error.code;
     if (typeof error.category === "string") return error.category;
     if (typeof error.message === "string" && /^[a-z0-9_-]{1,64}$/i.test(error.message)) return error.message;
@@ -72,6 +76,8 @@ function errorEvidence(error) {
     ...(typeof error.retryable === "boolean" ? { retryable: error.retryable } : {}),
     ...(error.qualificationContext && typeof error.qualificationContext === "object"
       ? { qualificationContext: error.qualificationContext } : {}),
+    ...(error.data && typeof error.data === "object" && typeof error.data.code === "string"
+      ? { bridgeCode: error.data.code.slice(0, 48) } : {}),
   };
   if (error.cause && typeof error.cause === "object") detail.cause = errorEvidence(error.cause);
   return detail;

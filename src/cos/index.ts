@@ -536,10 +536,10 @@ export class CosControllerClient {
         }
         // GET/read-effect requests are idempotent. The controller deliberately reports transient
         // owner/read saturation as retryable request_failed (503/504, plus a just-created session
-        // projection as 404). Honor that contract here instead of making callers race the app's
-        // bounded read slots themselves. Mutation requests never set retryRead, and queue_full /
-        // rate_limited keep their existing one-shot behavior.
-        if (options.retryRead && mapped.code === "request_failed" && mapped.retryable && attempt < maxAttempts) {
+        // projection as 404), and a saturated read budget as rate_limited. Honor both here instead
+        // of making callers race the app's bounded read slots themselves. Mutation requests never
+        // set retryRead, and queue_full keeps its existing one-shot behavior.
+        if (options.retryRead && mapped.retryable && (mapped.code === "request_failed" || mapped.code === "rate_limited") && attempt < maxAttempts) {
           lastError = mapped;
           const delay = Math.min(this.retryPolicy.baseDelayMs * 2 ** (attempt - 1), this.retryPolicy.maxDelayMs);
           this.bridgeMetrics?.increment("backoffCount");

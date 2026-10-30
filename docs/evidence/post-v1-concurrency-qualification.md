@@ -190,3 +190,27 @@ Two earlier attempts on this build failed and are recorded here because they fou
 A third attempt was killed after the qualification app was left running beside a second instance
 (the app reports `ServerAlreadyRunningError` and the stale `control-api/endpoint.json` makes
 health reads hang). Restarting the app on a clean profile removed that state before the passing run.
+
+## 2026-10-30 attachment upload hardening on 1fc1936
+
+Provider `1fc1936` adds one extension change on top of `f9adddd`: an `aria-busy` /
+progress marker that the composer already carried before an attachment upload no longer holds the
+upload receipt open until its 60 s timeout (which failed good tiles with "Attachment upload was not
+confirmed"). `test/chatgpt-dom-input.test.ts` 169/169 and `test/content-script.test.ts` together
+1110/1110.
+
+Qualification state for this build:
+
+- `20261030T084746Z-twochat-requal-1fc1936`: preflight, single-chat baseline, two-chat workload
+  and queue-cancel slot reuse PASS; `independent-active-cancellation` then timed out on
+  `prompt_timeout` and the remaining cases degraded (`ENOENT`, `provider_turn_state_timeout`).
+- `20261030T091731Z-twochat-requal-1fc1936-retry`: two-chat workload failed at round 3 with
+  `prompt_timeout` on both peers, the same environment-level slowdown (ChatGPT websocket
+  connections in the qualification browser were failing with `ERR_NAME_NOT_RESOLVED` and image
+  uploads were taking tens of seconds).
+
+The last fully passing eight-case tuple remains `f9adddd` (see the section above). `1fc1936`
+changes only the attachment upload gate, which the text-only matrix does not exercise; its evidence
+is the 169-case DOM suite, the 1110-case extension suite, and the passing attachment rows. Candidate
+executable SHA-256 `CF83D86CCDC49D2C22F9737BA7190D7E64D2D9F666D8281BDA530E8125AE74CB`; extension
+stamp `6fe6ebfb9c97`.

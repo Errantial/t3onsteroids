@@ -86,7 +86,7 @@ export interface ProjectBinding {
 export interface BridgeController {
   health?(): Promise<CosControllerReadiness>;
   requireProviderExtension?(): Promise<CosControllerReadiness>;
-  requireBackgroundWorkDisabled?(sessionId: string): Promise<{ backgroundWork: "disabled"; enforced: true }>;
+  requireBackgroundWorkDisabled?(sessionId: string): Promise<{ backgroundWork: "disabled"; enforced: true; followUps?: "report" }>;
   resolveProject(path: string): Promise<ProjectBinding>;
   models?(): Promise<CosModelCatalog>;
   backgroundWork?(sessionId: string): Promise<CosBackgroundWork | undefined>;
@@ -650,8 +650,15 @@ export class AcpBridgeRuntime {
         throw new BridgeError("provider_policy_unavailable", "Provider-session policy attestation is unavailable");
       }
       try {
-        await this.options.controller.requireBackgroundWorkDisabled(session.sessionId);
-      } catch {
+        const attestation = await this.options.controller.requireBackgroundWorkDisabled(session.sessionId);
+        // A reporting session must still be reported for by the controller. A downgrade would
+        // otherwise leave the bridge waiting for announcements the provider will never make.
+        if (session.followUpPolicy === "report" && attestation.followUps !== "report") {
+          await this.markBroken(session, "policy_lost");
+          throw new BridgeError("provider_policy_unavailable", "Provider-session follow-up policy was lost");
+        }
+      } catch (error) {
+        if (error instanceof BridgeError) throw error;
         await this.markBroken(session, "policy_lost");
         throw new BridgeError("provider_policy_unavailable", "Provider-session policy attestation was lost");
       }

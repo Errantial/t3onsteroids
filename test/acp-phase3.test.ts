@@ -411,6 +411,47 @@ describe("Phase 3 ACP shell and lazy binding", () => {
     await expect(store.read(sessionId)).resolves.toMatchObject({ followUps: [{ id: "worker-1", announcedSeq: 0 }] });
   });
 
+  it("treats a lost follow-up attestation as a broken policy", async () => {
+    const store = new MemoryStateStore<SessionState>();
+    await store.write(sessionId, {
+      sessionId,
+      cwd: "C:\\repo",
+      bindingState: "bound",
+      interactionMode: "default",
+      cancelIntent: "none",
+      canonicalCwd: "C:\\repo",
+      cosProjectId: "project-1",
+      followUpPolicy: "report",
+    });
+    const ctrl = makeController({
+      // The controller still attests the v1 fence but no longer reports follow-ups.
+      requireBackgroundWorkDisabled: vi.fn(async () => ({ backgroundWork: "disabled" as const, enforced: true as const })),
+    });
+    const runtime = new AcpBridgeRuntime({ controller: ctrl, store, makeUuid: () => sessionId, canonicalize: async (path) => path });
+    await expect(runtime.prompt({ sessionId, prompt: [{ type: "text", text: "hello" }] }))
+      .rejects.toMatchObject({ code: "provider_policy_unavailable" });
+    await expect(store.read(sessionId)).resolves.toMatchObject({ bindingState: "broken", recoveryReason: "policy_lost" });
+    expect(ctrl.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps a reporting session alive while the controller still reports follow-ups", async () => {
+    const store = new MemoryStateStore<SessionState>();
+    await store.write(sessionId, {
+      sessionId,
+      cwd: "C:\\repo",
+      bindingState: "bound",
+      interactionMode: "default",
+      cancelIntent: "none",
+      canonicalCwd: "C:\\repo",
+      cosProjectId: "project-1",
+      followUpPolicy: "report",
+    });
+    const ctrl = makeController();
+    ctrl.requireBackgroundWorkDisabled = vi.fn(async () => ({ backgroundWork: "disabled" as const, enforced: true as const, followUps: "report" as const }));
+    const runtime = new AcpBridgeRuntime({ controller: ctrl, store, makeUuid: () => sessionId, canonicalize: async (path) => path });
+    await expect(runtime.prompt({ sessionId, prompt: [{ type: "text", text: "hello" }] })).resolves.toBeDefined();
+  });
+
   it("registers follow-ups with the input that owned the turn after its terminal cleared activeInputId", async () => {
     const controller = makeController();
     controller.backgroundWork = vi.fn(async (): Promise<CosBackgroundWork> => ({

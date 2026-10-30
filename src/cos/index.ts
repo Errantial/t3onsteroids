@@ -119,6 +119,8 @@ export interface CosAssistantContentChunk {
 export interface CosProviderSessionPolicyAttestation {
   readonly backgroundWork: "disabled";
   readonly enforced: true;
+  /** Present when the session reports work that outlives its turn. */
+  readonly followUps?: "report";
 }
 
 export type CosProviderTurnState = "admitted" | "active" | "closing" | "drained" | "not_sent" | "broken";
@@ -245,7 +247,14 @@ function parseProviderPolicy(value: unknown, context: string): CosProviderSessio
   if (row.backgroundWork !== "disabled" || row.enforced !== true) {
     throw new CosControllerError("provider_policy_unavailable", `${context} does not attest enforced backgroundWork=disabled`);
   }
-  return { backgroundWork: "disabled", enforced: true };
+  if (row.followUps !== undefined && row.followUps !== "report") {
+    throw new CosControllerError("provider_policy_unavailable", `${context} attests an unknown follow-ups policy`);
+  }
+  return {
+    backgroundWork: "disabled",
+    enforced: true,
+    ...(row.followUps === "report" ? { followUps: "report" as const } : {}),
+  };
 }
 
 function nullableString(value: unknown, context: string): string | null {

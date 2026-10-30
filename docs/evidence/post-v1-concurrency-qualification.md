@@ -162,3 +162,7 @@ The passing run is the qualifying evidence; `supportedConcurrency` remains 2. Th
 ## 2026-10-30 budget-adjusted requalification on 0520fce
 
 Run `20261030T032154Z-twochat-requal-0520fce-budget1500` passed all eight cases on provider build `0520fcedcd003bd89c43e649d1228333a4d2305f`. The post-v1 drain p95 budget is 1500 ms (v1 release gate unchanged at 1000). Baseline pre-send/drain/post p95 95/775/101 ms; two-chat 145/456/92 ms; two active leases; per-process RSS 150 MiB aggregate. The observed drain samples were under the old budget too, confirming the adjustment removed gate noise rather than masking a regression. Candidate executable SHA-256 `29B6F20E6440A6D74C7AD869781C5B7C524510E72BD43EFD1FEB83C1A94D2BE1`.
+
+## 2026-10-30 requalification on dc691cd
+
+Run `20261030T041202Z-twochat-requal-dc691cd` passed all eight cases on provider build `dc691cd97c99fdb4cebca7353319f3a9858a267f` with the post-v1 1500 ms drain budget. Baseline pre-send/drain/post p95 and two-chat values are in the run evidence; candidate executable SHA-256 `@{Algorithm=SHA256; Hash=B20F6B264AC538B8D3BAA5045160FDEFD743BC050A1EFAA7C97DEE69BF3185A6; Path=C:\Users\Emil\t3onsteroids-post-v1\.local-evidence\post-v1-concurrency\cos-source\release\win-unpacked\Chat On Steroids.exe}.Hash`. This build adds the linked-worktree resolver fallback on top of 0520fce.

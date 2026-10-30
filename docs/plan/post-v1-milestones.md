@@ -308,3 +308,33 @@ Turn-lifecycle follow-up (fixed in provider `bf14457`, 2026-10-30):
   + `test/chatgpt-dom-input.test.ts` **1109/1109**; live ACP image probe 3/3 `end_turn` in
   15/18/19 s on provider `bf14457` with extension stamp `a847740479b1` (previously about one in
   three such turns stalled).
+
+## Post-v1 planned-work close-out (2026-10-30)
+
+Everything the ledger listed as open is now either done with evidence or explicitly blocked on
+something outside this lane.
+
+- **Attachments (M3 follow-up).** The composer-drift fix (`286cff5`), the Send-receipt fix
+  (`bf14457`) and the busy-marker fix (`1fc1936`) close the prompt-image path: ACP image turns
+  return `end_turn` three times in a row, and the T3 HEAD UI attachment row completes with the
+  image's color and size in the reply. Evidence: `test/chatgpt-dom-input.test.ts` 169/169,
+  `test/content-script.test.ts` + that file 1110/1110, live probes recorded above.
+- **Turn lifecycle.** The "first image turn in a fresh tab never drains" residual is fixed
+  (`bf14457`) and verified 3/3; the earlier description in this file has been replaced with the
+  cause and the fix.
+- **Action budget.** `f9adddd` raised the controller's action budget from 30 to 120 per minute,
+  which the two-chat workload needs (two actions per turn across both chats). Reads keep their
+  separate 600/minute budget and are now retried on `rate_limited`.
+- **Two-chat tuple.** `f9adddd` passed all eight cases. The later attachment-only build
+  `1fc1936` has its own evidence but its two matrix attempts were stopped by environment-level
+  `prompt_timeout`; that is recorded rather than claimed as a pass.
+- **T3 HEAD (M7).** The acceptance matrix against `dd14848` is complete: ACP protocol probe,
+  headless single/multi-turn, restart/resume, normal-repo worktree, linked-worktree worktree, UI
+  text, and the UI attachment row. Widening the *declared* baseline tuple is a release decision: the
+  pinned baseline is the nightly the v1 gate qualified (`6d450a42`), and changing it would
+  invalidate that gate's record. Upstream does not publish a nightly artifact pinned to
+  `dd14848` for this lane to point at, so the pin stays as is and the HEAD evidence is additive.
+- **Background work (M6).** The projection, the drain fence, the Goal/Loop owed-reply coverage and
+  the per-work cancel route are all in place; moving the policy off `backgroundWork=disabled`
+  remains a separate, explicit change that a live pending worker is required to qualify.
+- **4/8-chat concurrency** stays parked at `supportedConcurrency=2`.

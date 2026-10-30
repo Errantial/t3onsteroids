@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { ContentBlock, InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption, SetSessionConfigOptionRequest } from "@agentclientprotocol/sdk";
 
 import type { CosBackgroundWork, CosControllerReadiness, CosInputRecord, CosModelCatalog, CosSessionSummary } from "../cos/index.js";
-import { v1ProviderSessionPolicy } from "../policy/index.js";
+import { followUpProviderSessionPolicy, v1ProviderSessionPolicy, type ProviderSessionPolicy } from "../policy/index.js";
 import { isReasoningEffort, newUnboundSession, type InteractionMode, type ReasoningEffort, type SessionState, withInteractionMode } from "../session/index.js";
 import {
   driveProviderTurn,
@@ -343,15 +343,47 @@ export class AcpBridgeRuntime {
   }
 
   /**
-   * Refuses to settle an ACP turn while native work attached to the provider session is still
-   * pending. A controller without the projection is treated as having none, preserving protocol-1
-   * behavior.
+   * The provider policy for a new session. The follow-up policy is requested only when the
+   * controller advertises `provider-background-work-v2`; anything else gets the v1 policy.
+   */
+  private async providerPolicyForNewSession(): Promise<{ backgroundWork: "disabled"; followUps?: "report" }> {
+    const readiness = await this.options.controller.requireProviderExtension?.();
+    return readiness?.features["provider-background-work-v2"] === 1
+      ? { backgroundWork: "disabled", followUps: "report" }
+      : v1ProviderSessionPolicy;
+  }
+
+  /**
+   * Settles an ACP turn.
+   *
+   * A provider session that reports follow-ups registers whatever native work is still pending and
+   * settles anyway: the turn's own drain is the end of the turn, and the work is announced when it
+   * finishes. Every other session keeps the v1 fence and refuses to settle.
    */
   async assertBackgroundWorkSettled(sessionId: string): Promise<void> {
     const projection = await this.options.controller.backgroundWork?.(sessionId);
-    if (projection && projection.pending.length > 0) {
+    if (!projection || projection.pending.length === 0) return;
+    const session = this.options.durableStore
+      ? await this.refreshDurable(sessionId)
+      : this.sessions.get(sessionId) ?? (await this.options.store?.read?.(sessionId)) ?? undefined;
+    const inputId = session?.activeInputId;
+    if (session?.followUpPolicy !== "report" || inputId === undefined || session === undefined) {
       throw new BridgeError("turn_drain_pending", "Native background work is still pending for this provider session");
     }
+    const followUps = projection.pending.map((item) => ({
+      id: item.id,
+      label: item.label,
+      inputId,
+      state: item.state,
+      outcome: item.outcome ?? null,
+      announcedSeq: null,
+    }));
+    if (this.options.durableStore) {
+      await this.applyDurableTransition(sessionId, { kind: "set_follow_ups", followUps });
+    } else {
+      await this.persistWholeForReference({ ...session, followUps });
+    }
+    this.options.metrics?.increment("followUpsRegistered");
   }
 
   /** Applies one ACP config selection and returns the refreshed full option set. */
@@ -530,7 +562,7 @@ export class AcpBridgeRuntime {
     throw new BridgeError("session_broken", `Durable session transition ${transition.kind} was rejected (${result.status})`);
   }
 
-  private async requirePromptReadiness(session: SessionState): Promise<void> {
+  private async requirePromptReadiness(session: SessionState): Promise<CosControllerReadiness | undefined> {
     const readiness = this.options.controller.requireProviderExtension
       ? await this.options.controller.requireProviderExtension()
       : await this.options.controller.health?.();
@@ -548,6 +580,7 @@ export class AcpBridgeRuntime {
         throw new BridgeError("provider_policy_unavailable", "Provider-session policy attestation was lost");
       }
     }
+    return readiness;
   }
 
   private async acquireLease(sessionId: string, inputId: string, generation: number, leaseId?: string): Promise<void> {
@@ -1501,12 +1534,18 @@ export class AcpBridgeRuntime {
     }
 
     phaseStartedAt = this.options.metrics?.monotonicTimestampMs();
-    await this.requirePromptReadiness(session);
+    const promptReadiness = await this.requirePromptReadiness(session);
     const readinessMs = phaseStartedAt === undefined ? 0 : this.options.metrics!.monotonicTimestampMs() - phaseStartedAt;
 
     const first = session.bindingState === "unbound";
     const inputId = first ? session.sessionId : this.makeUuid();
     const generation = (session.generation ?? 0) + 1;
+    // The follow-up policy is requested only when the controller advertises it. A controller
+    // without the feature keeps the v1 session exactly as before.
+    const providerPolicy: ProviderSessionPolicy = first && promptReadiness?.features["provider-background-work-v2"] === 1
+      ? followUpProviderSessionPolicy
+      : v1ProviderSessionPolicy;
+    const followUpFields = providerPolicy.followUps === "report" ? { followUpPolicy: "report" as const } : {};
     this.options.metrics?.beginTurn(request.sessionId, generation, promptReceivedAt);
     let durablePrepareMs = 0;
     let leaseAcquireMs = 0;
@@ -1600,6 +1639,9 @@ export class AcpBridgeRuntime {
     } else {
       await this.acquireLease(session.sessionId, inputId, generation);
       session = withInteractionMode(session, normalized.interactionMode);
+      // Ask for the follow-up policy only when the controller advertises it. A controller without
+      // the feature keeps the v1 session exactly as before.
+
       if (first) {
         session = {
           ...session,
@@ -1607,6 +1649,7 @@ export class AcpBridgeRuntime {
           canonicalCwd: canonicalWorkspace,
           cosProjectId: project.projectId,
           activeInputId: inputId,
+          ...followUpFields,
         };
         await this.persistWholeForReference(session);
       }
@@ -1619,7 +1662,7 @@ export class AcpBridgeRuntime {
       ...(first ? {
         projectId: project.projectId,
         ...(project.kind !== undefined && project.kind !== "project" ? { workspacePath: project.canonicalPath } : {}),
-        providerPolicy: v1ProviderSessionPolicy,
+        providerPolicy,
       } : { sessionId: session.sessionId }),
       ...(session.model === undefined ? {} : { model: session.model }),
       ...(session.reasoningEffort === undefined ? {} : { reasoningEffort: session.reasoningEffort }),

@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import type { ProviderTurnTranslationState, StableTerminalStopReason } from "../translate/events.js";
-import type { InputDispatchState, InteractionMode, ReasoningEffort, RecoveryReason, SessionState } from "../session/index.js";
+import type { InputDispatchState, InteractionMode, ReasoningEffort, RecoveryReason, SessionState, FollowUpState } from "../session/index.js";
 import { isReasoningEffort } from "../session/index.js";
 import {
   HardLinkMutex,
@@ -109,6 +109,7 @@ export type DurableSessionTransition =
   | { readonly kind: "set_cancel"; readonly generation: number; readonly inputId: string; readonly turnId?: string }
   | { readonly kind: "clear_cancel"; readonly generation: number; readonly inputId: string; readonly turnId?: string }
   | { readonly kind: "select_model"; readonly model: string | null; readonly reasoningEffort: ReasoningEffort | null }
+  | { readonly kind: "set_follow_ups"; readonly followUps: readonly FollowUpState[] }
   | { readonly kind: "mark_broken"; readonly reason: RecoveryReason };
 
 interface QuarantineRecord {
@@ -143,7 +144,11 @@ const SESSION_KEYS = new Set([
   "cwd", "canonicalCwd", "cosProjectId", "activeInputId", "activeCosTurnId", "generation", "cosEventCursor",
   "inputDispatchState", "dispatchInputId", "admissionLeaseId",
   "providerTranslation", "cancelIntent", "cancelTargetTurnId", "recoveryReason", "model", "reasoningEffort",
+  "followUps",
 ]);
+
+const FOLLOW_UP_OUTCOMES = new Set(["completed", "failed", "cancelled"]);
+const FOLLOW_UP_KEYS = new Set(["id", "label", "inputId", "state", "outcome", "announcedSeq"]);
 
 function sha256(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -220,6 +225,21 @@ function parseRecord(bytes: Buffer): { kind: "found"; value: DurableSessionRecor
   if (!optionalBoundedString(row.model, 80)) return { kind: "corrupt" };
   if (row.reasoningEffort !== undefined && !isReasoningEffort(row.reasoningEffort)) return { kind: "corrupt" };
   if (row.providerTranslation !== undefined && !validTranslation(row.providerTranslation, row.sessionId)) return { kind: "corrupt" };
+  if (row.followUpPolicy !== undefined && row.followUpPolicy !== "report") return { kind: "corrupt" };
+  if (row.followUps !== undefined) {
+    if (!Array.isArray(row.followUps) || row.followUps.length > 64) return { kind: "corrupt" };
+    for (const item of row.followUps) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return { kind: "corrupt" };
+      const entry = item as Record<string, unknown>;
+      if (Object.keys(entry).some((key) => !FOLLOW_UP_KEYS.has(key))) return { kind: "corrupt" };
+      if (typeof entry.id !== "string" || entry.id.length === 0 || entry.id.length > 200) return { kind: "corrupt" };
+      if (typeof entry.label !== "string" || entry.label.length > 200) return { kind: "corrupt" };
+      if (typeof entry.inputId !== "string" || entry.inputId.length === 0 || entry.inputId.length > INPUT_ID_MAX) return { kind: "corrupt" };
+      if (typeof entry.state !== "string" || entry.state.length === 0 || entry.state.length > 64) return { kind: "corrupt" };
+      if (entry.outcome !== null && (typeof entry.outcome !== "string" || !FOLLOW_UP_OUTCOMES.has(entry.outcome))) return { kind: "corrupt" };
+      if (entry.announcedSeq !== null && !nonnegativeInt(entry.announcedSeq)) return { kind: "corrupt" };
+    }
+  }
   return { kind: "found", value: row as unknown as DurableSessionRecord };
 }
 
@@ -576,6 +596,13 @@ function normalTransition(record: DurableSessionRecord, transition: Exclude<Dura
         ...(transition.model === null ? {} : { model: transition.model }),
         ...(transition.reasoningEffort === null ? {} : { reasoningEffort: transition.reasoningEffort }),
       };
+    }
+    case "set_follow_ups": {
+      const { followUps: _previous, ...rest } = record;
+      void _previous;
+      const same = JSON.stringify(record.followUps ?? []) === JSON.stringify(transition.followUps);
+      if (same) return { status: "unchanged", value: record };
+      return transition.followUps.length === 0 ? rest : { ...rest, followUps: transition.followUps };
     }
   }
 }

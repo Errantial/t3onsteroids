@@ -49,6 +49,27 @@ export interface SessionState {
   readonly cancelIntent?: CancelIntent;
   readonly cancelTargetTurnId?: string;
   readonly recoveryReason?: RecoveryReason;
+  /** `report` once this session was created with the follow-up provider policy. */
+  readonly followUpPolicy?: "report";
+  /**
+   * Native work this ACP session started that outlived its turn. Present only for a provider
+   * session whose policy reports follow-ups; a v1 session never carries one.
+   */
+  readonly followUps?: readonly FollowUpState[];
+}
+
+/** One piece of provider work that outlived the turn that started it. */
+export interface FollowUpState {
+  /** CoS work id: a worker id, or `goal:<replyId>`. */
+  readonly id: string;
+  readonly label: string;
+  /** The input whose turn started this work. */
+  readonly inputId: string;
+  /** Last provider state observed for the item. */
+  readonly state: string;
+  readonly outcome: "completed" | "failed" | "cancelled" | null;
+  /** Provider event seq at which its result was delivered to the client, once it was. */
+  readonly announcedSeq: number | null;
 }
 
 export function newUnboundSession(sessionId: string, cwd?: string): SessionState {

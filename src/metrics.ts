@@ -2,6 +2,8 @@ export interface BridgeMetricsSnapshot {
   readonly promptReceived: number;
   readonly cosInputAcceptedOrReconciled: number;
   readonly matchingTurnEndObserved: number;
+  /** Native work registered as a follow-up instead of failing the turn. */
+  readonly followUpsRegistered: number;
   readonly matchingTurnDrainedObserved: number;
   readonly drainHighWaterSeq: number;
   readonly acpTerminalSent: number;
@@ -50,6 +52,7 @@ export class BridgeMetrics {
     promptReceived: 0,
     cosInputAcceptedOrReconciled: 0,
     matchingTurnEndObserved: 0,
+  followUpsRegistered: 0,
     matchingTurnDrainedObserved: 0,
     drainHighWaterSeq: 0,
     acpTerminalSent: 0,
@@ -136,6 +139,7 @@ export class BridgeMetrics {
     "promptReceived" |
     "cosInputAcceptedOrReconciled" |
     "matchingTurnEndObserved" |
+    "followUpsRegistered" |
     "matchingTurnDrainedObserved" |
     "acpTerminalSent" |
     "controllerReadCount" |

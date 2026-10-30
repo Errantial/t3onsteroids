@@ -90,6 +90,9 @@ export interface CosBackgroundWorkItem {
   readonly id: string;
   readonly label: string;
   readonly state: string;
+  readonly terminal?: boolean;
+  readonly outcome?: "completed" | "failed" | "cancelled" | null;
+  readonly cancellable?: boolean;
 }
 
 export interface CosBackgroundWork {

@@ -351,6 +351,32 @@ describe("Phase 3 ACP shell and lazy binding", () => {
     await expect(runtime.assertBackgroundWorkSettled(sessionId)).resolves.toBeUndefined();
   });
 
+  it("registers pending work as follow-ups for a session that reports them", async () => {
+    const controller = makeController();
+    controller.backgroundWork = vi.fn(async (): Promise<CosBackgroundWork> => ({
+      state: "pending" as const,
+      pending: [{ id: "worker-1", label: "research", state: "active", terminal: false, outcome: null, cancellable: true }],
+    }));
+    const store = new MemoryStateStore<SessionState>();
+    await store.write(sessionId, {
+      sessionId,
+      cwd: "C:\\repo",
+      bindingState: "bound",
+      interactionMode: "default",
+      cancelIntent: "none",
+      canonicalCwd: "C:\\repo",
+      cosProjectId: "project-1",
+      activeInputId: sessionId,
+      followUpPolicy: "report",
+      generation: 1,
+    });
+    const runtime = new AcpBridgeRuntime({ controller, store, canonicalize: async (path) => path });
+    await expect(runtime.assertBackgroundWorkSettled(sessionId)).resolves.toBeUndefined();
+    await expect(store.read(sessionId)).resolves.toMatchObject({
+      followUps: [{ id: "worker-1", label: "research", inputId: sessionId, state: "active", outcome: null, announcedSeq: null }],
+    });
+  });
+
   it("enforces the exact 64,000-character admission boundary before send", async () => {
     await expect(normalizePrompt([{ type: "text", text: "x".repeat(MAX_COS_INPUT_CHARS) }], "default", "C:\\repo", async (path) => path)).resolves.toMatchObject({ text: "x".repeat(MAX_COS_INPUT_CHARS) });
     await expect(normalizePrompt([{ type: "text", text: "x".repeat(MAX_COS_INPUT_CHARS + 1) }], "default", "C:\\repo", async (path) => path)).rejects.toMatchObject({ code: "input_too_large" });

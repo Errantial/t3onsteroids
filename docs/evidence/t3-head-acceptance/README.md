@@ -36,3 +36,14 @@ The headless server lane was also exercised:
 
 A `--worktree HEAD` thread created its checkout outside CoS approved roots and failed closed as
 designed; a successful worktree lane needs the T3 worktree base under an approved CoS root.
+
+## Worktree success lane (2026-10-30)
+
+1. Add a normal Git repo inside the approved CoS root as a CoS project.
+2. Set `worktreesDirectory` in T3 settings to a directory inside that approved root.
+3. `t3 thread start <repo> "Reply with exactly T3HEADWORKTREE and nothing else." --worktree HEAD
+   --branch accept-wt --provider cosbridge --model gpt-6-thinking --wait --json`.
+4. Expected: `status:"completed"`, `reply:"T3HEADWORKTREE"`. Observed.
+
+The earlier fail-closed worktree run used T3's default worktree base under the disposable T3 data
+directory, which is outside the CoS approved roots.

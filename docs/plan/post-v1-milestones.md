@@ -241,3 +241,18 @@ T3-HEAD restart/resume acceptance (2026-10-30):
   --wait --json`.
 - Result: `status:"completed"`, `reply:"T3HEADRESUME"` on run ordinal 3. T3 re-spawned the
   provider process and the bridge resumed the same CoS session without duplicating history.
+
+T3-HEAD worktree acceptance (2026-10-30):
+
+- Added a normal Git repository inside the isolated approved root as a CoS project
+  (`acceptance-repo`) and set T3's `worktreesDirectory` to
+  `…\.local-evidence\post-v1-concurrency\acceptance-worktrees` (inside the same approved root).
+- `t3 thread start <acceptance-repo> "Reply with exactly T3HEADWORKTREE…" --worktree HEAD
+  --branch accept-wt --provider cosbridge --model gpt-6-thinking --wait --json` ?
+  `status:"completed"`, `reply:"T3HEADWORKTREE"`.
+- The bridge resolved the new linked worktree through its Git common directory to the catalog
+  project, created the CoS session with that workspace, and the prompt completed. Cleanup removed
+  the worktree and branch; the server was stopped.
+- This closes the worktree row for a normal-repo project. A worktree of a project that is itself a
+  linked worktree still maps to the main repository and fails closed when that main root is not an
+  approved CoS project, which is the documented limitation.

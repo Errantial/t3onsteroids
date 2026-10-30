@@ -165,4 +165,4 @@ Run `20261030T032154Z-twochat-requal-0520fce-budget1500` passed all eight cases 
 
 ## 2026-10-30 requalification on dc691cd
 
-Run `20261030T041202Z-twochat-requal-dc691cd` passed all eight cases on provider build `dc691cd97c99fdb4cebca7353319f3a9858a267f` with the post-v1 1500 ms drain budget. Baseline pre-send/drain/post p95 and two-chat values are in the run evidence; candidate executable SHA-256 `@{Algorithm=SHA256; Hash=B20F6B264AC538B8D3BAA5045160FDEFD743BC050A1EFAA7C97DEE69BF3185A6; Path=C:\Users\Emil\t3onsteroids-post-v1\.local-evidence\post-v1-concurrency\cos-source\release\win-unpacked\Chat On Steroids.exe}.Hash`. This build adds the linked-worktree resolver fallback on top of 0520fce.
+Run `20261030T041202Z-twochat-requal-dc691cd` passed all eight cases on provider build `dc691cd97c99fdb4cebca7353319f3a9858a267f` with the post-v1 1500 ms drain budget. Baseline pre-send/drain/post p95 were 111/857/93 ms and two-chat 142/458/96 ms; candidate executable SHA-256 `B20F6B264AC538B8D3BAA5045160FDEFD743BC050A1EFAA7C97DEE69BF3185A6`. This build adds the linked-worktree resolver fallback on top of 0520fce.

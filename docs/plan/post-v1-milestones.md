@@ -203,3 +203,17 @@ T3 HEAD lane (user approved):
 - The pinned acceptance matrix still needs a configured T3 server/desktop profile and UI lane
   pointed at the bridge; building the server alone does not exercise prompts. That lane is the next
   executable step.
+
+T3-HEAD acceptance probe result (2026-10-30):
+
+- Upstream checkout: `dd148481531a0a090780a2ade20588566db099a2` at
+  `%TEMP%\opencode\t3head-dd14848`; pnpm install and the server bundle build both succeeded.
+- A probe using **T3 HEAD's own** `packages/effect-acp` client (not the bridge's harness) spawned
+  the bridge, negotiated `initialize`, created a session and completed a live prompt:
+  `initialized.protocolVersion === 1`, nonempty session id, `stopReason === "end_turn"` in 18 s.
+- Command:
+  `pnpm --filter effect-acp exec vp test run --config ../../vite.config.ts src/bridge-acceptance.test.ts`
+  (probe file `packages/effect-acp/src/bridge-acceptance.test.ts` in the HEAD checkout).
+- This covers the exact ACP negotiation/lifecycle contract against HEAD. The full pinned V1-19
+  UI matrix (project switching, approvals, attachments, restart lanes) still needs a configured T3
+  HEAD server/web profile; the protocol probe is the headless portion of that matrix.

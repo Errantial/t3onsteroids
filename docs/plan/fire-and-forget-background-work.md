@@ -399,3 +399,37 @@ emits the out-of-turn wake **and** keeps the follow-up text in its durable queue
 continuation prompt from that queue when one arrives, and otherwise delivering it at the next user
 prompt. Both halves were already in the plan; this result makes the second one mandatory rather than
 a fallback.
+
+---
+
+## Implementation status (2026-10-30)
+
+Landed:
+
+- **CoS 3804227** — providerPolicy.followUps: 'report', persisted and re-attested, with the v1
+  ackgroundWork: 'disabled' value untouched; the projection reports pending work as pending
+  instead of iolated and carries 	erminal/outcome/cancellable; health advertises
+  provider-background-work-v2. control-api-reads 77/77.
+- **Bridge c016e80** — the follow-up policy is requested only from a controller that advertises
+  v2; ssertBackgroundWorkSettled registers pending work durably (set_follow_ups) and settles,
+  while every other session keeps 	urn_drain_pending. Durable ollowUps + ollowUpPolicy with
+  validation; bridge suite 301/301.
+- **Bridge 04f4af** — nnounceFollowUps watches the projection beside the session and emits one
+  out-of-turn gent_message_chunk when every registered item is terminal, clearing the registration
+  only after the write; five unit tests. Suite 306/306.
+- **T3 patch** — patches/t3/post-settle-background-work.patch with its README, capability-gated on
+  _meta.cosBackgroundWork; live spike confirmed the wake is detected and a continuation run is
+  created on a fresh dd14848 checkout.
+
+Still open:
+
+1. **Live end-to-end row.** Producing a *real* pending work item needs an agent that spawns a CoS
+   worker on a provider session; the T3 lane never does that (ChatGPT does not call the MCP spawn
+   tools in this setup), and Goal automation is refused on provider sessions. The registration and
+   announcement paths are covered by unit tests and by the contract, not yet by a live worker.
+2. **Continuation dispatch.** T3 creates the continuation run but does not dispatch a prompt to the
+   agent in the headless CLI lane (recorded above). The bridge's durable queue is the delivery
+   backstop; a UI-lane check should confirm whether the continuation prompt arrives when a client is
+   attached.
+3. **Matrix.** Re-run the eight-case 2-chat matrix with the flag on once (1) exists, then record the
+   tuple.

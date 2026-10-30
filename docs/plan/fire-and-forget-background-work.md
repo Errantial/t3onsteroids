@@ -491,7 +491,25 @@ Still open (unchanged): the live row needs a healthy qualification browser. The 
 reached admission — CoS logged no `admitted` line and the app had recorded a sleep gap — and the
 probe was stopped rather than left hanging.
 
-One residual contract gap, noted not fixed: the bridge's `parseProviderPolicy` validates
-`backgroundWork`/`enforced` and ignores the new `followUps` field, so it cannot assert that the
-controller honoured the requested policy. Registration is still driven by the live projection, so a
-downgrade would surface as no pending work rather than a wrong announcement.
+One residual contract gap was closed in the bridge (`abf53e6`): `parseProviderPolicy` now
+carries `followUps`, and a reporting session whose attestation loses it is marked `policy_lost`
+instead of waiting for announcements the controller will never make.
+
+## Seventh defect: the action schema refused the policy (2026-10-30)
+
+The first live attempt after the debug pass exposed the gap the unit tests could not: the CoS
+**action** schema still described `providerPolicy` as `{ backgroundWork }` alone
+(`control-actions.ts`, `.strict()`), while `session/input.ts`, the read projection and the shared
+type had all gained `followUps`. A direct `POST /v1/inputs` with
+`providerPolicy: { backgroundWork: 'disabled', followUps: 'report' }` returned
+`400 invalid_body / unknown field`, so a controller that advertises
+`provider-background-work-v2` would reject the bridge's very first prompt of a session.
+
+The fix (`af9a83e`) lets the action body accept exactly the same policy object the durable schema
+accepts, and a regression asserts both directions: the v2 policy admits and attests, while an
+unknown nested key and `followUps: 'silent'` stay `invalid_body`. Provider build `2a6a1f8` carries
+it; `control-api-actions` + `control-api-reads` pass 135/135.
+
+The read tests had covered the attestation by creating the session through the store, which is why
+the action path went unseen. The live admission is the gate that catches this class of split-brain
+schema.

@@ -1,6 +1,6 @@
 # Development, setup and operations
 
-The bridge is Windows-first, uses Node directly, and this release is versioned as `1.1.1`. The production implementation includes the ACP stdio provider, CoS controller/provider-extension client, event translator, durable state and profile-wide admission scheduler, restart/cancellation recovery, bounded streaming, workspace/model/attachment support, background-work projection, and release diagnostics. `1.0.0` remains release-qualified on its pinned Windows tuple; `1.1.1` is the feature release on T3 `0.1.5` and does not silently widen that qualification.
+The bridge is Windows-first, uses Node directly, and this release is versioned as `1.1.2`. The production implementation includes the ACP stdio provider, CoS controller/provider-extension client, event translator, durable state and profile-wide admission scheduler, restart/cancellation recovery, bounded streaming, workspace/model/attachment support, background-work projection, and release diagnostics. `1.0.0` remains release-qualified on its pinned Windows tuple; `1.1.2` is a patch release on the `1.1.1` feature line for T3 `0.1.5` and does not silently widen that qualification.
 
 ## Pinned release tuple
 

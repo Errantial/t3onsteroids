@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 import type { ContentBlock, InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption, SetSessionConfigOptionRequest } from "@agentclientprotocol/sdk";
 
 import type { CosBackgroundWork, CosControllerReadiness, CosInputRecord, CosModelCatalog, CosSessionSummary } from "../cos/index.js";
+import { announceFollowUps, type AnnounceOutcome } from "../follow-ups/index.js";
 import { followUpProviderSessionPolicy, v1ProviderSessionPolicy, type ProviderSessionPolicy } from "../policy/index.js";
-import { isReasoningEffort, newUnboundSession, type InteractionMode, type ReasoningEffort, type SessionState, withInteractionMode } from "../session/index.js";
+import { isReasoningEffort, newUnboundSession, type FollowUpState, type InteractionMode, type ReasoningEffort, type SessionState, withInteractionMode } from "../session/index.js";
 import {
   driveProviderTurn,
   type DriveProviderTurnResult,
@@ -351,6 +352,42 @@ export class AcpBridgeRuntime {
     return readiness?.features["provider-background-work-v2"] === 1
       ? { backgroundWork: "disabled", followUps: "report" }
       : v1ProviderSessionPolicy;
+  }
+
+  /**
+   * Announces work this session registered as follow-ups, out of turn. Resolves when the work
+   * finished and the text was written to the client, or when the wait expired.
+   */
+  async announceRegisteredFollowUps(
+    sessionId: string,
+    emit: (text: string) => Promise<void>,
+  ): Promise<AnnounceOutcome> {
+    const read = async (): Promise<readonly FollowUpState[] | undefined> => (await this.currentSession(sessionId))?.followUps;
+    const write = async (items: readonly FollowUpState[]): Promise<void> => {
+      if (this.options.durableStore) {
+        await this.applyDurableTransition(sessionId, { kind: "set_follow_ups", followUps: items });
+        return;
+      }
+      const session = await this.currentSession(sessionId);
+      if (session) await this.persistWholeForReference({ ...session, followUps: items });
+    };
+    return announceFollowUps(sessionId, {
+      ...(this.options.controller.backgroundWork === undefined ? {} : { backgroundWork: this.options.controller.backgroundWork }),
+      read,
+      write,
+      emit,
+    });
+  }
+
+  private async currentSession(sessionId: string): Promise<SessionState | undefined> {
+    if (this.options.durableStore) {
+      try {
+        return await this.refreshDurable(sessionId);
+      } catch {
+        return undefined;
+      }
+    }
+    return this.sessions.get(sessionId) ?? (await this.options.store?.read?.(sessionId)) ?? undefined;
   }
 
   /**

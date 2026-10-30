@@ -185,6 +185,16 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
         });
         if (!result.terminal) throw new Error("Provider event stream ended before authoritative terminal proof");
         await runtime.assertBackgroundWorkSettled(params.sessionId);
+        // Work that outlived this turn is announced beside the session, never inside the turn:
+        // the client already has its terminal and must not wait for native work to finish.
+        void runtime
+          .announceRegisteredFollowUps(params.sessionId, async (text) => {
+            await client.notify(acp.methods.client.session.update, {
+              sessionId: params.sessionId,
+              update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+            });
+          })
+          .catch(() => undefined);
         metrics.increment("acpTerminalSent");
         metrics.markTurn(params.sessionId, result.state.generation, "acp_terminal_sent");
         await persistMetrics();

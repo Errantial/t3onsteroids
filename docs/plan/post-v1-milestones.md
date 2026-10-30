@@ -256,3 +256,16 @@ T3-HEAD worktree acceptance (2026-10-30):
 - This closes the worktree row for a normal-repo project. A worktree of a project that is itself a
   linked worktree still maps to the main repository and fails closed when that main root is not an
   approved CoS project, which is the documented limitation.
+
+Linked-worktree projects (2026-10-30, provider dc691cd):
+
+- The resolver now names the unique catalog project registered in the same repository when a
+  worktree's main root is not itself a catalog project. Two catalog projects in one repository
+  still fail closed.
+- Live resolution on `dc691cd` for a worktree of `t3onsteroids-post-v1` (which is itself a
+  linked worktree) returned `kind=worktree`, `projectId` of that project and
+  `sourceProjectPath` = the project path.
+- T3 HEAD acceptance: `t3 thread start <post-v1> … --worktree HEAD --branch linked-wt-thread
+  --provider cosbridge --model gpt-6-thinking --wait --json` ? `status:"completed"`,
+  `reply:"T3HEADLINKEDWT"`. The earlier limitation is closed; worktree and branch were removed.
+- Evidence: `test/projects.test.ts` 21/21 (new linked-worktree-of-a-linked-worktree case).

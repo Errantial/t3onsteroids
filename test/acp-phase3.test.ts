@@ -411,6 +411,28 @@ describe("Phase 3 ACP shell and lazy binding", () => {
     await expect(store.read(sessionId)).resolves.toMatchObject({ followUps: [{ id: "worker-1", announcedSeq: 0 }] });
   });
 
+  it("registers follow-ups with the input that owned the turn after its terminal cleared activeInputId", async () => {
+    const controller = makeController();
+    controller.backgroundWork = vi.fn(async (): Promise<CosBackgroundWork> => ({
+      state: "pending" as const,
+      pending: [{ id: "worker-1", label: "research", state: "active", terminal: false, outcome: null, cancellable: true }],
+    }));
+    const store = new MemoryStateStore<SessionState>();
+    // Exactly what a finished turn leaves behind: no activeInputId, policy still reporting.
+    await store.write(sessionId, {
+      sessionId,
+      bindingState: "bound",
+      interactionMode: "default",
+      cancelIntent: "none",
+      followUpPolicy: "report",
+    });
+    const runtime = new AcpBridgeRuntime({ controller, store, canonicalize: async (path) => path });
+    await expect(runtime.assertBackgroundWorkSettled(sessionId, "input-that-owned-the-turn")).resolves.toBeUndefined();
+    await expect(store.read(sessionId)).resolves.toMatchObject({
+      followUps: [{ id: "worker-1", inputId: "input-that-owned-the-turn" }],
+    });
+  });
+
   it("registers pending work as follow-ups for a session that reports them", async () => {
     const controller = makeController();
     controller.backgroundWork = vi.fn(async (): Promise<CosBackgroundWork> => ({

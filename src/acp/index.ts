@@ -430,13 +430,15 @@ export class AcpBridgeRuntime {
    * settles anyway: the turn's own drain is the end of the turn, and the work is announced when it
    * finishes. Every other session keeps the v1 fence and refuses to settle.
    */
-  async assertBackgroundWorkSettled(sessionId: string): Promise<void> {
+  async assertBackgroundWorkSettled(sessionId: string, owningInputId?: string): Promise<void> {
     const projection = await this.options.controller.backgroundWork?.(sessionId);
     if (!projection || projection.pending.length === 0) return;
     const session = this.options.durableStore
       ? await this.refreshDurable(sessionId)
       : this.sessions.get(sessionId) ?? (await this.options.store?.read?.(sessionId)) ?? undefined;
-    const inputId = session?.activeInputId;
+    // The terminal transition clears `activeInputId` before the turn returns, so the caller passes
+    // the input that owned the turn; the stored field is only the fallback.
+    const inputId = owningInputId ?? session?.activeInputId;
     if (session?.followUpPolicy !== "report" || inputId === undefined || session === undefined) {
       throw new BridgeError("turn_drain_pending", "Native background work is still pending for this provider session");
     }

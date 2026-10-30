@@ -206,7 +206,7 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
           },
         });
         if (!result.terminal) throw new Error("Provider event stream ended before authoritative terminal proof");
-        await runtime.assertBackgroundWorkSettled(params.sessionId);
+        await runtime.assertBackgroundWorkSettled(params.sessionId, result.state.inputId);
         // Work that outlived this turn is announced beside the session, never inside the turn:
         // the client already has its terminal and must not wait for native work to finish.
         void runtime

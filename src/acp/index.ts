@@ -204,13 +204,30 @@ export async function normalizePrompt(
     } else if (block.type === "resource_link") {
       textBlocks.push(await resourceLinkToText(block, canonicalRoot, canonicalize));
     } else if (block.type === "image") {
-      if (block.mimeType !== "image/webp") {
-        throw new BridgeError("unsupported_prompt_content", "Only WebP prompt images are supported");
-      }
       if (typeof block.data !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(block.data)) {
         throw new BridgeError("unsupported_prompt_content", "Prompt image data is not valid base64");
       }
-      const dataUrl = `data:image/webp;base64,${block.data}`;
+      let dataUrl: string;
+      if (block.mimeType === "image/webp") {
+        dataUrl = `data:image/webp;base64,${block.data}`;
+      } else if (block.mimeType === "image/png" || block.mimeType === "image/jpeg") {
+        const input = Buffer.from(block.data, "base64");
+        if (input.length === 0) throw new BridgeError("unsupported_prompt_content", "Prompt image is empty");
+        if (input.length > 10 * 1024 * 1024) throw new BridgeError("input_too_large", "Prompt image exceeds the conversion limit");
+        let converted: Buffer;
+        try {
+          const { default: sharp } = await import("sharp");
+          converted = await sharp(input, { limitInputPixels: 40_000_000 })
+            .rotate()
+            .webp({ quality: 90 })
+            .toBuffer();
+        } catch {
+          throw new BridgeError("unsupported_prompt_content", "Prompt image could not be converted to WebP");
+        }
+        dataUrl = `data:image/webp;base64,${converted.toString("base64")}`;
+      } else {
+        throw new BridgeError("unsupported_prompt_content", `Prompt image type ${block.mimeType} is not supported`);
+      }
       if (dataUrl.length > 512_100) throw new BridgeError("input_too_large", "Prompt image exceeds the controller limit");
       if (images.length >= 10) throw new BridgeError("unsupported_prompt_content", "At most ten prompt images are supported");
       images.push({ name: `image-${images.length + 1}.webp`, dataUrl });

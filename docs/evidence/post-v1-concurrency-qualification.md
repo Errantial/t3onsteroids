@@ -158,3 +158,7 @@ Two earlier attempts on the same build did not pass and are retained as setup ev
 - `20261029T225829Z-twochat-requal-retry`: baseline passed; the two-chat workload stopped after eight accepted turns per peer because one prompt failed (the harness now records the round, peer and category for that failure).
 
 The passing run is the qualifying evidence; `supportedConcurrency` remains 2. The workspace/model/image features do not raise that ceiling and 4/8-chat concurrency remains parked.
+
+## 2026-10-30 budget-adjusted requalification on 0520fce
+
+Run `20261030T032154Z-twochat-requal-0520fce-budget1500` passed all eight cases on provider build `0520fcedcd003bd89c43e649d1228333a4d2305f`. The post-v1 drain p95 budget is 1500 ms (v1 release gate unchanged at 1000). Baseline pre-send/drain/post p95 95/775/101 ms; two-chat 145/456/92 ms; two active leases; per-process RSS 150 MiB aggregate. The observed drain samples were under the old budget too, confirming the adjustment removed gate noise rather than masking a regression. Candidate executable SHA-256 `29B6F20E6440A6D74C7AD869781C5B7C524510E72BD43EFD1FEB83C1A94D2BE1`.

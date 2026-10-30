@@ -23,7 +23,8 @@
     "dev": "node --enable-source-maps dist/cli/index.js"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "1.9.0"
+    "@agentclientprotocol/sdk": "1.9.0",
+    "sharp": "0.35.5"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",

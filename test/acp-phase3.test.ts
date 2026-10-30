@@ -265,14 +265,23 @@ describe("Phase 3 ACP shell and lazy binding", () => {
     ], "default", "C:\\repo", canonicalize)).rejects.toMatchObject({ code: "resource_link_unavailable" });
   });
 
-  it("accepts bounded WebP images and rejects every other prompt image format", async () => {
+  it("accepts bounded WebP images, converts PNG/JPEG, and rejects undecodable input", async () => {
     const canonicalize = async (path: string) => path;
     const accepted = await normalizePrompt([
       { type: "text", text: "look" },
       { type: "image", data: "AAAA", mimeType: "image/webp" },
     ], "default", "C:\\repo", canonicalize);
     expect(accepted.images).toEqual([{ name: "image-1.webp", dataUrl: "data:image/webp;base64,AAAA" }]);
+    const { default: sharp } = await import("sharp");
+    const png = (await sharp({ create: { width: 1, height: 1, channels: 3, background: { r: 1, g: 2, b: 3 } } }).png().toBuffer()).toString("base64");
+    const converted = await normalizePrompt([
+      { type: "text", text: "look" },
+      { type: "image", data: png, mimeType: "image/png" },
+    ], "default", "C:\\repo", canonicalize);
+    expect(converted.images[0]!.dataUrl.startsWith("data:image/webp;base64,")).toBe(true);
     await expect(normalizePrompt([{ type: "image", data: "AAAA", mimeType: "image/png" }], "default", "C:\\repo", canonicalize))
+      .rejects.toMatchObject({ code: "unsupported_prompt_content" });
+    await expect(normalizePrompt([{ type: "image", data: "AAAA", mimeType: "image/gif" }], "default", "C:\\Repo", canonicalize))
       .rejects.toMatchObject({ code: "unsupported_prompt_content" });
     await expect(normalizePrompt([{ type: "image", data: "not base64!", mimeType: "image/webp" }], "default", "C:\\repo", canonicalize))
       .rejects.toMatchObject({ code: "unsupported_prompt_content" });

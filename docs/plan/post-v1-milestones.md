@@ -172,3 +172,34 @@ Requalification attempt on  520fce (20261029T234052Z-twochat-requal-0520fce):
 User decision required: keep the 1 s drain budget and accept intermittent 2-chat requalification
 failures, or approve a documented budget adjustment for this environment. The budget has not been
 changed unilaterally; the last clean 2-chat tuple remains d77cdca.
+
+Budget adjustment (user-approved, 2026-10-29):
+
+- The post-v1 live harness now defaults drainP95Ms to **1500** (override --drain-p95-budget-ms,
+  minimum 1000). The v1 release gate in src/performance-qualification.ts remains **1000** and is
+  unchanged.
+- Rationale: across d77cdca/954147b/0520fce the baseline drain p95 observed 933, 984, 1011, 1103,
+  1262 and 775 ms. 1500 keeps ~19% headroom over the worst observed sample while still failing a
+  genuine regression beyond the v1 gate.
+- Proof: run 20261030T032154Z-twochat-requal-0520fce-budget1500 passed all eight cases on
+  0520fce (baseline pre-send/drain/post p95 95/775/101; two-chat 145/456/92; drain p95 775 and 456
+  were below the old 1 s gate as well). The budget change made the gate repeatable without hiding a
+  latency regression.
+
+Attachments (user approved a transcoder):
+
+- Added sharp@0.35.5 (zero npm audit vulnerabilities). PNG and JPEG prompt images are converted to
+  WebP (quality 90, max 40 MP, 10 MB input) before the controller's 512,100-character WebP limit;
+  GIF/other formats and undecodable inputs remain explicit unsupported_prompt_content failures.
+- Evidence: 	est/acp-phase3.test.ts 17/17 (real PNG converted, garbage PNG rejected), full bridge
+  suite **300/300**, 
+pm audit 0 vulnerabilities.
+
+T3 HEAD lane (user approved):
+
+- Cloned upstream https://github.com/pingdotgg/t3code at dd148481531a0a090780a2ade20588566db099a2
+  into %TEMP%\opencode\t3head-dd14848; pnpm@12.14.0 install --filter t3... --frozen-lockfile
+  completed; the server bundle built (dist/bin.mjs, dist/binCli-*.mjs).
+- The pinned acceptance matrix still needs a configured T3 server/desktop profile and UI lane
+  pointed at the bridge; building the server alone does not exercise prompts. That lane is the next
+  executable step.

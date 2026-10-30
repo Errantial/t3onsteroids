@@ -61,8 +61,8 @@ directory, which is outside the CoS approved roots.
    `The image is a solid bright red square measuring 8 x 8 pixels.` The CoS input `e813e66d`
    drained at `drainedSeq:45` with `turnId g-1p7u8akwzdcve-0-1`.
 
-Known residual: when CoS opens a brand-new chat tab, the first image turn can complete on the page
-while the extension never publishes `turn_start`/`turn_end`. The provider turn then stays
-`admitted` and the prompt does not return. Sending the same prompt again in the now-open
-conversation drains normally; the row above was accepted on that retry, and the ACP image probe
-passed the same way. Text-only first turns were not observed to fail.
+First-turn image stalls: when CoS opened a brand-new chat tab, the first image turn could complete
+on the page while the extension never published `turn_start`/`turn_end`, leaving the provider turn
+`admitted`. That is fixed in provider `bf14457`: the page's second, post-clear recording of the same
+Send no longer replaces the authored receipt with an empty one, so the question is not filed as
+history. Re-verified 3/3 with the ACP image probe (`end_turn` in 15/18/19 s).

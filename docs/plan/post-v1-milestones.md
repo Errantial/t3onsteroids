@@ -290,8 +290,21 @@ Prompt images (2026-10-30):
   run `ordinal:7` (`status=completed`) with the reply
   `The image is a solid bright red square measuring 8 x 8 pixels.` The CoS input `e813e66d`
   drained with `drainedSeq:45`.
-- Known residual: a first image turn in a freshly opened chat tab can finish without the extension
-  publishing `turn_start`/`turn_end`, which leaves the CoS provider turn `admitted` and the
-  bridge waiting. Retrying the same prompt on the now-open conversation drains normally (both the
-  second UI attempt and the third ACP probe). Tracked as the next CoS turn-lifecycle follow-up; it
-  is not specific to attachments.
+Turn-lifecycle follow-up (fixed in provider `bf14457`, 2026-10-30):
+
+- Symptom: a first image turn in a freshly opened chat tab finished on the page but the provider
+  turn stayed `admitted`, so the ACP prompt never returned. Text-only first turns were unaffected.
+- Cause found by instrumenting the content script's send receipt: ChatGPT clears the editor while
+  the uploaded attachment tiles are still mounted, and the page's own click/submit listener records
+  the same Send a second time. That call carried no text, so it replaced the exact authored receipt
+  with an empty one; the question could then only match by file name, and the provider renames
+  tiles (`image-1.webp` becomes `image-1(8).webp`). The question was filed as history, no turn
+  opened, and the answer arrived with no `turn_start`/`turn_end`.
+- Fix: `rememberUserSend` keeps the receipt that still carries its exact text when the re-recorded
+  Send has none for the same attachment set (and is within the receipt window).
+- Evidence: new regression test in `test/content-script.test.ts`
+  (`keeps its authored text when the page records the same attachment Send again after the editor
+  cleared`) fails with 0 `turn_start` before the fix and passes after; `test/content-script.test.ts`
+  + `test/chatgpt-dom-input.test.ts` **1109/1109**; live ACP image probe 3/3 `end_turn` in
+  15/18/19 s on provider `bf14457` with extension stamp `a847740479b1` (previously about one in
+  three such turns stalled).

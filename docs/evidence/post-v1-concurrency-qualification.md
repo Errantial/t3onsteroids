@@ -166,3 +166,27 @@ Run `20261030T032154Z-twochat-requal-0520fce-budget1500` passed all eight cases 
 ## 2026-10-30 requalification on dc691cd
 
 Run `20261030T041202Z-twochat-requal-dc691cd` passed all eight cases on provider build `dc691cd97c99fdb4cebca7353319f3a9858a267f` with the post-v1 1500 ms drain budget. Baseline pre-send/drain/post p95 were 111/857/93 ms and two-chat 142/458/96 ms; candidate executable SHA-256 `B20F6B264AC538B8D3BAA5045160FDEFD743BC050A1EFAA7C97DEE69BF3185A6`. This build adds the linked-worktree resolver fallback on top of 0520fce.
+
+## 2026-10-30 requalification on f9adddd (attachment receipt + action budget)
+
+Run `20261030T073943Z-twochat-requal-f9adddd` passed all eight cases on provider build
+`f9adddd0985af4b062dd9c7d33cefb6b40991aa2` with the post-v1 1500 ms drain budget. Baseline
+pre-send/drain/post p95 112/1094/90 ms; two-chat 138/811/98 ms; two active leases; 20 two-chat turns
+with no tool-contaminated turn. Candidate executable SHA-256
+`FB068DD53445F961248A281E141339B23B689628032BF9CBAA2D38CD79B5DD2A`; extension stamp
+`a847740479b1`.
+
+Two earlier attempts on this build failed and are recorded here because they found real defects:
+
+- `20261030T063632Z-twochat-requal-bf14457` failed the two-chat case at round 9 with
+  `rate_limited`. The controller's action budget was 30/minute, while a turn spends two actions
+  (admission plus the browser acknowledgement) and both supported chats can burst at once.
+  Provider `f9adddd` sizes that budget at 120/minute and keeps the separate 600/minute read budget.
+- `20261030T070608Z-twochat-requal-bf14457-retry2` failed the same case on the same limit and
+  also timed out `long-output-slow-consumer-rss` while the browser was saturated; the harness now
+  records the bridge error code (`data.code`) in its failure evidence so this is diagnosable from
+  the manifest instead of only "Bridge request failed".
+
+A third attempt was killed after the qualification app was left running beside a second instance
+(the app reports `ServerAlreadyRunningError` and the stale `control-api/endpoint.json` makes
+health reads hang). Restarting the app on a clean profile removed that state before the passing run.

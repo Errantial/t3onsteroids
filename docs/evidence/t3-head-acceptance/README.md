@@ -47,3 +47,22 @@ designed; a successful worktree lane needs the T3 worktree base under an approve
 
 The earlier fail-closed worktree run used T3's default worktree base under the disposable T3 data
 directory, which is outside the CoS approved roots.
+
+## Attachment row (2026-10-30)
+
+1. Run the provider build that elects the shell's multi-image picker (`286cff5`, extension stamp
+   `df3b8ddd0870`) and load that extension copy in the qualification Chrome profile. Remove any
+   older copy of the extension first: two loaded copies both poll the bridge and the UI rows stall.
+2. Open an existing T3 thread, attach `t3-attach-test.png` (an 8x8 solid red PNG) through the
+   composer's file input, type `Describe the attached image in one sentence, naming its color and
+   size.` and submit.
+3. Expected: the run completes and the reply names the image's color and size. Observed:
+   `status=completed` for run `ordinal:7`, reply
+   `The image is a solid bright red square measuring 8 x 8 pixels.` The CoS input `e813e66d`
+   drained at `drainedSeq:45` with `turnId g-1p7u8akwzdcve-0-1`.
+
+Known residual: when CoS opens a brand-new chat tab, the first image turn can complete on the page
+while the extension never publishes `turn_start`/`turn_end`. The provider turn then stays
+`admitted` and the prompt does not return. Sending the same prompt again in the now-open
+conversation drains normally; the row above was accepted on that retry, and the ACP image probe
+passed the same way. Text-only first turns were not observed to fail.

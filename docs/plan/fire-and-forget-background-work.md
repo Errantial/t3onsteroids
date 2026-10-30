@@ -368,3 +368,34 @@ by the code above; the live run only proves the end-to-end sequencing. No source
 behind in the HEAD checkout — the spike patch to
 packages/provider-acp-registry/src/server/adapter.ts and the patched dist bundle were both
 reverted.
+
+### Phase 0 live spike (fresh HEAD checkout 	3head-v2)
+
+The checkout was re-cloned at `dd14848` into `%TEMP%\opencode\t3head-v2` and its server bundle
+built with `pnpm run build:bundle` in `apps/server` (the workspace `build` script is broken in
+this environment; the package-level one is not).
+
+Patch under test (three hunks, all capability-gated):
+
+- `provider-acp/src/server/adapter.ts`: a per-session `postSettleCapable` Ref set from
+  `initializeResult.agentCapabilities._meta.cosBackgroundWork === true` via the new
+  `acpAdvertisesBackgroundWork` helper; `bufferPostSettleWake` additionally requires it.
+- Same file: the pre-existing `enablePostSettleContinuation` flavor flag remains the coarse gate.
+- `provider-acp-registry/src/server/adapter.ts`: the registry flavor declares
+  `enablePostSettleContinuation: true`; the handshake capability decides whether it takes effect,
+  so the change is inert for every agent that does not advertise it.
+
+Live result with a fake local agent that advertises the capability, answers one prompt with
+`end_turn`, then emits an out-of-turn `agent_message_chunk`:
+
+- the host logged `orchestration-v2.acp-wake-turn-detected` for the thread, i.e. the wake is
+  detected exactly as designed;
+- the host created a continuation run (`ordinal:2`, thread `running`);
+- the agent received **no** second `session/prompt` — the continuation run stayed undispatched in
+  this headless CLI lane (the same agent process was still alive and idle).
+
+Conclusion for the bridge design: do not depend on the continuation run being scheduled. The bridge
+emits the out-of-turn wake **and** keeps the follow-up text in its durable queue, answering a
+continuation prompt from that queue when one arrives, and otherwise delivering it at the next user
+prompt. Both halves were already in the plan; this result makes the second one mandatory rather than
+a fallback.

@@ -96,6 +96,13 @@ explicit change.
 - Evidence: control-API reads/test/actions 140/140; bridge `cos-client` 40/40,
   `acp-phase3` 17/17, full suite **300/300**.
 
+- Admission path: provider build `2a6a1f8` accepts `providerPolicy.followUps` on `/v1/inputs`
+  (the action schema had stayed strict at `backgroundWork` only), and bridge `7f2df3c` keeps
+  `followUpPolicy` in the durable record allowlist. A live ACP probe settles `end_turn` and the
+  controller attests `{ backgroundWork: 'disabled', enforced: true, followUps: 'report' }`.
+  The announcement path still needs a live worker. Evidence:
+  `docs/plan/fire-and-forget-background-work.md`.
+
 ## M7. T3-HEAD drift detection
 
 Complete as detection. The acceptance matrix against a built HEAD is still required before widening

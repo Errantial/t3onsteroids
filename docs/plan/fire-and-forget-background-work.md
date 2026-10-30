@@ -513,3 +513,30 @@ it; `control-api-actions` + `control-api-reads` pass 135/135.
 The read tests had covered the attestation by creating the session through the store, which is why
 the action path went unseen. The live admission is the gate that catches this class of split-brain
 schema.
+
+## Eighth defect: the durable parser quarantined its own policy (2026-10-30)
+
+With the action schema fixed, the ACP probe still failed in 102 ms with `session_broken`. The
+in-process driver named the transition: `mark_dispatched was rejected (quarantined)`. The prepared
+checkpoint wrote `followUpPolicy`, but `SESSION_KEYS` in `src/state/durable.ts` did not list the
+key, so `parseRecord` classified the record as corrupt on the very next read and moved it to
+quarantine. The policy was validated *after* the allowlist check, which made the validation
+unreachable.
+
+Fixed in `7f2df3c`: the key is part of the record schema, and a regression creates, reads and
+dispatches a prepared record carrying `followUpPolicy: 'report'`. Full bridge suite **313/313**.
+
+## Live admission row (2026-10-30)
+
+Against provider build `2a6a1f8` and bridge `7f2df3c`, a real ACP probe
+(`initialize` -> `session/new` -> `session/prompt`) completed:
+
+- `session/prompt` returned `{"stopReason":"end_turn"}` after about 20 s;
+- `GET /v1/sessions/{id}` attested
+  `{ "backgroundWork": "disabled", "enforced": true, "followUps": "report" }`;
+- the durable session settled with no pending follow-ups and no quarantine file.
+
+That closes the admission half of the live row: a v2 controller now accepts the policy, persists
+it, re-attests it, and lets the turn settle. The announcement half still needs an agent that
+spawns a CoS worker on a provider session; the T3 lane does not do that, so the registration and
+announcement paths remain covered by unit tests and the contract rather than a live worker.

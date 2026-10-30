@@ -70,6 +70,13 @@ describe("follow-up announcements", () => {
     await expect(announceFollowUps("session-1", projectionless.value)).resolves.toBe("nothing");
   });
 
+  it("never calls a vanished item completed", async () => {
+    const gone: CosBackgroundWork = { state: "pending", pending: [] };
+    const harness = deps([gone]);
+    await expect(announceFollowUps("session-1", harness.value)).resolves.toBe("announced");
+    expect(harness.emit.mock.calls[0]![0]).toBe("Background work finished: research — unknown.");
+  });
+
   it("gives up after the wait instead of announcing a live item", async () => {
     const pending: CosBackgroundWork = {
       state: "pending",

@@ -351,7 +351,7 @@ describe("Phase 3 ACP shell and lazy binding", () => {
     await expect(runtime.assertBackgroundWorkSettled(sessionId)).resolves.toBeUndefined();
   });
 
-  it("hands announced follow-ups to the next prompt once", async () => {
+  it("hands announced follow-ups to the next prompt once, and keeps them if delivery fails", async () => {
     const controller = makeController();
     const store = new MemoryStateStore<SessionState>();
     const announced = { id: "worker-1", label: "research", inputId: sessionId, state: "finished", outcome: "completed" as const, announcedSeq: 0 };
@@ -366,16 +366,59 @@ describe("Phase 3 ACP shell and lazy binding", () => {
       followUps: [announced, stillPending],
     });
     const runtime = new AcpBridgeRuntime({ controller, store, canonicalize: async (path) => path });
-    await expect(runtime.takeAnnouncedFollowUps(sessionId)).resolves.toEqual([announced]);
+
+    // A failed delivery keeps the registration, so the notice is not lost.
+    await expect(runtime.deliverAnnouncedFollowUps(sessionId, async () => { throw new Error("closed"); })).rejects.toThrow("closed");
+    await expect(store.read(sessionId)).resolves.toMatchObject({ followUps: [announced, stillPending] });
+
+    const delivered: string[] = [];
+    await expect(runtime.deliverAnnouncedFollowUps(sessionId, async (item) => { delivered.push(item.id); })).resolves.toBe(1);
+    expect(delivered).toEqual(["worker-1"]);
     await expect(store.read(sessionId)).resolves.toMatchObject({ followUps: [stillPending] });
-    await expect(runtime.takeAnnouncedFollowUps(sessionId)).resolves.toEqual([]);
+    await expect(runtime.deliverAnnouncedFollowUps(sessionId, async () => undefined)).resolves.toBe(0);
+  });
+
+  it("runs one announcer per session even when two callers start one", async () => {
+    const controller = makeController();
+    let resolveWork: ((value: CosBackgroundWork) => void) | undefined;
+    const firstPoll = new Promise<CosBackgroundWork>((resolve) => { resolveWork = resolve; });
+    let polls = 0;
+    controller.backgroundWork = vi.fn(async (): Promise<CosBackgroundWork> => {
+      polls += 1;
+      if (polls === 1) return firstPoll;
+      return {
+        state: "pending",
+        pending: [{ id: "worker-1", label: "research", state: "finished", terminal: true, outcome: "completed", cancellable: false }],
+      };
+    });
+    const store = new MemoryStateStore<SessionState>();
+    await store.write(sessionId, {
+      sessionId,
+      bindingState: "bound",
+      interactionMode: "default",
+      cancelIntent: "none",
+      followUpPolicy: "report",
+      activeInputId: sessionId,
+      followUps: [{ id: "worker-1", label: "research", inputId: sessionId, state: "active", outcome: null, announcedSeq: null }],
+    });
+    const runtime = new AcpBridgeRuntime({ controller, store, canonicalize: async (path) => path });
+    const emit = vi.fn(async (_text: string) => undefined);
+    const running = runtime.announceRegisteredFollowUps(sessionId, emit);
+    await expect(runtime.announceRegisteredFollowUps(sessionId, emit)).resolves.toBe("nothing");
+    resolveWork!({ state: "pending", pending: [{ id: "worker-1", label: "research", state: "finished", terminal: true, outcome: "completed", cancellable: false }] });
+    await expect(running).resolves.toBe("announced");
+    expect(emit).toHaveBeenCalledTimes(1);
+    await expect(store.read(sessionId)).resolves.toMatchObject({ followUps: [{ id: "worker-1", announcedSeq: 0 }] });
   });
 
   it("registers pending work as follow-ups for a session that reports them", async () => {
     const controller = makeController();
     controller.backgroundWork = vi.fn(async (): Promise<CosBackgroundWork> => ({
       state: "pending" as const,
-      pending: [{ id: "worker-1", label: "research", state: "active", terminal: false, outcome: null, cancellable: true }],
+      pending: [
+        { id: "worker-done", label: "earlier", state: "finished", terminal: true, outcome: "completed", cancellable: false },
+        { id: "worker-1", label: "research", state: "active", terminal: false, outcome: null, cancellable: true },
+      ],
     }));
     const store = new MemoryStateStore<SessionState>();
     await store.write(sessionId, {

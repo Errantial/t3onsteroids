@@ -246,6 +246,8 @@ export async function normalizePrompt(
 export class AcpBridgeRuntime {
   private readonly sessions = new Map<string, SessionState>();
   private readonly resumedCwds = new Map<string, string>();
+  /** Sessions with a live follow-up announcer, so two waiters cannot announce the same result. */
+  private readonly announcingFollowUps = new Set<string>();
   private readonly makeUuid: () => string;
   private readonly canonicalize: (path: string) => Promise<string>;
   private readonly ownerId: string;
@@ -362,21 +364,29 @@ export class AcpBridgeRuntime {
     sessionId: string,
     emit: (text: string) => Promise<void>,
   ): Promise<AnnounceOutcome> {
-    const read = async (): Promise<readonly FollowUpState[] | undefined> => (await this.currentSession(sessionId))?.followUps;
-    const write = async (items: readonly FollowUpState[]): Promise<void> => {
-      if (this.options.durableStore) {
-        await this.applyDurableTransition(sessionId, { kind: "set_follow_ups", followUps: items });
-        return;
-      }
-      const session = await this.currentSession(sessionId);
-      if (session) await this.persistWholeForReference({ ...session, followUps: items });
-    };
-    return announceFollowUps(sessionId, {
-      ...(this.options.controller.backgroundWork === undefined ? {} : { backgroundWork: this.options.controller.backgroundWork }),
-      read,
-      write,
-      emit,
-    });
+    // One announcer per session: the settle path and the next-prompt path can both start one, and
+    // two waiters would emit the same result twice.
+    if (this.announcingFollowUps.has(sessionId)) return "nothing";
+    this.announcingFollowUps.add(sessionId);
+    try {
+      const read = async (): Promise<readonly FollowUpState[] | undefined> => (await this.currentSession(sessionId))?.followUps;
+      const write = async (items: readonly FollowUpState[]): Promise<void> => {
+        if (this.options.durableStore) {
+          await this.applyDurableTransition(sessionId, { kind: "set_follow_ups", followUps: items });
+          return;
+        }
+        const session = await this.currentSession(sessionId);
+        if (session) await this.persistWholeForReference({ ...session, followUps: items });
+      };
+      return await announceFollowUps(sessionId, {
+        ...(this.options.controller.backgroundWork === undefined ? {} : { backgroundWork: this.options.controller.backgroundWork }),
+        read,
+        write,
+        emit,
+      });
+    } finally {
+      this.announcingFollowUps.delete(sessionId);
+    }
   }
 
   private async currentSession(sessionId: string): Promise<SessionState | undefined> {
@@ -392,20 +402,25 @@ export class AcpBridgeRuntime {
 
   /**
    * Follow-ups that were announced out of turn and are still waiting for the client to show them.
-   * Taking them clears the registration so the next prompt does not repeat them.
+   * `deliver` runs for each item and the registration is cleared only after every delivery
+   * succeeds, so a failed write loses nothing.
    */
-  async takeAnnouncedFollowUps(sessionId: string): Promise<readonly FollowUpState[]> {
+  async deliverAnnouncedFollowUps(
+    sessionId: string,
+    deliver: (item: FollowUpState) => Promise<void>,
+  ): Promise<number> {
     const session = await this.currentSession(sessionId);
     const items = session?.followUps ?? [];
     const announced = items.filter((item) => item.announcedSeq !== null);
-    if (announced.length === 0) return [];
+    if (announced.length === 0) return 0;
+    for (const item of announced) await deliver(item);
     const remaining = items.filter((item) => item.announcedSeq === null);
     if (this.options.durableStore) {
       await this.applyDurableTransition(sessionId, { kind: "set_follow_ups", followUps: remaining });
     } else if (session) {
       await this.persistWholeForReference({ ...session, followUps: remaining });
     }
-    return announced;
+    return announced.length;
   }
 
   /**
@@ -425,14 +440,18 @@ export class AcpBridgeRuntime {
     if (session?.followUpPolicy !== "report" || inputId === undefined || session === undefined) {
       throw new BridgeError("turn_drain_pending", "Native background work is still pending for this provider session");
     }
-    const followUps = projection.pending.map((item) => ({
-      id: item.id,
-      label: item.label,
-      inputId,
-      state: item.state,
-      outcome: item.outcome ?? null,
-      announcedSeq: null,
-    }));
+    const followUps = projection.pending
+      // Items that already finished need no announcement: their report was part of this turn.
+      .filter((item) => item.terminal !== true)
+      .map((item) => ({
+        id: item.id,
+        label: item.label,
+        inputId,
+        state: item.state,
+        outcome: item.outcome ?? null,
+        announcedSeq: null,
+      }));
+    if (followUps.length === 0) return;
     if (this.options.durableStore) {
       await this.applyDurableTransition(sessionId, { kind: "set_follow_ups", followUps });
     } else {
@@ -1636,6 +1655,7 @@ export class AcpBridgeRuntime {
           }),
           pendingInteractionMode: normalized.interactionMode,
           modeTransitionInputId: inputId,
+          ...followUpFields,
         };
         const created = await this.options.durableStore.updateSession(session.sessionId, { kind: "create", state: prepared });
         if (created.status !== "updated") {

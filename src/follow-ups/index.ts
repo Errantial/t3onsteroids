@@ -52,7 +52,8 @@ export async function announceFollowUps(
   const byId = new Map(latest.pending.map((item) => [item.id, item]));
   const lines = items.map((item) => {
     const current = byId.get(item.id);
-    const outcome = current?.outcome ?? (current?.terminal === true ? "completed" : "completed");
+    // A vanished item proves nothing about how it ended, so it is never reported as completed.
+    const outcome = current === undefined ? "unknown" : (current.outcome ?? (current.terminal === true ? "completed" : "unknown"));
     const label = item.label.trim() || item.id;
     return `Background work finished: ${label} — ${outcome}.`;
   });

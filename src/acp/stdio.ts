@@ -167,17 +167,26 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
       try {
         // Work that finished after an earlier turn was announced out of turn; deliver it here as a
         // notice when the client did not act on that announcement, so it is never silently lost.
-        for (const followUp of await runtime.takeAnnouncedFollowUps(params.sessionId)) {
+        await runtime.deliverAnnouncedFollowUps(params.sessionId, async (followUp) => {
           await client.notify(acp.methods.client.session.update, {
             sessionId: params.sessionId,
             update: {
               sessionUpdate: "notice",
               severity: "info",
               title: "Background work finished",
-              description: `${followUp.label.trim() || followUp.id} — ${followUp.outcome ?? "completed"}.`,
+              description: `${followUp.label.trim() || followUp.id} — ${followUp.outcome ?? "unknown"}.`,
             },
           });
-        }
+        });
+        // An announcement that timed out is retried from this prompt instead of waiting forever.
+        void runtime
+          .announceRegisteredFollowUps(params.sessionId, async (text) => {
+            await client.notify(acp.methods.client.session.update, {
+              sessionId: params.sessionId,
+              update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+            });
+          })
+          .catch(() => undefined);
         await runtime.prompt(params);
         const admission = await runtime.awaitDurableProviderTurnOrCancelledNotSent(params.sessionId);
         if (admission.kind === "cancelled_not_sent") {

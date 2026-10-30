@@ -47,7 +47,7 @@ describe("follow-up announcements", () => {
     await expect(announceFollowUps("session-1", harness.value)).resolves.toBe("announced");
     expect(harness.emit).toHaveBeenCalledTimes(1);
     expect(harness.emit.mock.calls[0]![0]).toBe("Background work finished: research — completed.");
-    expect(harness.write).toHaveBeenCalledWith([]);
+    expect(harness.write).toHaveBeenCalledWith([{ ...item(), announcedSeq: 0 }]);
   });
 
   it("reports a failed outcome without inventing a completion", async () => {

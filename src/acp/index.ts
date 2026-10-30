@@ -391,6 +391,24 @@ export class AcpBridgeRuntime {
   }
 
   /**
+   * Follow-ups that were announced out of turn and are still waiting for the client to show them.
+   * Taking them clears the registration so the next prompt does not repeat them.
+   */
+  async takeAnnouncedFollowUps(sessionId: string): Promise<readonly FollowUpState[]> {
+    const session = await this.currentSession(sessionId);
+    const items = session?.followUps ?? [];
+    const announced = items.filter((item) => item.announcedSeq !== null);
+    if (announced.length === 0) return [];
+    const remaining = items.filter((item) => item.announcedSeq === null);
+    if (this.options.durableStore) {
+      await this.applyDurableTransition(sessionId, { kind: "set_follow_ups", followUps: remaining });
+    } else if (session) {
+      await this.persistWholeForReference({ ...session, followUps: remaining });
+    }
+    return announced;
+  }
+
+  /**
    * Settles an ACP turn.
    *
    * A provider session that reports follow-ups registers whatever native work is still pending and

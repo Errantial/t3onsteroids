@@ -57,6 +57,8 @@ export async function announceFollowUps(
     return `Background work finished: ${label} — ${outcome}.`;
   });
   await deps.emit(lines.join("\n"));
-  await deps.write([]);
+  // Keep the items, marked as announced: the next prompt turns them into a notice for the client,
+  // because a host that did not schedule a continuation would otherwise never show them.
+  await deps.write(items.map((item) => ({ ...item, announcedSeq: 0 })));
   return "announced";
 }

@@ -351,6 +351,26 @@ describe("Phase 3 ACP shell and lazy binding", () => {
     await expect(runtime.assertBackgroundWorkSettled(sessionId)).resolves.toBeUndefined();
   });
 
+  it("hands announced follow-ups to the next prompt once", async () => {
+    const controller = makeController();
+    const store = new MemoryStateStore<SessionState>();
+    const announced = { id: "worker-1", label: "research", inputId: sessionId, state: "finished", outcome: "completed" as const, announcedSeq: 0 };
+    const stillPending = { id: "worker-2", label: "build", inputId: sessionId, state: "active", outcome: null, announcedSeq: null };
+    await store.write(sessionId, {
+      sessionId,
+      bindingState: "bound",
+      interactionMode: "default",
+      cancelIntent: "none",
+      followUpPolicy: "report",
+      activeInputId: sessionId,
+      followUps: [announced, stillPending],
+    });
+    const runtime = new AcpBridgeRuntime({ controller, store, canonicalize: async (path) => path });
+    await expect(runtime.takeAnnouncedFollowUps(sessionId)).resolves.toEqual([announced]);
+    await expect(store.read(sessionId)).resolves.toMatchObject({ followUps: [stillPending] });
+    await expect(runtime.takeAnnouncedFollowUps(sessionId)).resolves.toEqual([]);
+  });
+
   it("registers pending work as follow-ups for a session that reports them", async () => {
     const controller = makeController();
     controller.backgroundWork = vi.fn(async (): Promise<CosBackgroundWork> => ({

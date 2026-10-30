@@ -1311,6 +1311,10 @@ export class AcpBridgeRuntime {
       agentCapabilities: {
         promptCapabilities: { image: true },
         sessionCapabilities: { resume: {} },
+        // The host may accept this agent's out-of-turn notifications when a turn ends with native
+        // work still running. The host gates the wake on this handshake; nothing is emitted unless
+        // a follow-up was actually registered.
+        _meta: { cosBackgroundWork: true },
       },
       agentInfo: { name: "t3onsteroids", version: BRIDGE_VERSION },
     };

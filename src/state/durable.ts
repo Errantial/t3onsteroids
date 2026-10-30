@@ -144,7 +144,7 @@ const SESSION_KEYS = new Set([
   "cwd", "canonicalCwd", "cosProjectId", "activeInputId", "activeCosTurnId", "generation", "cosEventCursor",
   "inputDispatchState", "dispatchInputId", "admissionLeaseId",
   "providerTranslation", "cancelIntent", "cancelTargetTurnId", "recoveryReason", "model", "reasoningEffort",
-  "followUps",
+  "followUpPolicy", "followUps",
 ]);
 
 const FOLLOW_UP_OUTCOMES = new Set(["completed", "failed", "cancelled"]);

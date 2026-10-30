@@ -382,6 +382,37 @@ describe("durable tagged session state", () => {
     expect(rmSpy.mock.calls.some(([target]) => String(target) === renamedTemp)).toBe(false);
   });
 
+  it("keeps a v2 follow-up policy through the durable round trip and a dispatch transition", async () => {
+    const root = await tempRoot();
+    const durable = store(root);
+    const prepared: SessionState = {
+      ...initial(),
+      bindingState: "create_pending",
+      activeInputId: inputId,
+      dispatchInputId: inputId,
+      inputDispatchState: "prepared",
+      generation: 1,
+      providerTranslation: {
+        sessionId,
+        inputId,
+        generation: 1,
+        cursor: 0,
+        cancelRequested: false,
+        assistantFinals: {},
+      },
+      followUpPolicy: "report",
+    };
+    await expect(durable.updateSession(sessionId, { kind: "create", state: prepared }))
+      .resolves.toMatchObject({ status: "updated" });
+    await expect(durable.readSession(sessionId)).resolves.toMatchObject({
+      status: "found",
+      value: { followUpPolicy: "report", providerTranslation: { inputId } },
+    });
+    const dispatched = await durable.updateSession(sessionId, { kind: "mark_dispatched", inputId, generation: 1 });
+    expect(dispatched.status).toBe("updated");
+    expect(dispatched.value).toMatchObject({ inputDispatchState: "dispatched", followUpPolicy: "report" });
+  });
+
   it.runIf(process.platform === "win32")("retries a lock-free session-journal read after transient Windows sharing errors", async () => {
     const root = await tempRoot();
     const durable = store(root);

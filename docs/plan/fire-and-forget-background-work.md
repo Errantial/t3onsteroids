@@ -433,3 +433,24 @@ Still open:
    attached.
 3. **Matrix.** Re-run the eight-case 2-chat matrix with the flag on once (1) exists, then record the
    tuple.
+
+### Delivery backstop and capability advertisement (2026-10-30, later)
+
+- 04f4af + 7ab4d86: an announced follow-up is never dropped. Items stay registered with
+  nnouncedSeq set, and the next `session/prompt` emits each as an info notice
+  ("Background work finished — <label> — <outcome>") after taking it out of durable state. Items
+  still waiting for their own announcement are left alone. This is the delivery path for a host that
+  creates the wake but never dispatches a continuation prompt.
+- 9e2c8d9: the bridge's `initialize` advertises `agentCapabilities._meta.cosBackgroundWork` so a
+  patched host accepts the out-of-turn notification; the host gates on it and the bridge emits
+  nothing unless a follow-up was registered.
+- Bridge suite **307/307**; CoS control-api reads **77/77**.
+
+Live checks completed: CoS build `3804227` advertises `provider-background-work-v2: 1`; the
+bridge's handshake carries `_meta.cosBackgroundWork: true`; a patched HEAD host logs
+`orchestration-v2.acp-wake-turn-detected` and creates the continuation run.
+
+Live row still missing: a complete turn against the current build with a session attested as
+`{ backgroundWork: 'disabled', enforced: true, followUps: 'report' }`. The qualification browser
+was stalled when that was attempted (`delivery_unconfirmed` before admission, with the app logging
+a sleep gap), so it needs a healthy window rather than a code change.

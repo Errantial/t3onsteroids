@@ -233,3 +233,11 @@ T3-HEAD server/CLI acceptance (headless, 2026-10-30):
   failed` at prompt start). That is the expected workspace refusal; testing worktree success needs
   T3's worktree base configured under an approved CoS root.
 - Cleanup: server stopped, acceptance branch/worktree removed.
+
+T3-HEAD restart/resume acceptance (2026-10-30):
+
+- The T3 HEAD server was stopped and restarted against the same disposable base dir; the existing
+  thread was messaged again with `t3 thread send <threadId> "Reply with exactly T3HEADRESUME…"
+  --wait --json`.
+- Result: `status:"completed"`, `reply:"T3HEADRESUME"` on run ordinal 3. T3 re-spawned the
+  provider process and the bridge resumed the same CoS session without duplicating history.

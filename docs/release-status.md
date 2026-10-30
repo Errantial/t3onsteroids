@@ -1,8 +1,8 @@
 # Release status
 
-**Current release: `1.1.0`** — the post-v1 feature release on T3 Code `0.1.5` (`6d450a42…`, identical to the published stable tag). It adds two-chat concurrency, workspace/worktree binding, model and reasoning selection, prompt images, and background-work projection/follow-ups. `1.1.0` is a feature release, not a new qualification of the full V1 matrix: the release-qualified support tuple remains `v1.0.0` until the V1 matrix is rerun on `0.1.5`. `--release-readiness` therefore reports `t3BaselineQualified:false` and `releaseQualified:false` on this baseline, while the historical `v1.0.0` gates below remain green for their own tuple.
+**Current release: `1.1.1`** - the post-v1 feature release on T3 Code `0.1.5` (`6d450a42…`, identical to the published stable tag), plus the T3 Code 0.1.5 Windows installer with the t3onsteroids T3 patch series and T3 Connect enabled. It adds two-chat concurrency, workspace/worktree binding, model and reasoning selection, prompt images, and background-work projection/follow-ups. `1.1.1` is a feature release, not a new qualification of the full V1 matrix: the release-qualified support tuple remains `v1.0.0` until the V1 matrix is rerun on `0.1.5`. `--release-readiness` therefore reports `t3BaselineQualified:false` and `releaseQualified:false` on this baseline, while the historical `v1.0.0` gates below remain green for their own tuple.
 
-## 1.1.0 boundary
+## 1.1.1 boundary
 
 - T3 Code `0.1.5` / `6d450a4284852af137b2f3407fddd89eb76e7644` (also `0.1.5-nightly.20261029.3877`); T3-HEAD acceptance additionally exercised `dd148481531a0a090780a2ade20588566db099a2` (0.1.6 nightly).
 - CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`, controller protocol 1, provider-extension build `2a6a1f8291e0bc45793d0e68f0b7cfa024f87be4`.
@@ -11,6 +11,21 @@
 - Offline verification for this release: full `npm run verify` (typecheck, ESLint, build, Vitest, package smoke). The final suite passes 29 test files / 319 tests, including the release-version consistency, capacity-scaled polling and no-usage-reporting guards.
 
 Post-v1 evidence lives in `docs/evidence/post-v1-concurrency-qualification.md`, `docs/plan/post-v1-milestones.md`, `docs/plan/fire-and-forget-background-work.md` and the T3-HEAD acceptance record under `docs/evidence/t3-head-acceptance/`. The last fully passing two-chat tuple and its executable identity are recorded in the "2026-10-30 post-v1 close-out" section below; later provider builds add only attachment-gate behavior and are covered by their focused suites.
+
+## Windows installer and T3 Connect (`v1.1.1`)
+
+`v1.1.1` publishes the T3 Code 0.1.5 Windows x64 installer built from the ChatGPT Browser fork with the maintained t3onsteroids T3 patch series:
+
+```text
+T3-Code-0.1.5-v1.1.1.20261030.c8cd959156.connect1-x64.exe
+```
+
+- Base: T3 Code `0.1.5` (`6d450a42…`) plus the ChatGPT Browser fork at `493e87f8f9`.
+- Patch series: `handoff/t3-patches/main-2026-10-29-6d450a42/` (`0001` tokens/sec, `0002` ACP per-turn usage) applied with `git am --3way` without conflicts; the build commit is recorded in the installer filename and release notes.
+- T3 Connect: the production public relay (`https://relay.t3.codes`), Clerk publishable key, JWT template and CLI OAuth client are baked into the packaged server (`connect1` build). `t3 connect status --json` works against the extracted packaged server without runtime environment variables.
+- Patches verified in the packaged payload: `Show tokens/sec`, `tok/s`, `Last turn averaged` (web) and `turnTokenUsage` (ACP) are present in `server.asar`.
+- The installer does **not** bundle or auto-register the t3onsteroids bridge; the bridge remains the Local ACP provider distributed in the source and patch assets of this release.
+- Qualification: focused patch tests (web `7/7`, provider-acp `5/5`, `AcpAdapterV2` `72/72`), installer build, packaged-server T3 Connect status, installer payload smoke, and the bridge's full `npm run verify` (`29` files / `319` tests). The fork's full workspace typecheck still reports one pre-existing `ProviderInstanceRegistryHydration` layer-assertion error unrelated to the patch series.
 
 ## Released `v1.0.0` tuple (still the qualified support tuple)
 
@@ -58,9 +73,9 @@ For live qualification, the preferred lane while the active CoS installation rem
 ## Dependency audit disposition
 
 
-## Post-v1 concurrency lane (included in `1.1.0`)
+## Post-v1 concurrency lane (included in `1.1.1`)
 
-The durable multi-chat scheduler is implemented at rebased commit `22d561f` on `feat/post-v1-concurrency`, directly above released v1.0.0 (`5681f812...`). The qualification harness and cancellation hardening follow at `cf3f50e` and `c13cf4b`. The merged `1.1.0` bridge verification passes typecheck, ESLint, build, package smoke, and 29 test files / 319 tests, including the exact-generation cancellation-reconciliation guard. The two-chat ceiling is qualified below; the scheduler implementation alone does not qualify four or eight chats and does not alter the historical v1.0.0 release result.
+The durable multi-chat scheduler is implemented at rebased commit `22d561f` on `feat/post-v1-concurrency`, directly above released v1.0.0 (`5681f812...`). The qualification harness and cancellation hardening follow at `cf3f50e` and `c13cf4b`. The merged `1.1.1` bridge verification passes typecheck, ESLint, build, package smoke, and 29 test files / 319 tests, including the exact-generation cancellation-reconciliation guard. The two-chat ceiling is qualified below; the scheduler implementation alone does not qualify four or eight chats and does not alter the historical v1.0.0 release result.
 
 Current post-v1 concurrency status: `supportedConcurrency=2`. The inherited v1 release manifest remains `releaseQualified=true` for the already-qualified v1 support tuple; it is not evidence for a higher post-v1 concurrency ceiling. The two-chat gate passed on 2026-10-29 on provider build `8b907eeb1ec60617fda94373ed36799d51f29790` (executable SHA-256 not recorded for this run) with the full eight-case isolated matrix: 10-turn single-chat baseline and 20-turn two-chat workload both under budget (pre-send p95 110 ms and 209 ms; drain p95 591 ms and 460 ms; post-drain p95 111 ms and 105 ms), plus passing queue/cancel/slot reuse, independent cancellation, SSE reconnect, crash/restart, cross-session stale-event and long-output slow-consumer RSS cases. The earlier 300-500 ms pre-send spikes were caused by the isolated profile's invalid OpenAI tunnel configuration (`kind: openai` with empty IDs), which started and failed a tunnel on every input; setting `tunnel.kind: "manual"` removed the churn and the gate passed. Four- and eight-chat qualification are parked (see the final paragraph and `PLAN.md`); do not raise the ceiling before a clean, repeatable gate.
 

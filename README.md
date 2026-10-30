@@ -4,7 +4,7 @@ Windows-first bridge for using Chat On Steroids (CoS) as a Local ACP provider in
 
 ## Status
 
-**`1.1.0`** is the latest feature release. It targets **T3 Code `0.1.5`** (`6d450a4284852af137b2f3407fddd89eb76e7644`, also published as nightly `0.1.5-nightly.20261029.3877`) and adds the post-v1 capability set on top of the release-qualified `1.0.0` bridge:
+**`1.1.1`** is the latest feature release. It targets **T3 Code `0.1.5`** (`6d450a4284852af137b2f3407fddd89eb76e7644`, also published as nightly `0.1.5-nightly.20261029.3877`) and adds the post-v1 capability set on top of the release-qualified `1.0.0` bridge:
 
 - two simultaneously active bridged turns per stable CoS controller/profile, with a durable FIFO queue and exact cancellation/release;
 - workspace and T3 worktree binding through the versioned `provider-session-workspace-v1` contract;
@@ -18,7 +18,19 @@ The complete pinned v1 support tuple from `1.0.0` (T3 `0.0.46-nightly.20261013.3
 
 See [`PLAN.md`](PLAN.md) for the gate sequence and [`docs/release-status.md`](docs/release-status.md) for the current release boundary.
 
-## Supported tuple for `1.1.0`
+## Windows installer and T3 Connect
+
+`v1.1.1` also publishes the **T3 Code 0.1.5 Windows x64 installer** built from the ChatGPT Browser fork with the t3onsteroids patch series applied:
+
+```text
+T3-Code-0.1.5-v1.1.1.20261030.c8cd959156.connect1-x64.exe
+```
+
+That installer includes the optional per-thread tokens/sec and ACP per-turn token usage patches, the managed ChatGPT Browser provider, and **T3 Connect enabled with the production public relay/Clerk configuration** baked into the build. `t3 connect status --json` works against the packaged server without runtime environment variables.
+
+The installer is the T3 Code application; the t3onsteroids bridge remains the Local ACP provider distributed in the source and patch assets of this release. The installer does not auto-register the bridge.
+
+## Supported tuple for `1.1.1`
 
 - T3 Code `0.1.5` / `6d450a4284852af137b2f3407fddd89eb76e7644`
   (also published as `0.1.5-nightly.20261029.3877`; T3-HEAD acceptance additionally exercised `dd14848…`);
@@ -57,11 +69,11 @@ The CoS **Local control API** must be enabled for live bridge use. **Allow actio
 
 ## Boundaries
 
-V1 binds only an **exact canonical CoS project root**. A worktree, subdirectory, remapped path, junction/reparse-changed path, or otherwise nonexact root fails closed instead of guessing another project. `1.1.0` adds explicit workspace binding when the controller advertises `provider-session-workspace-v1`: exact project roots, linked Git worktrees and plain project subdirectories resolve to their owning project, and the resolved workspace is revalidated on every prompt. T3 and CoS must run on the same host under the **same OS user/profile**; same-host/different-user and remote-control scenarios are outside the supported claim.
+V1 binds only an **exact canonical CoS project root**. A worktree, subdirectory, remapped path, junction/reparse-changed path, or otherwise nonexact root fails closed instead of guessing another project. `1.1.1` adds explicit workspace binding when the controller advertises `provider-session-workspace-v1`: exact project roots, linked Git worktrees and plain project subdirectories resolve to their owning project, and the resolved workspace is revalidated on every prompt. T3 and CoS must run on the same host under the **same OS user/profile**; same-host/different-user and remote-control scenarios are outside the supported claim.
 
-`1.1.0` supports **two active bridged turns per stable CoS controller/profile identity**. A third turn queues durably behind the active set (bounded queue) instead of being silently admitted; cancellation and release are exact per session. Four- and eight-chat concurrency remain parked behind their own measured gates.
+`1.1.1` supports **two active bridged turns per stable CoS controller/profile identity**. A third turn queues durably behind the active set (bounded queue) instead of being silently admitted; cancellation and release are exact per session. Four- and eight-chat concurrency remain parked behind their own measured gates.
 
-Bridge-created provider sessions require CoS `backgroundWork=disabled` for the v1 lane; `1.1.0` adds the versioned report-after-drain policy where the controller advertises it. A delivered turn does not settle from `turn_end` alone: the bridge waits for the exact `turn_drained` high-water, persists all events through it, validates the authoritative final assistant event, and rechecks the provider-session policy before ACP terminal success. Pending native work is projected and fenced before settlement.
+Bridge-created provider sessions require CoS `backgroundWork=disabled` for the v1 lane; `1.1.1` adds the versioned report-after-drain policy where the controller advertises it. A delivered turn does not settle from `turn_end` alone: the bridge waits for the exact `turn_drained` high-water, persists all events through it, validates the authoritative final assistant event, and rechecks the provider-session policy before ACP terminal success. Pending native work is projected and fenced before settlement.
 
 ## Recovery and reconnect
 

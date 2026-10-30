@@ -214,3 +214,19 @@ changes only the attachment upload gate, which the text-only matrix does not exe
 is the 169-case DOM suite, the 1110-case extension suite, and the passing attachment rows. Candidate
 executable SHA-256 `CF83D86CCDC49D2C22F9737BA7190D7E64D2D9F666D8281BDA530E8125AE74CB`; extension
 stamp `6fe6ebfb9c97`.
+
+### Environment window observed on 2026-10-30 (why the matrix is not re-run further)
+
+A single warm-up image prompt on provider `1fc1936` was admitted, claimed and acknowledged, then
+sat `active` with only `user_message`/`turn_start` for over a minute. Direct DevTools
+inspection of that conversation showed the page itself stopped inside its own turn:
+
+`Latest response / Still waiting for the current operation to complete` with no Stop control and
+no assistant answer. The page never produced an answer, so no drain could be observed — the provider
+capture path is not what stalled.
+
+The same window also showed `wss://ws.chatgpt.com` and `wss://codex-cloud-backend.chatgpt.com`
+connections failing with `ERR_NAME_NOT_RESOLVED` and image uploads taking tens of seconds. That is
+an external ChatGPT/network condition; the two `1fc1936` matrix attempts recorded above ended in
+`prompt_timeout` for the same reason. Re-running the eight-case matrix needs a window in which the
+page answers normally; no code change is pending for it.

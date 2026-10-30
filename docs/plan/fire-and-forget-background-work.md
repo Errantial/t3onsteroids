@@ -487,9 +487,8 @@ without bound.
 
 Bridge suite after the pass: **310/310**.
 
-Still open (unchanged): the live row needs a healthy qualification browser. The last attempt never
-reached admission — CoS logged no `admitted` line and the app had recorded a sleep gap — and the
-probe was stopped rather than left hanging.
+Superseded by the two defects below: the next live attempt did reach admission, and it failed
+inside the bridge (the durable record parser) rather than in the browser.
 
 One residual contract gap was closed in the bridge (`abf53e6`): `parseProviderPolicy` now
 carries `followUps`, and a reporting session whose attestation loses it is marked `policy_lost`

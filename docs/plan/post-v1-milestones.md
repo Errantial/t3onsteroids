@@ -217,3 +217,19 @@ T3-HEAD acceptance probe result (2026-10-30):
 - This covers the exact ACP negotiation/lifecycle contract against HEAD. The full pinned V1-19
   UI matrix (project switching, approvals, attachments, restart lanes) still needs a configured T3
   HEAD server/web profile; the protocol probe is the headless portion of that matrix.
+
+T3-HEAD server/CLI acceptance (headless, 2026-10-30):
+
+- Disposable base dir `%TEMP%\opencode\t3head-profile` seeded with one `acpRegistry` provider
+  (source `local`, `node.exe` + `dist/cli/index.js`, and the isolated CoS profile/state env).
+- T3 HEAD server started headless on `127.0.0.1:8795` with that base dir; project added through
+  the CLI.
+- Single turn: `t3 thread start <repo> "Reply with exactly T3HEADCLI…" --provider cosbridge
+  --model gpt-6-thinking --wait --json` ? `status:"completed"`, `reply:"T3HEADCLI"`.
+- Multi-turn: `t3 thread send <threadId> "Reply with exactly T3HEADSECOND…" --wait --json` ?
+  `status:"completed"`, `reply:"T3HEADSECOND"`.
+- Worktree lane: a thread with `--worktree HEAD` produced a checkout under the disposable base
+  dir, which is outside the isolated CoS approved roots, and failed closed (`Bridge request
+  failed` at prompt start). That is the expected workspace refusal; testing worktree success needs
+  T3's worktree base configured under an approved CoS root.
+- Cleanup: server stopped, acceptance branch/worktree removed.

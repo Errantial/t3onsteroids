@@ -18,3 +18,21 @@ create a session and complete one prompt. Expected result: protocolVersion 1, no
 
 Observed 2026-10-30: PASS in 18.03 s (1 test). The full pinned V1-19 UI matrix still requires a
 configured T3 HEAD server/web profile.
+
+## T3 HEAD server + CLI acceptance (2026-10-30)
+
+The headless server lane was also exercised:
+
+1. Seed `<base-dir>/userdata/settings.json` with an `acpRegistry` provider:
+   `{ source: "local", commandPath: "<node.exe>", commandArgs: ["<repo>/dist/cli/index.js"] }` and
+   environment variables for `T3ONSTEROIDS_COS_USER_DATA_DIR` / `T3ONSTEROIDS_STATE_DIR`.
+2. `node apps/server/dist/bin.mjs serve --base-dir <base-dir> --port 8795 --host 127.0.0.1
+   --no-browser <repo>`.
+3. `node apps/server/dist/bin.mjs project add <repo> --base-dir <base-dir>`.
+4. `thread start <repo> "Reply with exactly T3HEADCLI and nothing else." --provider cosbridge
+   --model gpt-6-thinking --wait --json --base-dir <base-dir>` ? `reply:"T3HEADCLI"`.
+5. `thread send <threadId> "Reply with exactly T3HEADSECOND and nothing else." --wait --json` ?
+   `reply:"T3HEADSECOND"`.
+
+A `--worktree HEAD` thread created its checkout outside CoS approved roots and failed closed as
+designed; a successful worktree lane needs the T3 worktree base under an approved CoS root.

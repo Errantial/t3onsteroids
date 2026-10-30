@@ -454,3 +454,44 @@ Live row still missing: a complete turn against the current build with a session
 `{ backgroundWork: 'disabled', enforced: true, followUps: 'report' }`. The qualification browser
 was stalled when that was attempted (`delivery_unconfirmed` before admission, with the app logging
 a sleep gap), so it needs a healthy window rather than a code change.
+
+---
+
+## Debug pass over the new implementation (2026-10-30)
+
+Six defects were found by auditing the new paths against the durable transitions; all are fixed
+with tests.
+
+1. **The policy was never persisted on the production path (feature dead on arrival).**
+   `followUpPolicy` was only written into the non-durable branch; the durable `prepared`
+   checkpoint — the one production uses — omitted it, so a v2 session settled with an empty policy
+   and `assertBackgroundWorkSettled` answered `turn_drain_pending` forever. Proven by the live
+   probe state files (`followUpPolicy=` empty). Fixed in the prepared state.
+2. **Registration would have announced historical work.** The CoS projection now lists every worker
+   of the conversation, including terminal ones; the bridge registered whatever the projection
+   carried. It now skips `terminal === true` (a finished item needs no announcement — its report
+   was part of the turn).
+3. **`activeInputId` is cleared before the turn returns.** `finalize_terminal` deletes it inside
+   the drive, so reading it at settle time always failed. The caller now passes
+   `result.state.inputId`; the stored field remains a fallback.
+4. **A failed notice used to discard the registration.** The old take-then-emit order cleared items
+   before the client write. `deliverAnnouncedFollowUps` now delivers first and clears after.
+5. **Two announcers could double-report.** The settle path and the next-prompt path can both start
+   one. A per-session in-flight set makes the second caller a no-op.
+6. **A timed-out announcement was never retried.** The next prompt now restarts the announcer for
+   items that are still unannounced.
+
+Smaller fixes: a vanished item is announced as `unknown` rather than `completed`; the CoS
+projection is capped at the newest fifty workers so a long-lived chat cannot grow the polled payload
+without bound.
+
+Bridge suite after the pass: **310/310**.
+
+Still open (unchanged): the live row needs a healthy qualification browser. The last attempt never
+reached admission — CoS logged no `admitted` line and the app had recorded a sleep gap — and the
+probe was stopped rather than left hanging.
+
+One residual contract gap, noted not fixed: the bridge's `parseProviderPolicy` validates
+`backgroundWork`/`enforced` and ignores the new `followUps` field, so it cannot assert that the
+controller honoured the requested policy. Registration is still driven by the live projection, so a
+downgrade would surface as no pending work rather than a wrong announcement.

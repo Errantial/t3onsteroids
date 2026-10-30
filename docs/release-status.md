@@ -61,3 +61,15 @@ The 2-chat tuple is requalified on provider build `0520fce` with the user-approv
 The 2-chat tuple is now requalified on provider build `dc691cd` (the linked-worktree resolver build): run `20261030T041202Z-twochat-requal-dc691cd` passed all eight cases with baseline pre-send/drain/post p95 111/857/93 ms and two-chat 142/458/96 ms. Executable SHA-256 `B20F6B264AC538B8D3BAA5045160FDEFD743BC050A1EFAA7C97DEE69BF3185A6`.
 
 Prompt-image attachments are now accepted end to end on the `286cff5` provider build: the T3 HEAD UI sent `t3-attach-test.png` with a one-sentence prompt (thread run `ordinal:7`, `status=completed`) and received `The image is a solid bright red square measuring 8 x 8 pixels.` The fix elects the shell's multi-image picker beside its new camera picker; two multi-image inputs still fail closed. Known residual: a first image turn in a freshly opened chat tab can end without the extension publishing `turn_start`/`turn_end`, which leaves the CoS provider turn `admitted` until the prompt is retried on the now-open conversation.
+
+## 2026-10-30 post-v1 close-out
+
+- Provider build `1fc1936` (extension stamp `6fe6ebfb9c97`, executable SHA-256
+  `CF83D86CCDC49D2C22F9737BA7190D7E64D2D9F666D8281BDA530E8125AE74CB`) ships the prompt-image
+  fixes and the action-budget sizing. The last fully passing eight-case 2-chat tuple is `f9adddd`
+  (baseline pre-send/drain/post p95 112/1094/90 ms; two-chat 138/811/98 ms); `1fc1936` adds only
+  the attachment upload gate and is covered by its DOM/extension suites and the attachment rows.
+- T3 HEAD `dd14848` acceptance matrix is complete (protocol probe, headless single/multi-turn,
+  restart/resume, worktree, linked worktree, UI text, UI attachment). The declared baseline pin
+  remains `6d450a42` because that is the nightly the v1 gate qualified.
+- `supportedConcurrency` remains 2; 4/8-chat is parked.

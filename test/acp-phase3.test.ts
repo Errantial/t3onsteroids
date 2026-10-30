@@ -423,10 +423,9 @@ describe("Phase 3 ACP shell and lazy binding", () => {
       cosProjectId: "project-1",
       followUpPolicy: "report",
     });
-    const ctrl = makeController({
-      // The controller still attests the v1 fence but no longer reports follow-ups.
-      requireBackgroundWorkDisabled: vi.fn(async () => ({ backgroundWork: "disabled" as const, enforced: true as const })),
-    });
+    const ctrl = makeController();
+    // The controller still attests the v1 fence but no longer reports follow-ups.
+    ctrl.requireBackgroundWorkDisabled = vi.fn(async () => ({ backgroundWork: "disabled" as const, enforced: true as const }));
     const runtime = new AcpBridgeRuntime({ controller: ctrl, store, makeUuid: () => sessionId, canonicalize: async (path) => path });
     await expect(runtime.prompt({ sessionId, prompt: [{ type: "text", text: "hello" }] }))
       .rejects.toMatchObject({ code: "provider_policy_unavailable" });

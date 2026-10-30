@@ -21,8 +21,9 @@ export interface ReleaseReadiness {
 
 export function releaseReadiness(): ReleaseReadiness {
   const gates = v1ReleaseGateManifest.gates;
-  // Keep the tuple check separate from the gate roll-up: moving the development baseline must not
-  // silently widen the release claim to a T3 commit nobody live-qualified.
+  // Every historical gate can stay green while the working tree targets a newer T3 baseline than
+  // the one that was live-qualified. Keep the tuple check separate from the gate roll-up so the
+  // release claim cannot silently widen to a baseline nobody exercised.
   const t3BaselineQualified = v1ReleaseGateManifest.qualifiedT3Sha === compatibility.t3.sha;
   const releaseQualified = t3BaselineQualified &&
     Object.values(gates).every((gate) => gate.status === "pass");

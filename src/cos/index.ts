@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { compatibility } from "../compatibility.js";
 import type { BridgeMetrics } from "../metrics.js";
 import { MuxHub } from "./mux.js";
+import { scaledPollMs } from "../state/poll.js";
 
 export const COS_CONTROL_PROTOCOL = 1 as const;
 export const COS_APP_ID = "chat-on-steroids" as const;
@@ -462,6 +463,8 @@ export class CosControllerClient {
     private readonly transport: CosControllerTransport = { fetch: globalThis.fetch.bind(globalThis) },
     private readonly retryPolicy: RetryPolicy = DEFAULT_RETRY_POLICY,
     private readonly bridgeMetrics?: BridgeMetrics,
+    /** Stretches internal polling loops so concurrent turns share the controller's read budget. */
+    private readonly pollScale = 1,
   ) {}
 
   private async getDiscovery(force = false): Promise<CosControllerDiscovery> {
@@ -1006,7 +1009,7 @@ export class CosControllerClient {
     await this.requestStopExactTurn(sessionId, turnId);
 
     const timeoutMs = options.timeoutMs ?? 10_000;
-    const pollMs = options.pollMs ?? 50;
+    const pollMs = options.pollMs ?? scaledPollMs(50, this.pollScale);
     const deadline = Date.now() + timeoutMs;
     let cursor = 0;
     while (Date.now() < deadline) {

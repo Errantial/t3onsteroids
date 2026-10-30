@@ -4,23 +4,30 @@ Windows-first bridge for using Chat On Steroids (CoS) as a Local ACP provider in
 
 ## Status
 
-The v1 implementation is versioned as **`1.0.0`** and is **release-qualified on the pinned Windows support tuple**. The production bridge includes the stable ACP v1 stdio provider, CoS protocol-1/provider-extension client, drain-aware event translator, durable Windows state and cross-process admission lease, restart/recovery logic, prompt normalization, bounded streaming/backpressure, setup diagnostics, and metadata-only release instrumentation.
+**`1.1.0`** is the latest feature release. It targets **T3 Code `0.1.5`** (`6d450a4284852af137b2f3407fddd89eb76e7644`, also published as nightly `0.1.5-nightly.20261029.3877`) and adds the post-v1 capability set on top of the release-qualified `1.0.0` bridge:
 
-All release-manifest gates are PASS for bridge implementation `f3a672cffdee77f54d377d5594893e0606d20d5b` and provider build `495e3e96504d9b865c18478f7b42915280712f84`. Step 7 live performance, the full pinned V1-01…V1-19 acceptance matrix, current-T3-HEAD drift, and fresh-checkout release preparation are current. `node dist/cli/index.js --release-readiness` reports `releaseQualified:true`.
+- two simultaneously active bridged turns per stable CoS controller/profile, with a durable FIFO queue and exact cancellation/release;
+- workspace and T3 worktree binding through the versioned `provider-session-workspace-v1` contract;
+- model and reasoning-effort selection from T3 through `provider-model-catalog-v1`;
+- prompt images (PNG/JPEG converted to WebP, bounded by the controller contract) and other attachment hardening;
+- native CoS background-work projection with a pending-work fence and report-after-drain follow-ups;
+- the same durable recovery, drain-aware termination, bounded streaming, diagnostics and privacy guarantees as v1;
+- a maintained T3 patch series for optional per-thread tokens/sec and ACP per-turn token usage, ported to T3 `0.1.5`.
 
-See [`PLAN.md`](PLAN.md) for the authoritative gate sequence and [`docs/release-status.md`](docs/release-status.md) for the current release boundary.
+The complete pinned v1 support tuple from `1.0.0` (T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d…`, CoS `2.1.39` / `87ae9d63…`, provider build `495e3e96…`) remains the **release-qualified** tuple recorded in `src/release-manifest.ts`. Qualification is tuple-specific: on the `0.1.5` development/release baseline, `--release-readiness` reports `t3BaselineQualified:false` and `releaseQualified:false` until the full V1 matrix is rerun on that exact tuple. Post-v1 evidence (two-chat matrix, T3-HEAD acceptance, attachment and recovery lanes) is recorded in `docs/release-status.md` and `docs/evidence/`.
 
-## Supported v1 tuple
+See [`PLAN.md`](PLAN.md) for the gate sequence and [`docs/release-status.md`](docs/release-status.md) for the current release boundary.
 
-The first support claim is intentionally pinned:
+## Supported tuple for `1.1.0`
 
-- T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`;
-- CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`;
-- CoS provider-extension build `495e3e96504d9b865c18478f7b42915280712f84` with all five required v1 provider features;
+- T3 Code `0.1.5` / `6d450a4284852af137b2f3407fddd89eb76e7644`
+  (also published as `0.1.5-nightly.20261029.3877`; T3-HEAD acceptance additionally exercised `dd14848…`);
+- CoS `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`, controller protocol 1;
+- CoS provider-extension build `2a6a1f8…` with the v1 feature set plus workspace, model-catalog, prompt-image, multiplexed-stream and background-work contracts; the exact build and feature versions are in `src/compatibility.ts`;
 - ACP SDK `1.9.0`;
-- Node 24 on Windows x64.
+- Node 24 on Windows x64 (`sharp` is used for PNG/JPEG → WebP prompt images).
 
-The separate current-upstream T3 drift lane was run against `807319c276c6831b2c219640e9da5b38019a8f1d` and recorded `compatible`. That result does not silently widen the pinned v1 support tuple.
+The maintained T3 patch series lives in `handoff/t3-patches/` and is verified against both the pinned `ffb4af8d` release tuple and the `0.1.5` baseline. It is never sent upstream; do not open PRs, issues or discussions against `pingdotgg/t3code`.
 
 ## Setup and launch
 
@@ -48,18 +55,18 @@ node dist/cli/index.js --diagnose --user-data-dir <CoS user data dir> --cwd <exa
 
 The CoS **Local control API** must be enabled for live bridge use. **Allow actions** must also be enabled for every real bridged prompt, pending-input cancel, or exact-turn Stop because those operations use controller action routes. Diagnostics, exact project resolution, and ACP provider-validation/session-allocation probes remain read-only and do not require Allow actions.
 
-## V1 boundaries
+## Boundaries
 
-V1 binds only an **exact canonical CoS project root**. A worktree, subdirectory, remapped path, junction/reparse-changed path, or otherwise nonexact root fails closed instead of guessing another project. T3 and CoS must run on the same host under the **same OS user/profile**; same-host/different-user and remote-control scenarios are outside the v1 support claim.
+V1 binds only an **exact canonical CoS project root**. A worktree, subdirectory, remapped path, junction/reparse-changed path, or otherwise nonexact root fails closed instead of guessing another project. `1.1.0` adds explicit workspace binding when the controller advertises `provider-session-workspace-v1`: exact project roots, linked Git worktrees and plain project subdirectories resolve to their owning project, and the resolved workspace is revalidated on every prompt. T3 and CoS must run on the same host under the **same OS user/profile**; same-host/different-user and remote-control scenarios are outside the supported claim.
 
-V1 supports **one active bridged turn per stable CoS controller/profile identity**. A second concurrent turn is rejected rather than silently queued. Two-to-four concurrent chats are a post-v1 qualification target.
+`1.1.0` supports **two active bridged turns per stable CoS controller/profile identity**. A third turn queues durably behind the active set (bounded queue) instead of being silently admitted; cancellation and release are exact per session. Four- and eight-chat concurrency remain parked behind their own measured gates.
 
-Bridge-created provider sessions require CoS `backgroundWork=disabled`, so workers/Goal/Loop/continuation work cannot outlive a provider turn. A delivered turn does not settle from `turn_end` alone: the bridge waits for the exact `turn_drained` high-water, persists all events through it, validates the authoritative final assistant event, and rechecks the provider-session policy before ACP terminal success.
+Bridge-created provider sessions require CoS `backgroundWork=disabled` for the v1 lane; `1.1.0` adds the versioned report-after-drain policy where the controller advertises it. A delivered turn does not settle from `turn_end` alone: the bridge waits for the exact `turn_drained` high-water, persists all events through it, validates the authoritative final assistant event, and rechecks the provider-session policy before ACP terminal success. Pending native work is projected and fenced before settlement.
 
 ## Recovery and reconnect
 
-The bridge persists only compact metadata needed for binding, cursor/generation, cancellation, mode, recovery, and admission ownership; it does not persist prompts, assistant text, tool bodies/results, browser text, or controller credentials. On controller/CoS restart it rediscovers the endpoint/token, keeps the same stable admission domain, and reconciles the exact saved input/turn before any retry or lease release.
+The bridge persists only compact metadata needed for binding, cursor/generation, cancellation, mode, recovery, admission ownership and bounded follow-up state; it does not persist prompts, assistant text, tool bodies/results, browser text, or controller credentials. On controller/CoS restart it rediscovers the endpoint/token, keeps the same stable admission domain, and reconciles the exact saved input/turn before any retry or lease release.
 
 If a healthy bound ACP child restarts, resume reattaches to the same durable CoS session. Unknown, corrupt, cwd-mismatched, additional-directory, project-remapped, or otherwise unsafe resume state is quarantined/fails visibly safe rather than creating a replacement chat. Do not delete the bridge state directory to “fix” a live recovery problem unless the session has been explicitly reconciled and the consequences are understood.
 
-For setup, operational recovery, side-by-side qualification, and troubleshooting steps, see [`docs/development.md`](docs/development.md).
+For setup, operational recovery, side-by-side qualification, and troubleshooting steps, see [`docs/development.md`](docs/development.md). For the provider usage/tokens-sec contract and its current CoS scope decision, see [`docs/usage-contract.md`](docs/usage-contract.md).

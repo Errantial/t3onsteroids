@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* global process */
 /**
  * T3-HEAD drift detection for the post-v1 compatibility lane.
  *

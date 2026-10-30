@@ -41,10 +41,10 @@ function json(value: unknown, status = 200): Response {
 }
 
 describe("Phase 7 release readiness", () => {
-  it("keeps the supported release lane explicitly pinned and single-turn", () => {
+  it("keeps the supported release lane explicitly pinned and two-turn bounded", () => {
     const readiness = releaseReadiness();
     expect(readiness).toMatchObject({
-      bridgeVersion: "1.0.0",
+      bridgeVersion: "1.1.0",
       supportedConcurrency: 2,
       platform: "win32-x64",
       t3Pinned: true,

@@ -81,6 +81,7 @@ export {
   canonicalProfileIdentityHash,
   leaseReferencedSessionIds,
 } from "./lease.js";
+export { scaledPollMs } from "./poll.js";
 export type {
   DurableAdmissionLeaseOptions,
   DurableLeaseAcquireResult,

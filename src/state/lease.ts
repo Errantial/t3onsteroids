@@ -222,7 +222,7 @@ export class DurableAdmissionLease {
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly identity: WindowsProcessIdentity;
-  private readonly maxConcurrentTurns: number;
+  readonly maxConcurrentTurns: number;
   private readonly maxQueuedTurns: number;
   private readonly queuePollMs: number;
 

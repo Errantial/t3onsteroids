@@ -63,4 +63,14 @@ describe("v1 release gate manifest", () => {
     expect(readiness.releaseQualified).toBe(allPassed && baselineQualified);
     if (!allPassed || !baselineQualified) expect(readiness.releaseQualified).toBe(false);
   });
+
+  it("keeps release qualification tied to the exact live-qualified T3 baseline", () => {
+    // The development pin may move ahead of the released tuple; the claim must not follow it.
+    if (v1ReleaseGateManifest.qualifiedT3Sha !== compatibility.t3.sha) {
+      expect(releaseReadiness().t3BaselineQualified).toBe(false);
+      expect(releaseReadiness().releaseQualified).toBe(false);
+    } else {
+      expect(releaseReadiness().t3BaselineQualified).toBe(true);
+    }
+  });
 });

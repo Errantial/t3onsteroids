@@ -1,6 +1,6 @@
 # Development, setup and operations
 
-The v1 bridge is Windows-first, uses Node directly, and is versioned as `1.0.0`. The production implementation includes the ACP stdio provider, CoS controller/provider-extension client, event translator, durable state and profile-wide admission lease, restart/cancellation recovery, bounded streaming, and release diagnostics. V1 release qualification is complete on the pinned Windows tuple. This post-v1 branch builds a bounded profile-wide concurrency scheduler on top of that released base; higher concurrency remains separately qualified and does not change the v1 release result.
+The bridge is Windows-first, uses Node directly, and this release is versioned as `1.1.0`. The production implementation includes the ACP stdio provider, CoS controller/provider-extension client, event translator, durable state and profile-wide admission scheduler, restart/cancellation recovery, bounded streaming, workspace/model/attachment support, background-work projection, and release diagnostics. `1.0.0` remains release-qualified on its pinned Windows tuple; `1.1.0` is the feature release on T3 `0.1.5` and does not silently widen that qualification.
 
 ## Pinned release tuple
 
@@ -13,7 +13,13 @@ The first v1 support tuple is:
 - `@agentclientprotocol/sdk@1.9.0`;
 - Node 24, Windows x64.
 
-Treat current upstream T3 HEAD as a **separate drift lane**. The V1 release drift check against `807319c276c6831b2c219640e9da5b38019a8f1d` recorded `compatible`; that result does not widen the pinned support tuple. Future drift runs must still avoid editing pinned compatibility metadata or loosening prompt normalization merely to make HEAD work.
+Treat current upstream T3 HEAD as a **separate drift lane**. The V1 release drift check against `807319c276c6831b2c219640e9da5b38019a8f1d` recorded `compatible`; that result does not widen the pinned support tuple. Never loosen prompt normalization or other compatibility behavior merely to make HEAD work.
+
+## Pinned development baseline
+
+`src/compatibility.ts` tracks the **development baseline** and now targets T3 `0.1.5-nightly.20261029.3877` / `6d450a4284852af137b2f3407fddd89eb76e7644`. That baseline is ahead of the last live-qualified tuple. Qualification is tuple-specific: `v1ReleaseGateManifest.qualifiedT3Sha` records the T3 commit the release gates were recorded against, and `releaseReadiness()` reports `t3BaselineQualified:false` / `releaseQualified:false` whenever the two differ. Promote `qualifiedT3Sha` only together with fresh live-acceptance evidence for the new baseline.
+
+The maintained T3 patch series lives in `handoff/t3-patches/`; the directory for this baseline is `main-2026-10-29-6d450a42` (same commit as nightly `.3877`). On the new baseline the series applies cleanly, the full `vp` typecheck passes (36/36 packages), the web production build succeeds, and the focused web/ACP test suites pass.
 
 ## Install and verify
 
@@ -122,6 +128,20 @@ An installed-candidate lane is also defined in `PLAN.md`, but it is a separate e
 
 ## Release qualification boundary
 
-The deterministic implementation/source gates are not the final release claim. Steps 7–9 remain responsible for live single-turn performance, the pinned live V1-01…V1-19 matrix, current-T3-HEAD drift, fresh-checkout/package/install verification, final evidence/readiness, and the `v1.0.0` tag.
+The deterministic implementation/source gates are not sufficient by themselves for a release claim. For `v1.0.0`, Steps 7–9 have now completed the live single-turn performance lane, the pinned V1-01…V1-19 matrix, current-T3-HEAD drift, fresh-checkout/package verification, final evidence/readiness, and the release tag.
 
-The prior Step-7 PASS was invalidated by bridge implementation commits `9f6a70c589ac1ac4831ebde4f3f6d45bc493e3be` and `ef2548b817fe9318ac238e84d0ab39fd65258940`, which change and further harden CoS restart/cancellation recovery; Step 7 must be rerun on the current implementation. The current V1-11 attempt remains blocked by an unresolved active-turn record and a pending CoS update that must not be installed during the pinned run. Steps 8 and 9 remain incomplete. Until those gates are complete, do not describe the bridge as release-qualified even though its package version is `1.0.0` and the production ACP path is implemented.
+The final qualified implementation is bridge `f3a672cffdee77f54d377d5594893e0606d20d5b` with CoS provider build `495e3e96504d9b865c18478f7b42915280712f84`. The historical V1-11 broken admission domain remains preserved and fail-closed rather than repaired or reused; the final release qualification is based on a fresh equivalent V1-11 PASS on the final tuple. `docs/release-status.md` and `docs/evidence/v1-07-performance.md` through `v1-09-release.md` are the authoritative current qualification summaries.
+
+## Concurrent turns (post-v1, unqualified)
+
+The durable admission lease supports up to four slots per CoS profile (`MAX_LEASE_SLOTS`, matching the controller's global SSE budget), but the qualified ceiling is **one** turn. The production build admits one turn unless a qualification run opts in:
+
+```text
+T3COS_MAX_CONCURRENT_TURNS=2 T3COS_CONCURRENCY_QUALIFICATION=1
+```
+
+Asking for more than the qualified ceiling without `T3COS_CONCURRENCY_QUALIFICATION=1` fails at startup instead of being clamped. The lease also enforces one active turn per session, keeps honoring every existing slot if capacity is lowered, and fails closed if any slot file is corrupt. Slot 0 keeps the V1 file name, so existing state needs no migration.
+
+The controller's read budget is shared by every turn, so its internal polling loops stretch their interval by the lease capacity (`scaledPollMs`). At capacity 1 the V1 intervals are unchanged; with more turns admitted, the combined wait-loop and Stop-loop read rate stays at the single-turn rate instead of exhausting the 600 reads/minute budget.
+
+Raising `QUALIFIED_MAX_CONCURRENT_TURNS` in `src/state/concurrency.ts` is a qualification result: it needs live evidence for browser reliability, queue depth, memory, controller utilization, latency, cancellation isolation and stale-event isolation first (see the post-v1 roadmap in `PLAN.md`). Do not advertise or document concurrent chats as supported before then.

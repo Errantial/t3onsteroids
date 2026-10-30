@@ -410,6 +410,7 @@ describe("durable tagged session state", () => {
     });
     const dispatched = await durable.updateSession(sessionId, { kind: "mark_dispatched", inputId, generation: 1 });
     expect(dispatched.status).toBe("updated");
+    if (dispatched.status !== "updated") throw new Error(`unexpected transition result: ${dispatched.status}`);
     expect(dispatched.value).toMatchObject({ inputDispatchState: "dispatched", followUpPolicy: "report" });
   });
 

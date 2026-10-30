@@ -5,7 +5,7 @@ export const compatibility = {
     version: BRIDGE_VERSION,
   },
   t3: {
-    version: "0.1.5-nightly.20261029.3877",
+    version: "0.1.5",
     sha: "6d450a4284852af137b2f3407fddd89eb76e7644",
     architecture: "orchestration-v2",
   },

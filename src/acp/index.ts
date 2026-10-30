@@ -25,9 +25,10 @@ import type {
   StateStore,
 } from "../state/index.js";
 import type { BridgeMetrics } from "../metrics.js";
+import { scaledPollMs } from "../state/poll.js";
 import { BRIDGE_VERSION } from "../version.js";
 
-export const PINNED_T3_SHA = "ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8";
+export const PINNED_T3_SHA = "6d450a4284852af137b2f3407fddd89eb76e7644";
 export const MAX_COS_INPUT_CHARS = 64_000;
 
 export type BridgeErrorCode =
@@ -1131,12 +1132,14 @@ export class AcpBridgeRuntime {
     if (!this.options.controller.session || !this.options.controller.input) {
       throw new BridgeError("session_broken", "Provider turn/input reconciliation APIs are unavailable");
     }
-    // CoS exposes a 600 authenticated-read/minute controller budget. This wait runs before the
-    // provider event SSE can take over, so a tight 25 ms loop can exhaust that entire budget in a
-    // few seconds and then starve the stream that would deliver the authoritative turn events.
-    // One active provider turn is supported; 500 ms keeps this reconciliation bounded while
-    // adding at most half a second to the variance-sensitive end-to-end metric, not pre-send.
-    const pollMs = options.pollMs ?? 500;
+    // CoS exposes a 600 authenticated-read/minute controller budget shared by every bridged turn.
+    // This wait runs before the provider event SSE can take over, so a tight 25 ms loop can exhaust
+    // that entire budget in a few seconds and then starve the stream that would deliver the
+    // authoritative turn events. At the qualified capacity of one turn, 500 ms keeps this
+    // reconciliation bounded while adding at most half a second to the variance-sensitive
+    // end-to-end metric, not pre-send. Every extra admitted turn stretches the interval by the same
+    // capacity, so the combined read rate never exceeds the single-turn rate.
+    const pollMs = options.pollMs ?? scaledPollMs(500, this.options.durableLease?.maxConcurrentTurns ?? 1);
     let sentInputProven = false;
     for (;;) {
       if (options.signal?.aborted) throw options.signal.reason ?? new Error("Provider turn wait aborted");

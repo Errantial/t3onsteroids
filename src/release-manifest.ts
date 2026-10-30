@@ -18,7 +18,12 @@ export interface T3HeadDriftGate extends V1ReleaseGate {
 
 export interface V1ReleaseGateManifest {
   readonly schemaVersion: 1;
-  /** T3 commit the live gates were recorded against. Qualification is tuple-specific. */
+  /**
+   * The exact T3 source baseline the live release gates were recorded against. Qualification is
+   * tuple-specific: moving the pinned development baseline to a different T3 commit keeps every
+   * historical gate green but revokes the release claim until live acceptance is rerun and this
+   * field is promoted with new evidence.
+   */
   readonly qualifiedT3Sha: string;
   readonly gates: Readonly<{
     cosProviderExtension: CosProviderExtensionGate;
@@ -36,7 +41,8 @@ export interface V1ReleaseGateManifest {
 
 export const v1ReleaseGateManifest: V1ReleaseGateManifest = {
   schemaVersion: 1,
-  // v1.0.0 live-qualified tuple; independent of the development baseline in compatibility.ts.
+  // The v1.0.0 release tuple. Deliberately separate from `compatibility.t3`, which tracks the
+  // pinned development baseline and may move ahead of the last live-qualified build.
   qualifiedT3Sha: "ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8",
   gates: {
     cosProviderExtension: {

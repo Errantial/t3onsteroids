@@ -485,7 +485,7 @@ describe.runIf(process.platform === "win32")("built ACP stdio provider", () => {
             clientCapabilities: {},
           });
           expect(initialized.protocolVersion).toBe(1);
-          expect(initialized.agentInfo?.version).toBe("1.0.0");
+          expect(initialized.agentInfo?.version).toBe(compatibility.bridge.version);
           expect(initialized.agentCapabilities).toMatchObject({ promptCapabilities: {}, sessionCapabilities: { resume: {} } });
 
           const created = await ctx.request(acp.methods.agent.session.new, { cwd: project, mcpServers: [] });

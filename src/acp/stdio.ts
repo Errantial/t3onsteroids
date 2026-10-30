@@ -117,6 +117,7 @@ export async function runProductionAcpStdio(options: ProductionAcpOptions = {}):
     options.qualification?.transport,
     undefined,
     metrics,
+    state.admissionLease.maxConcurrentTurns,
   );
   // Prime Node/fetch/controller discovery while T3 is still completing the ACP handshake. The
   // response is deliberately discarded: prompt admission still takes its own fresh provider

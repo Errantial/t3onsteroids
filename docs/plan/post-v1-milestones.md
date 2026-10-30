@@ -269,3 +269,29 @@ Linked-worktree projects (2026-10-30, provider dc691cd):
   --provider cosbridge --model gpt-6-thinking --wait --json` ? `status:"completed"`,
   `reply:"T3HEADLINKEDWT"`. The earlier limitation is closed; worktree and branch were removed.
 - Evidence: `test/projects.test.ts` 21/21 (new linked-worktree-of-a-linked-worktree case).
+
+Prompt images (2026-10-30):
+
+- The ACP image probe failed with `session_broken` because CoS settled the input `not_sent`: the
+  browser worker claimed the image input and cancelled it before anything was sent. Text prompts
+  were unaffected.
+- Root cause is a ChatGPT composer drift, not the bridge. The composer form now carries four hidden
+  file inputs: `Take a photo` (`image/*`, single), `Attach photos or videos`
+  (`image/*,video/*`), `Attach photos` (`image/*`, multiple) and `Attach files` (`""`).
+  `uploadImages()` required exactly one `image/*` input and therefore refused every native
+  image. Fixed in `286cff5` by electing the unique multi-image input when the camera input is the
+  only other candidate; two multi-image inputs still fail closed. `test/chatgpt-dom-input.test.ts`
+  passes 168/168, including new cases for the camera/photos pair and for two multi-image inputs.
+- After repackaging (extension stamp `df3b8ddd0870`) and removing a stale second copy of the
+  extension from the qualification Chrome profile, an image prompt reaches the model: the ACP probe
+  returned `end_turn` and the reply described the 8x8 red test image.
+- T3 HEAD UI attachment acceptance passed on the same build: a `t3-attach-test.png` chip plus
+  `Describe the attached image in one sentence, naming its color and size.` completed as thread
+  run `ordinal:7` (`status=completed`) with the reply
+  `The image is a solid bright red square measuring 8 x 8 pixels.` The CoS input `e813e66d`
+  drained with `drainedSeq:45`.
+- Known residual: a first image turn in a freshly opened chat tab can finish without the extension
+  publishing `turn_start`/`turn_end`, which leaves the CoS provider turn `admitted` and the
+  bridge waiting. Retrying the same prompt on the now-open conversation drains normally (both the
+  second UI attempt and the third ACP probe). Tracked as the next CoS turn-lifecycle follow-up; it
+  is not specific to attachments.

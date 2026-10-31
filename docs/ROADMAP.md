@@ -31,7 +31,8 @@ v1.1.7 implementation starts only after v1.1.6 ships.
    made the v1.1.5 launcher spawn the v1.1.4 runtime; the fleet updater now updates both the unit
    and the state file.
 6. **Cross-machine support** — instruction distribution and MCP routing across the three machines,
-   without retiring the existing MCP services.
+   without retiring the existing MCP services. Cross-machine **thread placement** within one
+   logical project is v1.1.7, with the per-environment roots.
 
 v1.1.6 is not released and no machine is rolled out until Emil approves.
 
@@ -61,6 +62,27 @@ fleet plan’s canonical-path + repository-identity rule, not a home-path fallba
 Per-environment **instruction** selections are separate: they are configuration distribution and
 ship in v1.1.6 with the instruction manager.
 
+### Cross-machine project threads (v1.1.7)
+
+A multi-environment project is one logical project. Its threads may be created on, and run on, any
+of the project’s environments; each thread is pinned to exactly one environment for its lifetime.
+The pinned environment supplies the workspace root (per-environment mapping, then default) and the
+instruction profile (per-environment selection, then shared set); thread optional files still
+layer on top. The project view and sidebar aggregate all of its threads across environments with a
+machine badge. MCP: `create_thread` accepts an optional `environmentId` (default: local or
+project-default); `list_threads` / `search_threads` / `get_thread` span the project’s
+environments and return `environmentId`. No cross-environment thread migration in v1.1.7; a
+thread that must move is a new thread or the plan’s explicit P5 handoff.
+
+This is the complementary half of the fleet plan: the plan keeps one thread on a home environment
+and routes actions to execution targets; this keeps one thread per machine but lets one project own
+threads on several machines. Both use the same `Project` / `EnvironmentId` /
+repository-identity / per-environment root model. Do not add a second project or environment
+registry.
+
+P1 adds placement, aggregation, and the create/list/search/get MCP fields; P2 adds the
+root/instruction-profile resolution and the fail-closed evidence (`target_workspace_unmapped`).
+
 ### Delivery and release fit
 
 | Phase | In v1.1.7? | Scope | Exit evidence |
@@ -71,6 +93,9 @@ ship in v1.1.6 with the instruction manager.
 | P3 | No — v1.1.8 | `t3_fleet_run`, `t3_copy`, bounded concurrency, partial results, HEAD/dirty preflight. | Three-target matrix with one failure; one row per target; no all-or-nothing claim; context/output caps measured. |
 | P4 | No — v1.1.9 | CoS `provider-mcp-servers-v1`, per-session connector, prompt injection, qualification. | A CoS thread calls `t3_shell` on server-1; native CoS terminal remains local; tool events carry the target; a new tuple is recorded. |
 | P5 | Not scheduled | Optional explicit handoff of the provider session to a target. | Turn-boundary move with recorded context-loss behaviour; native target tools work after resume. |
+
+P1 also lands cross-machine project thread placement and aggregation; P2 enforces its
+per-environment root and instruction selection.
 
 **v1.1.7 exit gate:** P0+P1 evidence is mandatory. P2’s evidence is required unless it is formally
 moved to v1.1.8 before the release branch is cut. P3–P5 must not be claimed by the v1.1.7 notes.
@@ -145,6 +170,15 @@ Rules:
   `set_project_instruction_profile` for v1.1.6; `get_project_environment_roots` /
   `set_project_environment_root` for v1.1.7. Both are optional additions and do not change
   existing tool shapes.
+
+### (f) Project thread placement vs fleet execution targets
+
+The v1.1.6 server-1 hub is **transport**; v1.1.7 project thread placement is **orchestration**. A
+project thread is pinned to exactly one environment and runs there; it is not a thread on a home
+environment with remote execution targets. Both features share environment ids, project identity,
+repository identity, and the per-environment root/instruction model, so they must not grow separate
+registries or credential paths. The fleet plan’s “one conversation on a home environment” remains
+true for fleet threads; this request covers ordinary project threads created on another machine.
 
 ### Additional overlap: MCP tool names and routing
 

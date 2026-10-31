@@ -45,65 +45,44 @@ needed for this host; do not add one unless a Linux desktop install is actually 
 
 ### Where Linux artifacts are built
 
-Build on the Framework in **WSL Ubuntu**, cross-targeting the architecture server-1 runs
-(**arm64** today), from a clone of `Errantial/t3code` at the release commit:
+server-1 is **aarch64**. Build its runtime natively on an arm64 Linux host (server-1 is the only one
+available) in a scratch directory, with **Node 26.12.1**. Node's SEA output does not execute on this
+host — `--build-sea`, `vp pack` and a postject injection all produced `ENOEXEC` while the stock
+Node binary runs — so the archive ships a launcher + Node + server bundle instead of a SEA:
 
 ```bash
-export PATH="$PWD/node_modules/.bin:$PATH"   # cli.ts spawns `vp` from PATH
+# on the arm64 host, as the service user, in a scratch clone
+export PATH=/tmp/node26/bin:$PATH
 pnpm install
-vp run --filter @t3tools/web build            # apps/web/dist
-node apps/server/scripts/cli.ts build         # bundles the server and copies the web client
+node scripts/update-release-package-versions.ts 0.1.5-v1.1.6.YYYYMMDD.<sha12>.connect1
+vp run --filter @t3tools/web build
+node apps/server/scripts/cli.ts build
+(cd apps/server && T3CODE_PACK_EXE=1 vp pack)     # dist-exe/bin.mjs
+cargo build --release --manifest-path native/resource-monitor/Cargo.toml
 
-# resource monitor for the target arch
-rustup target add aarch64-unknown-linux-gnu
-cd native/resource-monitor
-CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
-  cargo build --release --target aarch64-unknown-linux-gnu
-cd ../..
-mkdir -p apps/server/dist/resource-monitor/linux-arm64
-cp native/resource-monitor/target/aarch64-unknown-linux-gnu/release/t3-resource-monitor \
-  apps/server/dist/resource-monitor/linux-arm64/
-
-# arm64 executable. `vp pack` accepts no linux-arm64 target, so produce the SEA bundle with the
-# host build and inject it into the official arm64 Node 26.12.1 binary (the same steps as
-# scripts/lib/linux-arm64-sea.ts, which only runs natively).
-(cd apps/server && T3CODE_PACK_EXE=1 vp pack)   # apps/server/dist-exe/bin.mjscurl -fsSL https://nodejs.org/dist/v26.12.1/node-v26.12.1-linux-arm64.tar.xz -o /tmp/node-arm64.tar.xz
-tar -xJf /tmp/node-arm64.tar.xz -C /tmp --strip-components=1
-cp /tmp/bin/node /tmp/node-arm64
-# sea-arm64.json: {"main":"apps/server/dist-exe/bin.mjs","output":"/tmp/sea.blob",
-#                  "mainFormat":"module","disableExperimentalSEAWarning":true,"useCodeCache":false}
-node --experimental-sea-config /tmp/sea-arm64.json
-node node_modules/postject/dist/cli.js /tmp/node-arm64 NODE_SEA_BLOB /tmp/sea.blob \
-  --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
-cp /tmp/node-arm64 apps/server/dist-exe/t3-linux-arm64
-chmod +x apps/server/dist-exe/t3-linux-arm64
-
-node scripts/build-cli-archive.ts \
-  --platform linux --arch arm64 \
-  --version 0.1.5-v1.1.6.YYYYMMDD.<sha12>.connect1 \
-  --output-dir /root/release-cli
-node scripts/smoke-cli-archive.ts \
-  --archive /root/release-cli/t3-<version>-linux-arm64.tar.gz \
-  --expect-version <version>
+# assemble t3-<full>-linux-arm64/
+#   t3         launcher: LD_LIBRARY_PATH="$DIR/lib" exec "$DIR/node" "$DIR/t3.mjs" "$@"
+#   node       official Node 26.12.1 arm64 binary
+#   t3.mjs     apps/server/dist-exe/bin.mjs
+#   client/    apps/server/dist/client
+#   node_modules/, lib/, resource-monitor/linux-arm64/, .install-complete
+# then verify and pack:
+t3-<full>-linux-arm64/t3 --version     # must print the release version
+tar -czf t3-<full>-linux-arm64.tar.gz -C pack t3-<full>-linux-arm64
 ```
 
-For an x86_64 Linux host use `node apps/server/scripts/cli.ts build-exe` directly (no injection)
-and `--arch x64`; everything else is unchanged. Build **natively on the host only if cross-build
-fails**, and never on server-1 while its T3 is serving users.
+`update-release-package-versions.ts` must run before bundling: without it `t3 --version` reports
+the workspace version (0.1.4) instead of the release.
 
-One-time WSL setup: **Node 26.12.1** (`vp pack` refuses other versions for native CLI executables;
-install the official tarball and link `node`/`npm`/`npx`), `npm install -g pnpm@12.14.0`,
-`patchelf`, `build-essential`, `python3`, `gcc-aarch64-linux-gnu`, `rustup`.
+Clean the scratch clone and tarballs afterwards and keep at least 10 GB free. The Framework's WSL is
+only needed for Windows builds; do not cross-build the arm64 runtime there (`vp pack` has no
+linux-arm64 target, and cross-injected SEA output was verified not to execute). Keep server-1's T3
+running while building: use `nice`, build in `/tmp`, and do not restart the service until the
+artifact's `t3 --version` succeeds.
 
-Why WSL and not GitHub Actions right now: the fork's `Release` workflow is scheduled but every run
-stays `pending` with no jobs, so Actions is not usable on the fork as configured; Docker is not
-installed on the Framework. WSL is local, uses the glibc/patchelf toolchain the archive expects, and
-has its own disk. Revisit GitHub Actions once the fork's workflow actually runs; prefer it then,
-because it removes the local toolchain dependency.
-
-Do not build the Linux archive on Windows directly: the build produces a Linux SEA binary and needs
-`patchelf`. Check free space first (keep at least 10 GB), and delete the WSL stage and
-`release-cli` after uploading.
+Why not GitHub Actions yet: the fork's `Release` workflow is scheduled but every run stays
+`pending` with no jobs, so Actions is not usable on the fork as configured. Revisit it once the
+workflow actually runs; it remains the better long-term home for both architectures.
 
 ### Assets per release
 

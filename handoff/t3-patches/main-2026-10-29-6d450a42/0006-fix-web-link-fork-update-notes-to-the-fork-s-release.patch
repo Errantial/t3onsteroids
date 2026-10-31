@@ -1,0 +1,62 @@
+From 98beeb3e80fda8a83b900c79cabb9b7f2a557118 Mon Sep 17 00:00:00 2001
+From: erranter <erranter@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 20:09:33 -0600
+Subject: [PATCH] fix(web): link fork update notes to the fork's release tag
+
+Fork versions embed the release tag after the T3 base version (0.1.5-v1.1.4...), so the update UI linked /tag/v0.1.5-v1.1.4..., which does not exist. Extract the fork tag when present and keep the previous behavior for upstream versions. Focused UI-helper tests pass 8/8.
+---
+ apps/web/src/components/desktopUpdate.logic.test.ts |  8 ++++++++
+ apps/web/src/components/desktopUpdate.logic.ts      | 11 ++++++++++-
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/apps/web/src/components/desktopUpdate.logic.test.ts b/apps/web/src/components/desktopUpdate.logic.test.ts
+index c7d7c607ea..42288535c7 100644
+--- a/apps/web/src/components/desktopUpdate.logic.test.ts
++++ b/apps/web/src/components/desktopUpdate.logic.test.ts
+@@ -76,6 +76,14 @@ describe("desktop update UI helpers", () => {
+       );
+     },
+   );
++  it("links a fork build to its release tag", () => {
++    expect(
++      getDesktopUpdateReleaseUrl(
++        "0.1.5-v1.1.4.20261031.2b0773973df3.connect1",
++        "Errantial/t3onsteroids",
++      ),
++    ).toBe("https://github.com/Errantial/t3onsteroids/releases/tag/v1.1.4");
++  });
+ });
+ 
+ describe("canCheckForUpdate", () => {
+diff --git a/apps/web/src/components/desktopUpdate.logic.ts b/apps/web/src/components/desktopUpdate.logic.ts
+index 5277747ee6..90070795eb 100644
+--- a/apps/web/src/components/desktopUpdate.logic.ts
++++ b/apps/web/src/components/desktopUpdate.logic.ts
+@@ -21,6 +21,15 @@ function desktopReleaseRepositoryUrl(repository: string | undefined): string {
+   return `https://github.com/${releaseRepository}/releases`;
+ }
+ 
++// Fork builds carry their release tag inside the T3 base version, e.g.
++// `0.1.5-v1.1.4.20261031.abcdef.connect1` is published as tag `v1.1.4`.
++const FORK_RELEASE_TAG = /(?:^|-)v(\d+\.\d+\.\d+)(?:[.-]|$)/u;
++
++function desktopReleaseTag(version: string): string {
++  const match = FORK_RELEASE_TAG.exec(version);
++  return match?.[1] ? `v${match[1]}` : `v${version}`;
++}
++
+ /** The download RPC can beat the updater's downloadedVersion event; fall back to the requested version. */
+ export function getDesktopUpdateDownloadedVersion(state: DesktopUpdateState): string | null {
+   return state.downloadedVersion ?? state.availableVersion;
+@@ -32,7 +41,7 @@ export function getDesktopUpdateReleaseUrl(
+ ): string | null {
+   const normalizedVersion = version?.trim();
+   if (!normalizedVersion) return null;
+-  return `${desktopReleaseRepositoryUrl(repository)}/tag/v${encodeURIComponent(normalizedVersion)}`;
++  return `${desktopReleaseRepositoryUrl(repository)}/tag/${encodeURIComponent(desktopReleaseTag(normalizedVersion))}`;
+ }
+ 
+ export function getDesktopUpdateReleaseHistoryUrl(
+-- 
+2.50.1.windows.1
+

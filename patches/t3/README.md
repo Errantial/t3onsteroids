@@ -112,6 +112,23 @@ thread tab controls.
 
 ---
 
+# v1.1.4 patch: link fork update notes to the fork tag
+
+`v1.1.4-0006-update-fork-release-tag.patch` applies after `0005`.
+
+## What it changes
+
+- Fork builds report versions such as `0.1.5-v1.1.4.20261031.98beeb3e80fd.connect1`. The desktop
+  update UI built the "release notes" link as `/tag/v<full version>`, which does not exist.
+- When the version embeds a fork tag (`-v<major>.<minor>.<patch>`), the UI now links to that tag
+  (`v1.1.4`). Upstream versions keep the previous `/tag/v<version>` behavior.
+
+## Verification
+
+- `desktopUpdate.logic.test.ts` 8/8, including the fork-version link case.
+
+---
+
 # v1.1.2 patch: pinned threads stay in activity order
 
 `v1.1.2-0004-sidebar-pinned-threads-on-top.patch` applies to `c8cd959156` and is the fourth patch

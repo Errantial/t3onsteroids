@@ -192,6 +192,7 @@ if [ ! -d "$dest" ]; then
   tar -xzf "$archive" --strip-components=1 -C "$dest"
 fi
 rm -f "$archive"
+"$dest/t3" --version >/dev/null
 sed -i "s|^ExecStart=.*/t3 __service-launcher$|ExecStart=$dest/t3 __service-launcher|" "$unit"
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 systemctl --user daemon-reload

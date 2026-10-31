@@ -263,7 +263,9 @@ extension build and a new qualification tuple. P5 is independent and should not 
 - A thread per machine as the primary mechanism.
 - Migrating the provider session per action.
 - A distributed filesystem or atomic cross-machine transactions.
-- Implicit file synchronization between targets.
+- Implicit **workspace** file synchronization between targets. This scopes the remote-execution
+  layer only; instruction/configuration distribution (for example the AGENTS.md/CLAUDE.md manager)
+  is explicit, user-assigned, revisioned, and opt-in, and is not this non-goal.
 - Model-managed links, credentials, target URLs, or approvals.
 - Silent privilege expansion through a peer link.
 - Widening the v1 support tuple without its own evidence.

@@ -103,9 +103,10 @@ moved to v1.1.8 before the release branch is cut. P3–P5 must not be claimed by
 ### Non-goals carried forward
 
 No thread per machine as the primary mechanism, no provider-session migration per action, no
-distributed filesystem or atomic cross-machine transactions, no implicit file synchronization
-between targets, no model-managed links/credentials/URLs/approvals, and no silent privilege
-expansion through a peer link.
+distributed filesystem or atomic cross-machine transactions, no implicit **workspace** file
+synchronization between execution targets, no model-managed links/credentials/URLs/approvals, and
+no silent privilege expansion through a peer link. Instruction/configuration distribution is a
+separate, explicit, opt-in feature and is not this non-goal.
 
 ## Overlaps and decisions
 
@@ -128,14 +129,15 @@ that carries the contract, and add a conformance test that a peer can be linked 
 `peer-exec-v1` is implemented. Do not implement `peer-exec-v1` against a checkout that cannot see a
 peer.
 
-### (c) Instruction sync vs "no implicit file synchronization between targets"
+### (c) Instruction distribution vs the remote-execution file-sync non-goal
 
-The instruction manager distributes **harness configuration** (global `AGENTS.md`/`CLAUDE.md` and
-explicit per-project assignments) from a revisioned hub. That is not execution-target workspace
-synchronization: it is explicit, opt-in, hash-checked, and never triggered by a model tool or by a
-fleet run. Keep instruction files outside target worktrees, keep the transport separate from
-`peer-exec-v1`, and describe it as “instruction distribution”, not file sync, in user-facing text.
-“No implicit file synchronization” remains true for target workspaces and job execution.
+No conflict. The fleet plan’s “no implicit file synchronization” non-goal is scoped to the
+remote-execution layer: it forbids silently mirroring workspace files when acting on a target. The
+instruction manager distributes **harness configuration** (global `AGENTS.md`/`CLAUDE.md` and
+explicit per-project assignments) from a revisioned hub. That distribution is explicit, opt-in,
+hash-checked, and never triggered by a model tool or by a fleet run. Keep instruction files outside
+target worktrees, keep the transport separate from `peer-exec-v1`, and call it “instruction
+distribution”, not file sync. The non-goal remains true for target workspaces and job execution.
 
 ### (d) “Fleet” naming
 

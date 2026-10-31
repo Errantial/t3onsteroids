@@ -2,24 +2,31 @@
 /**
  * Fleet update for the three T3 instances.
  *
- * One machine at a time, stop on the first failure, never print credentials. Windows targets
- * install the NSIS package silently; server-1 unpacks the Linux CLI runtime next to the current
- * one, repoints its user unit, and keeps the previous version for rollback.
+ * One machine at a time, stop on the first failure, never print credentials.
+ *
+ * Windows targets stop the T3 app and, when present, the WinSW `t3code` service that keeps the
+ * installed exe locked, install the NSIS package silently, then start the service again (or
+ * relaunch the app in the logged-on user's session) and verify the installed FileVersion.
+ *
+ * server-1 unpacks the Linux CLI runtime next to the current one, repoints its user unit, and
+ * keeps the previous directory for rollback.
  *
  * Usage:
  *   node scripts/fleet-update.mjs --tag latest --targets all --dry-run
  *   node scripts/fleet-update.mjs --tag v1.1.6 --targets server1 --yes
  *   node scripts/fleet-update.mjs --tag v1.1.6 --targets home,server1 --yes
+ *   node scripts/fleet-update.mjs --tag v1.1.6 --targets framework --allow-framework --yes
  *
- * `all` expands to home, server1, framework; a real run refuses the framework target because
- * restarting its T3 ends the active conversation.
+ * `all` expands to home, server1, framework. A real run including `framework` requires
+ * `--allow-framework` because restarting this machine's T3 ends the active conversation.
  */
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const REPO = "Errantial/t3onsteroids";
 const KNOWN_TARGETS = ["home", "framework", "server1"];
@@ -46,17 +53,18 @@ const TARGETS = {
 function usage(message) {
   if (message) console.error(`fleet-update: ${message}`);
   console.error(
-    "usage: node scripts/fleet-update.mjs [--tag latest|vX.Y.Z] [--targets all|home,framework,server1] [--dry-run] [--yes]",
+    "usage: node scripts/fleet-update.mjs [--tag latest|vX.Y.Z] [--targets all|home,framework,server1] [--dry-run] [--yes] [--allow-framework]",
   );
   process.exit(2);
 }
 
 function parseArgs(argv) {
-  const options = { tag: "latest", targets: "all", dryRun: false, yes: false };
+  const options = { tag: "latest", targets: "all", dryRun: false, yes: false, allowFramework: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--dry-run") options.dryRun = true;
     else if (arg === "--yes" || arg === "-y") options.yes = true;
+    else if (arg === "--allow-framework") options.allowFramework = true;
     else if (arg === "--tag") options.tag = argv[++index] ?? usage("--tag needs a value");
     else if (arg.startsWith("--tag=")) options.tag = arg.slice(6);
     else if (arg === "--targets") options.targets = argv[++index] ?? usage("--targets needs a value");
@@ -151,19 +159,202 @@ function installedWindowsVersion(target, local) {
   return local ? powershell(encodePowerShell(script)).trim() : remotePowerShell(target, script).trim();
 }
 
-function windowsInstallScript(url, expectedSha256) {
-  return `
+function localIsAdmin() {
+  const script =
+    "[Console]::Out.Write(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))";
+  return powershell(encodePowerShell(script)).trim().toLowerCase() === "true";
+}
+
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+/**
+ * Stops the WinSW service (if any) before the installer, because the service's headless child
+ * keeps `T3 Code (Beta).exe` open and makes the silent NSIS install abort. Starts it again, or
+ * relaunches the GUI through a one-shot `/IT` task so it lands in the logged-on user's session.
+ */
+function windowsInstallScript(url, expectedSha256, expectedVersion) {
+  return String.raw`
 $ErrorActionPreference = 'Stop'
-$installer = Join-Path $env:TEMP 't3-fleet-update.exe'
-Invoke-WebRequest -Uri '${url}' -OutFile $installer -UseBasicParsing
-$hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($hash -ne '${expectedSha256}') { throw "SHA256 mismatch: $hash" }
-$process = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
-if ($process.ExitCode -ne 0) { throw "installer exit $($process.ExitCode)" }
-$exe = Join-Path $env:LOCALAPPDATA 'Programs\\t3code\\T3 Code (Beta).exe'
-Start-Process -FilePath $exe | Out-Null
-[Console]::Out.Write((Get-Item $exe).VersionInfo.FileVersion)
+$ProgressPreference = 'SilentlyContinue'
+$ConfirmPreference = 'None'
+
+$url = '${url}'
+$wantSha256 = '${expectedSha256}'.ToUpperInvariant()
+$wantVersion = '${expectedVersion}'
+$serviceName = 't3code'
+$appDir = Join-Path $env:LOCALAPPDATA 'Programs\t3code'
+$appExe = Join-Path $appDir 'T3 Code (Beta).exe'
+$port = 3773
+
+function Out-Line([string]$text) { [Console]::Out.WriteLine($text) }
+function Get-ExeVersion { if (Test-Path -LiteralPath $appExe) { (Get-Item -LiteralPath $appExe).VersionInfo.FileVersion } else { '' } }
+function Test-Admin { return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+function Get-Listener { return (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1) }
+function Wait-Listener([int]$seconds) {
+  for ($i = 0; $i -lt $seconds; $i++) {
+    if (Get-Listener) { return $true }
+    Start-Sleep -Seconds 1
+  }
+  return $false
+}
+
+function Get-AppProcesses {
+  $found = @()
+  foreach ($p in (Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+    if ($p.ProcessId -eq $PID) { continue }
+    if ($p.ExecutablePath -and $p.ExecutablePath.StartsWith($appDir, [StringComparison]::OrdinalIgnoreCase)) { $found += $p; continue }
+    if ($p.Name -eq 'T3 Code (Beta)') { $found += $p }
+  }
+  return $found
+}
+
+function Stop-App {
+  Get-Process -Name 'T3 Code (Beta)' -ErrorAction SilentlyContinue | ForEach-Object {
+    try { [void]$_.CloseMainWindow() } catch { }
+  }
+  Start-Sleep -Seconds 3
+  for ($round = 1; $round -le 5; $round++) {
+    $procs = Get-AppProcesses
+    if ($procs.Count -eq 0) { break }
+    foreach ($p in $procs) {
+      try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch { }
+    }
+    Start-Sleep -Seconds 2
+  }
+}
+
+function Stop-T3Service {
+  $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+  if (-not $svc) { return $false }
+  Out-Line 'service=stopping'
+  $null = & sc.exe stop $serviceName 2>&1
+  for ($i = 0; $i -lt 30; $i++) {
+    $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    if (-not $svc -or $svc.Status -eq 'Stopped') { break }
+    Start-Sleep -Seconds 1
+  }
+  if ($svc -and $svc.Status -ne 'Stopped') { throw "t3code service did not stop (state=$($svc.Status)); refusing to install over a locked exe" }
+  return $true
+}
+
+function Start-T3Service {
+  $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+  if (-not $svc) { return $false }
+  $null = & sc.exe start $serviceName 2>&1
+  if (-not (Wait-Listener 120)) { throw ':3773 did not come back within 120s after starting t3code' }
+  return $true
+}
+
+function Invoke-Installer {
+  $p = Start-Process -FilePath $installer -ArgumentList '/S', '/currentuser' -PassThru
+  while (-not $p.HasExited) {
+    Start-Sleep -Seconds 2
+    foreach ($q in (Get-AppProcesses)) {
+      if ($q.ProcessId -eq $p.Id) { continue }
+      try { Stop-Process -Id $q.ProcessId -Force -ErrorAction Stop } catch { }
+    }
+  }
+  return $p.ExitCode
+}
+
+$svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+if ($svc -and -not (Test-Admin)) {
+  throw 'the t3code service must be stopped to replace the installed exe; run this from an elevated shell'
+}
+
+$before = Get-ExeVersion
+Out-Line "before=$before"
+
+$installer = Join-Path $env:TEMP ("t3-fleet-" + $wantVersion + ".exe")
+Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+$hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToUpperInvariant()
+if ($hash -ne $wantSha256) { throw "SHA256 mismatch: got $hash, wanted $wantSha256" }
+Out-Line 'sha256=ok'
+
+$hadService = Stop-T3Service
+Stop-App
+
+$installerExit = Invoke-Installer
+$after = Get-ExeVersion
+if ($after -ne $wantVersion) {
+  Out-Line "retry=installed version is $after"
+  $null = Stop-T3Service
+  Stop-App
+  $installerExit = Invoke-Installer
+  $after = Get-ExeVersion
+}
+
+$http = 'down'
+if ($hadService) {
+  $null = Start-T3Service
+  $http = 'listen'
+} else {
+  $relaunchTask = 'T3FleetRelaunch'
+  $null = & schtasks.exe /create /tn $relaunchTask /tr ('"' + $appExe + '"') /sc once /st 00:00 /it /f 2>&1
+  $null = & schtasks.exe /run /tn $relaunchTask 2>&1
+  Start-Sleep -Seconds 3
+  $null = & schtasks.exe /delete /tn $relaunchTask /f 2>&1
+  if (Wait-Listener 120) { $http = 'listen' }
+}
+
+$listener = Get-Listener
+$listenerPid = if ($listener) { $listener.OwningProcess } else { '' }
+$serviceState = if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) { (Get-Service -Name $serviceName).Status } else { 'none' }
+
+Out-Line "installer_exit=$installerExit"
+Out-Line "after=$after"
+Out-Line "service=$serviceState"
+Out-Line "http=$http"
+Out-Line "listener=$listenerPid"
+Out-Line 'DONE'
+
+if ($after -ne $wantVersion) { throw "installed version is $after, wanted $wantVersion" }
 `;
+}
+
+function runLocalWindowsInstall(script) {
+  if (localIsAdmin()) {
+    return powershell(encodePowerShell(script), { encoding: "utf8" });
+  }
+
+  // Not elevated and the t3code service exists: run the same script through a one-shot
+  // highest-privilege task, the same mechanism that was used to install v1.1.5 by hand.
+  const dir = join(process.env.LOCALAPPDATA ?? tmpdir(), "t3-fleet");
+  mkdirSync(dir, { recursive: true });
+  const scriptPath = join(dir, "update.ps1");
+  const logPath = join(dir, "update.log");
+  const donePath = join(dir, "update.done");
+  const runnerPath = join(dir, "run.cmd");
+  rmSync(donePath, { force: true });
+  rmSync(logPath, { force: true });
+  writeFileSync(scriptPath, script, "utf8");
+  writeFileSync(
+    runnerPath,
+    [
+      "@echo off",
+      `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${scriptPath}" > "${logPath}" 2>&1`,
+      `if %errorlevel%==0 echo done > "${donePath}"`,
+      "",
+    ].join("\r\n"),
+    "utf8",
+  );
+
+  const task = "T3FleetUpdate";
+  run("schtasks.exe", ["/create", "/tn", task, "/tr", `cmd.exe /c "${runnerPath}"`, "/sc", "once", "/st", "00:00", "/rl", "HIGHEST", "/f"]);
+  run("schtasks.exe", ["/run", "/tn", task]);
+  console.log(`[framework] scheduled ${task}; log: ${logPath}`);
+
+  const deadline = Date.now() + 20 * 60 * 1000;
+  while (!existsSync(donePath) && Date.now() < deadline) sleepSync(3000);
+  try {
+    run("schtasks.exe", ["/delete", "/tn", task, "/f"]);
+  } catch {}
+  const output = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
+  process.stdout.write(output);
+  if (!existsSync(donePath)) throw new Error(`the scheduled update did not finish; read ${logPath}`);
+  return output;
 }
 
 function linuxVersionScript(target) {
@@ -221,20 +412,22 @@ async function updateWindows(name, target, release, checksums, options) {
   const asset = release.assets.get(release.windows);
   const expected = checksums.get(release.windows);
   if (!expected) throw new Error(`SHA256SUMS does not cover ${release.windows}`);
+
   const local = target.kind === "windows-local";
-  if (options.dryRun || local) {
-    // The local machine is never restarted by this script; it only reports the plan.
-    if (local && !options.dryRun) throw new Error("framework updates restart T3 and must be run by the user");
-  }
   const before = installedWindowsVersion(target, local);
   console.log(`[${name}] before=${before || "unknown"}`);
+
   planLine(`install ${release.windows} (${asset.size} bytes) from ${asset.browser_download_url}`);
   planLine(`sha256 ${expected}`);
+  planLine("stop the t3code service (when present) and the T3 app, verify the downloaded hash");
+  planLine("install silently with /S /currentuser, then start the service or relaunch the app");
+  planLine("verify the installed FileVersion and wait for :3773");
+
   if (options.dryRun) return;
-  const after = local
-    ? powershell(encodePowerShell(windowsInstallScript(asset.browser_download_url, expected))).trim()
-    : remotePowerShell(target, windowsInstallScript(asset.browser_download_url, expected)).trim();
-  console.log(`[${name}] after=${after || "unknown"}`);
+
+  const script = windowsInstallScript(asset.browser_download_url, expected, release.version);
+  const result = local ? runLocalWindowsInstall(script) : remotePowerShell(target, script);
+  process.stdout.write(result.endsWith("\n") ? result : `${result}\n`);
 }
 
 function updateLinux(name, target, release, checksums, options) {
@@ -258,8 +451,10 @@ function updateLinux(name, target, release, checksums, options) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const targets = resolveTargets(options.targets);
-  if (targets.includes("framework") && !options.dryRun) {
-    throw new Error("the framework target would restart this thread's T3; run it last from an elevated shell, or use --dry-run");
+  if (targets.includes("framework") && !options.dryRun && !options.allowFramework) {
+    throw new Error(
+      "the framework target restarts this machine's T3 and ends the active thread; use --targets home,server1, or pass --allow-framework to accept the restart",
+    );
   }
 
   const release = loadRelease(options.tag);
@@ -284,7 +479,13 @@ async function main() {
   if (options.dryRun) console.log("\ndry run complete; nothing was changed");
 }
 
-main().catch((error) => {
-  console.error(`fleet-update: ${error instanceof Error ? error.message : String(error)}`);
-  process.exit(1);
-});
+export { windowsInstallScript, linuxInstallScript };
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    const stderr = error && typeof error === "object" && "stderr" in error ? String(error.stderr ?? "").trim() : "";
+    console.error(`fleet-update: ${message}${stderr ? `\n${stderr}` : ""}`);
+    process.exit(1);
+  });
+}

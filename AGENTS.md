@@ -213,8 +213,15 @@ Environment=T3CODE_HOME=/home/opc/.t3-nightly
 `.install-complete`). **server-1 is aarch64**, so its artifact is `...-linux-arm64.tar.gz` and its
 resource monitor lives under `resource-monitor/linux-arm64/`. The unit is not rewritten by the app,
 so a release installs a new directory and points the unit at it, keeping the previous one for
-rollback. No deb/AppImage is needed for this host; do not add one unless a Linux desktop install is
-actually wanted.
+rollback.
+
+`__service-launcher` also reads `runtime/service-state.json`; its `activeVersion` decides which
+runtime directory it spawns. Updating only `ExecStart` leaves the old runtime serving (the v1.1.5
+update did exactly that). Always set `activeVersion` to the new full version and restart, and verify
+`/.well-known/t3/environment` reports it. `scripts/fleet-update.mjs` updates both.
+
+No deb/AppImage is needed for this host; do not add one unless a Linux desktop install is actually
+wanted.
 
 ### Reference: how the Linux runtime is built
 

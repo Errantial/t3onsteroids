@@ -384,6 +384,13 @@ if [ ! -d "$dest" ]; then
 fi
 rm -f "$archive"
 "$dest/t3" --version >/dev/null
+state='${target.t3Home}/runtime/service-state.json'
+if [ -f "$state" ]; then cp -p "$state" "$state.bak"; fi
+if [ -f "$state" ] && grep -q '"activeVersion"' "$state"; then
+  sed -i 's|"activeVersion"[[:space:]]*:[[:space:]]*"[^"]*"|"activeVersion": "'"${version}"'"|' "$state"
+else
+  printf '{\\n  "protocol": 3,\\n  "activeVersion": "%s"\\n}\\n' '${version}' > "$state"
+fi
 sed -i "s|^ExecStart=.*/t3 __service-launcher$|ExecStart=$dest/t3 __service-launcher|" "$unit"
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 systemctl --user daemon-reload

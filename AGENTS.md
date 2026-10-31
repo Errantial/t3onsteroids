@@ -112,17 +112,37 @@ first failure). It never prints keys or tokens.
 node scripts/fleet-update.mjs --tag latest --targets all --dry-run
 
 # update one machine
-node scripts/fleet-update.mjs --tag v1.1.6 --targets server1
+node scripts/fleet-update.mjs --tag v1.1.6 --targets server1 --yes
 
-# update the two machines that are safe to restart remotely (the Framework kills this thread)
-node scripts/fleet-update.mjs --tag v1.1.6 --targets home,server1
+# the routine fleet update (the Framework target restarts this conversation)
+node scripts/fleet-update.mjs --tag v1.1.6 --targets home,server1 --yes
+
+# the Framework is opt-in and should be last
+node scripts/fleet-update.mjs --tag v1.1.6 --targets framework --allow-framework --yes
 ```
 
 Targets: `home` (laptop-5amudrke), `framework` (this machine, local), `server1` (Oracle Linux), or
-`all`. `all` expands to home, server1, framework in that order, but a real run refuses `framework`
-because restarting its T3 ends the active conversation; use `--dry-run` for the Framework, then run
-the installer and `Restart-Service t3code` yourself from an elevated shell. Windows targets install
-the NSIS installer silently (`/S`) and start T3 again; server-1 unpacks the Linux runtime next to
-the current one, repoints `t3code.service`, restarts it, and keeps the previous directory for
-rollback. Updating restarts T3 and interrupts running threads.
+`all` (home, server1, framework in that order). A real run including `framework` requires
+`--allow-framework`, because restarting its T3 ends the active conversation.
+
+Windows targets:
+
+- Stop the T3 app and, when the WinSW `t3code` service exists (the Framework), stop that service
+  first. Its headless child keeps `T3 Code (Beta).exe` open, so the NSIS installer cannot replace
+  the exe while it runs.
+- Verify the download's SHA-256, then install `/S /currentuser`; a respawn guard kills any T3
+  process the supervisor tries to start while NSIS is replacing files.
+- Start `t3code` again (it exec's the same absolute path, so it now serves the new build) and wait
+  for `:3773`. On machines without the service (the laptop), relaunch the app through a one-shot
+  `/IT` scheduled task so it lands in the logged-on user's session.
+- Print `before=` / `after=` from the installed `FileVersion`; a version mismatch fails the run.
+
+Run a local Framework update from an elevated shell. If the process is not elevated and `t3code`
+exists, the tool registers the one-shot `T3FleetUpdate` task with `/RL HIGHEST`; it runs
+`%LOCALAPPDATA%\t3-fleet\update.ps1` and logs to `%LOCALAPPDATA%\t3-fleet\update.log`. That restart
+ends the calling thread, so read the log afterwards.
+
+server-1 unpacks the Linux runtime next to the current one, verifies `t3 --version`, repoints
+`t3code.service`, restarts it, and keeps the previous directory for rollback. Updating restarts T3
+and interrupts running threads.
 

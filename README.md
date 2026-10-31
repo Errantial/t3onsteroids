@@ -4,7 +4,7 @@ Windows-first bridge for using Chat On Steroids (CoS) as a Local ACP provider in
 
 ## Status
 
-**`1.1.2`** is the latest release: a patch release on the `1.1.1` feature line. It targets **T3 Code `0.1.5`** (`6d450a4284852af137b2f3407fddd89eb76e7644`, also published as nightly `0.1.5-nightly.20261029.3877`) and keeps the post-v1 capability set on top of the release-qualified `1.0.0` bridge:
+**`1.1.3`** is the latest release: a fix release on the `1.1.1` feature line. It targets **T3 Code `0.1.5`** (`6d450a4284852af137b2f3407fddd89eb76e7644`, also published as nightly `0.1.5-nightly.20261029.3877`) and keeps the post-v1 capability set on top of the release-qualified `1.0.0` bridge:
 
 - two simultaneously active bridged turns per stable CoS controller/profile, with a durable FIFO queue and exact cancellation/release;
 - workspace and T3 worktree binding through the versioned `provider-session-workspace-v1` contract;
@@ -12,7 +12,7 @@ Windows-first bridge for using Chat On Steroids (CoS) as a Local ACP provider in
 - prompt images (PNG/JPEG converted to WebP, bounded by the controller contract) and other attachment hardening;
 - native CoS background-work projection with a pending-work fence and report-after-drain follow-ups;
 - the same durable recovery, drain-aware termination, bounded streaming, diagnostics and privacy guarantees as v1;
-- a maintained T3 patch series for optional per-thread tokens/sec, ACP per-turn token usage, per-thread ChatGPT tab show/reload controls and the pinned-threads-on-top sidebar setting, ported to T3 `0.1.5`.
+- a maintained T3 patch series for optional per-thread tokens/sec, ACP per-turn token usage, per-thread ChatGPT tab show/reload controls (with the window-reveal fix) and the pinned-threads-on-top sidebar setting, ported to T3 `0.1.5`.
 
 The complete pinned v1 support tuple from `1.0.0` (T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d…`, CoS `2.1.39` / `87ae9d63…`, provider build `495e3e96…`) remains the **release-qualified** tuple recorded in `src/release-manifest.ts`. Qualification is tuple-specific: on the `0.1.5` development/release baseline, `--release-readiness` reports `t3BaselineQualified:false` and `releaseQualified:false` until the full V1 matrix is rerun on that exact tuple. Post-v1 evidence (two-chat matrix, T3-HEAD acceptance, attachment and recovery lanes) is recorded in `docs/release-status.md` and `docs/evidence/`.
 
@@ -20,17 +20,17 @@ See [`PLAN.md`](PLAN.md) for the gate sequence and [`docs/release-status.md`](do
 
 ## Windows installer and T3 Connect
 
-`v1.1.2` publishes the **T3 Code 0.1.5 Windows x64 installer** built from the ChatGPT Browser fork with the t3onsteroids patch series applied:
+`v1.1.3` publishes the **T3 Code 0.1.5 Windows x64 installer** built from the ChatGPT Browser fork with the t3onsteroids patch series applied:
 
 ```text
-T3-Code-0.1.5-v1.1.2.20261030.e819703412.connect1-x64.exe
+T3-Code-0.1.5-v1.1.3.20261030.2b0773973df3.connect1-x64.exe
 ```
 
-That installer includes the optional per-thread tokens/sec and ACP per-turn token usage patches, the per-thread ChatGPT tab show/reload controls, the pinned-threads-on-top sidebar setting, the managed ChatGPT Browser provider, and **T3 Connect enabled with the production public relay/Clerk configuration** baked into the build. `t3 connect status --json` works against the packaged server without runtime environment variables.
+That installer includes the optional per-thread tokens/sec and ACP per-turn token usage patches, the per-thread ChatGPT tab show/reload controls (including the fix that brings the parked ChatGPT window on-screen), the pinned-threads-on-top sidebar setting, the managed ChatGPT Browser provider, and **T3 Connect enabled with the production public relay/Clerk configuration** baked into the build. `t3 connect status --json` works against the packaged server without runtime environment variables.
 
 The installer is the T3 Code application; the t3onsteroids bridge remains the Local ACP provider distributed in the source and patch assets of this release. The installer does not auto-register the bridge.
 
-## Supported tuple for `1.1.2`
+## Supported tuple for `1.1.3`
 
 - T3 Code `0.1.5` / `6d450a4284852af137b2f3407fddd89eb76e7644`
   (also published as `0.1.5-nightly.20261029.3877`; T3-HEAD acceptance additionally exercised `dd14848…`);

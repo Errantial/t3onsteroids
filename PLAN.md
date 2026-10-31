@@ -1,10 +1,10 @@
 # T3 Code ↔ Chat On Steroids Compatibility Plan
 
-Status: **`1.1.2` patch release on the `1.1.1` feature line.** `v1.0.0` remains release-qualified on its pinned Windows tuple; `1.1.2` keeps the development/release lane on T3 Code `0.1.5`, adds per-thread ChatGPT tab show/reload controls and the pinned-threads-on-top sidebar setting to the maintained T3 patch series, and publishes a fresh T3 Code 0.1.5 Windows installer with T3 Connect enabled. The full V1 matrix has not been rerun on `0.1.5`, so `releaseReadiness()` reports `t3BaselineQualified:false` / `releaseQualified:false` for this baseline. The remaining sections below are retained as the design/qualification specification and historical implementation plan.
+Status: **`1.1.3` fix release on the `1.1.1` feature line.** `v1.0.0` remains release-qualified on its pinned Windows tuple; `1.1.3` keeps the development/release lane on T3 Code `0.1.5`, adds per-thread ChatGPT tab show/reload controls and the pinned-threads-on-top sidebar setting to the maintained T3 patch series, and publishes a fresh T3 Code 0.1.5 Windows installer with T3 Connect enabled. The full V1 matrix has not been rerun on `0.1.5`, so `releaseReadiness()` reports `t3BaselineQualified:false` / `releaseQualified:false` for this baseline. The remaining sections below are retained as the design/qualification specification and historical implementation plan.
 
 ## Current implementation checkpoint
 
-As of the `1.1.2` release (2026-10-30):
+As of the `1.1.3` release (2026-10-30):
 
 - **Implemented and committed:** production ACP stdio wiring, durable cross-process session state, recovery/cancellation reconciliation, and the bounded profile-wide concurrency scheduler. The scheduler provides a bounded active set (two qualified turns), a durable FIFO waiting queue, exact queued cancellation/release, and legacy single-lease state compatibility.
 - **Post-v1 capabilities:** workspace and linked-worktree binding (`provider-session-workspace-v1`), model/reasoning selection (`provider-model-catalog-v1`), prompt images with PNG/JPEG→WebP conversion (`provider-input-images-v1`), multiplexed event streams (`provider-event-stream-mux-v1`), and native background-work projection/report-after-drain (`provider-background-work-v1`).
@@ -12,7 +12,7 @@ As of the `1.1.2` release (2026-10-30):
 - **Live concurrency qualification:** **two-chat gate PASS.** The full isolated matrix exercises a single-chat baseline, the 20-turn two-chat workload, queue/cancel/slot reuse, independent cancellation, SSE reconnect, crash/restart, cross-session stale events, and long-output slow-consumer RSS. Evidence and per-run provider identities are in `docs/evidence/post-v1-concurrency-qualification.md` and the close-out section of `docs/release-status.md`.
 - **T3 patch series:** optional per-thread tokens/sec, ACP per-turn token usage, per-thread ChatGPT tab controls and the pinned-threads-on-top sidebar setting, verified against the pinned `ffb4af8d` tuple and T3 `0.1.5` (`6d450a42`); CoS is deliberately excluded from usage reporting until it can report authoritative tokens/limits. See `handoff/t3-patches/README.md` and `docs/usage-contract.md`.
 - **Advertised capability:** `supportedConcurrency=2`. Four- and eight-chat concurrency are parked in the post-v1 backlog below.
-- **Release status:** `1.1.2` is a patch release on the `1.1.1` feature line, not a re-qualification of the V1 matrix on `0.1.5`. Do not infer `releaseQualified:true` from the scheduler implementation, offline tests, or the historical v1.0.0 gates.
+- **Release status:** `1.1.3` is a fix release on the `1.1.1` feature line, not a re-qualification of the V1 matrix on `0.1.5`. Do not infer `releaseQualified:true` from the scheduler implementation, offline tests, or the historical v1.0.0 gates.
 
 ## Post-v1 backlog
 

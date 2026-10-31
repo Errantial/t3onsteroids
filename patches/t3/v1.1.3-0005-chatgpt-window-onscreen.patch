@@ -1,0 +1,51 @@
+From 2b0773973df30b53bb815feed78c9ec8462fdb00 Mon Sep 17 00:00:00 2001
+From: erranter <erranter@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 18:17:23 -0600
+Subject: [PATCH] fix(chatgpt-browser): move the revealed ChatGPT window
+ on-screen
+
+The managed worker window is parked at -10000,-10000 to stay out of the user's way, so activating the tab and focusing the window reported success while the user saw nothing. A reveal now moves an off-screen normal window to 80,80 before focusing it; a minimized window is restored first. Verified in a real Chromium with the shipped extension: reveal moved the window from -10000,-10000 to 80,80 and focused it, and reload changed the page's timeOrigin and cleared an injected marker on the same tab.
+---
+ .../assets/extension/background.js            | 26 ++++++++++++++-----
+ 1 file changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/packages/provider-chatgpt-browser/assets/extension/background.js b/packages/provider-chatgpt-browser/assets/extension/background.js
+index 7c2eb65062..469303cdd2 100644
+--- a/packages/provider-chatgpt-browser/assets/extension/background.js
++++ b/packages/provider-chatgpt-browser/assets/extension/background.js
+@@ -4877,12 +4877,26 @@ async function revealChats(ids) {
+       : await createUserWindowTab(`https://chatgpt.com/c/${conversationId}`, true);
+     const windowId = shown?.windowId ?? tab?.windowId;
+     if (!Number.isInteger(windowId)) continue;
+-    // A worker tab can sit in the app's minimized background window; the user asked to see it.
+-    const window = await chrome.windows.get(windowId).catch(() => null);
+-    await chrome.windows.update(
+-      windowId,
+-      window?.state === "minimized" ? { state: "normal", focused: true } : { focused: true },
+-    );
++    // A worker tab can sit in the app's off-screen background window; the user asked to see it.
++    const parked = await chrome.windows.get(windowId).catch(() => null);
++    if (!parked) continue;
++    if (parked.state === "minimized") {
++      await chrome.windows.update(windowId, { state: "normal", focused: true });
++    }
++    const window = (await chrome.windows.get(windowId).catch(() => null)) ?? parked;
++    // The managed worker window is parked far off-screen to stay out of the user's way. A reveal
++    // is the user explicitly asking for it, so move it back onto the primary display; focusing an
++    // invisible window would report success while showing nothing.
++    const offscreen =
++      window.state === "normal" &&
++      (typeof window.left !== "number" ||
++        typeof window.top !== "number" ||
++        window.left <= -8000 ||
++        window.top <= -8000);
++    await chrome.windows.update(windowId, {
++      focused: true,
++      ...(offscreen ? { left: 80, top: 80 } : {}),
++    });
+   }
+ }
+ 
+-- 
+2.50.1.windows.1
+

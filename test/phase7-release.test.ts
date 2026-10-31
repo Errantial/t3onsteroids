@@ -44,7 +44,7 @@ describe("Phase 7 release readiness", () => {
   it("keeps the supported release lane explicitly pinned and two-turn bounded", () => {
     const readiness = releaseReadiness();
     expect(readiness).toMatchObject({
-      bridgeVersion: "1.1.2",
+      bridgeVersion: "1.1.3",
       supportedConcurrency: 2,
       platform: "win32-x64",
       t3Pinned: true,

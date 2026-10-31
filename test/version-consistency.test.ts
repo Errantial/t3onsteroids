@@ -12,7 +12,7 @@ import { MemoryStateStore } from "../src/state/index.js";
 describe("release version consistency", () => {
   it("derives ACP, compatibility, release readiness and built CLI metadata from package.json", () => {
     const packageJson = JSON.parse(readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { version: string };
-    expect(packageJson.version).toBe("1.1.2");
+    expect(packageJson.version).toBe("1.1.3");
     const runtime = new AcpBridgeRuntime({
       store: new MemoryStateStore<SessionState>(),
       controller: {

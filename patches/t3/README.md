@@ -76,10 +76,39 @@ thread has no tab to show, and the action says so.
   provider host/driver plus `RpcAuthorization` 29/29.
 - `apps/server` typecheck clean for the touched files; `apps/web` production build succeeds and
   `threadActionMenu.logic` tests pass.
-- Dev-server live check: both entries render for a ChatGPT Browser thread, and **Show ChatGPT tab**
-  on a working turn closes the menu without a failure toast, so the server resolved the live
-  conversation and queued the reveal. The extension's reload half is covered by the unit boundary
-  but was not positively observed in the live browser; managed tabs drain when the turn ends.
+- Dev-server live check: both entries render for a ChatGPT Browser thread, the menu entries are
+  absent for Codex threads, and **Show ChatGPT tab** on a working turn closes the menu without a
+  failure toast, so the server resolved the live conversation and queued the reveal. An idle thread
+  reports "Could not show the ChatGPT tab" explicitly.
+- Real-Chromium extension check (shipped `revealChats`/`reloadChats`): Show activated the
+  conversation tab and focused its window; Reload kept the tab id, changed the page's
+  `performance.timeOrigin`, cleared an injected marker and left the conversation loaded. This check
+  also found that the managed worker window is parked at `-10000,-10000`, so the original reveal
+  focused an invisible window; `0005` fixes that and the same check then moved the window to `80,80`.
+
+---
+
+# v1.1.3 patch: reveal brings the ChatGPT window on-screen
+
+`v1.1.3-0005-chatgpt-window-onscreen.patch` applies after `0003` and fixes the reveal half of the
+thread tab controls.
+
+## What it changes
+
+- The managed worker browser is launched with `--window-position=-10000,-10000` so it stays out of
+  the user's way. `revealChats` activated the tab and focused that window, reporting success while
+  the user saw nothing.
+- A reveal now restores a minimized window first, then moves a normal window that is off-screen
+  (`left`/`top` <= -8000 or unknown) to `80,80`, and focuses it. On-screen windows are left where
+  they are.
+
+## Verification
+
+- Real Chromium (Chromium 1223, shipped extension, real ChatGPT conversation): before reveal the
+  window bounds were `-10000,-10000`; after reveal they were `80,80`, the conversation tab was
+  active and the window focused.
+- Reload in the same tab kept the tab id, changed `performance.timeOrigin` by ~31 s, cleared an
+  injected `window` marker, and left the conversation title loaded.
 
 ---
 

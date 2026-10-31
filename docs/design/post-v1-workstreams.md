@@ -199,3 +199,11 @@ refusing worker/Goal/Loop creation.
 
 Each slice starts from a clean worktree, changes only its own contract and tests, and records the
 new provider build id. Provider changes are batched before the single 2-chat requalification.
+
+## Candidate workstream (not selected)
+
+[`fleet-execution-targets.md`](./fleet-execution-targets.md) drafts multi-machine execution targets:
+one thread and one provider session, with per-call target routing and bounded fan-out. It is not one
+of the four selected workstreams above and does not change the current concurrency or release
+tuple. It is recorded separately so the peer-link and native-shell constraints are not
+rediscovered later.

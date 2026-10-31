@@ -1,0 +1,122 @@
+From 9a1077e11af988d37f5446d6a4dc15eb959391b0 Mon Sep 17 00:00:00 2001
+From: erranter <erranter@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 12:34:32 -0600
+Subject: [PATCH 7/8] feat(web): show the tokens/sec readout by default
+
+The readout was per-thread opt-in, so every new thread had to enable it from the context-meter popover. The stored list now holds the threads that turned it off, under a v2 key so the old opt-in list cannot be read with the opposite meaning; the switch still turns it off per thread.
+---
+ .../chat/threadTokenRatePreference.test.ts    | 13 ++++-
+ .../chat/threadTokenRatePreference.ts         | 49 ++++++++++---------
+ 2 files changed, 38 insertions(+), 24 deletions(-)
+
+diff --git a/apps/web/src/components/chat/threadTokenRatePreference.test.ts b/apps/web/src/components/chat/threadTokenRatePreference.test.ts
+index 3ca45deb6f..7904940a69 100644
+--- a/apps/web/src/components/chat/threadTokenRatePreference.test.ts
++++ b/apps/web/src/components/chat/threadTokenRatePreference.test.ts
+@@ -1,6 +1,6 @@
+ import { describe, expect, it } from "vite-plus/test";
+ 
+-import { toggleThreadInList } from "./threadTokenRatePreference";
++import { isThreadTokenRateEnabled, toggleThreadInList } from "./threadTokenRatePreference";
+ 
+ describe("toggleThreadInList", () => {
+   it("adds a thread once and removes it again", () => {
+@@ -10,7 +10,7 @@ describe("toggleThreadInList", () => {
+     expect(toggleThreadInList(on, "b", false)).toEqual(["a"]);
+   });
+ 
+-  it("keeps the most recently enabled threads when the cap is hit", () => {
++  it("keeps the most recently listed threads when the cap is hit", () => {
+     const full = Array.from({ length: 500 }, (_, index) => `t${index}`);
+     const next = toggleThreadInList(full, "new", true);
+     expect(next).toHaveLength(500);
+@@ -18,3 +18,12 @@ describe("toggleThreadInList", () => {
+     expect(next.at(-1)).toBe("new");
+   });
+ });
++
++describe("isThreadTokenRateEnabled", () => {
++  it("is on by default and off only for the threads that opted out", () => {
++    expect(isThreadTokenRateEnabled([], "thread-a")).toBe(true);
++    expect(isThreadTokenRateEnabled(["thread-b"], "thread-a")).toBe(true);
++    expect(isThreadTokenRateEnabled(["thread-a"], "thread-a")).toBe(false);
++    expect(isThreadTokenRateEnabled([], null)).toBe(false);
++  });
++});
+diff --git a/apps/web/src/components/chat/threadTokenRatePreference.ts b/apps/web/src/components/chat/threadTokenRatePreference.ts
+index 4ccd7b92e9..2a55ffb2f7 100644
+--- a/apps/web/src/components/chat/threadTokenRatePreference.ts
++++ b/apps/web/src/components/chat/threadTokenRatePreference.ts
+@@ -1,42 +1,47 @@
+ import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+ import type { ScopedThreadRef } from "@t3tools/contracts";
+ import * as Schema from "effect/Schema";
+-import { useCallback, useMemo } from "react";
+ 
+ import { useLocalStorage } from "../../hooks/useLocalStorage";
+ 
+-const STORAGE_KEY = "t3code:thread-token-rate:v1";
+-// Off by default, so only enabled threads are stored. The cap keeps the entry
+-// bounded for users who toggle it across many threads over time.
+-const MAX_ENABLED_THREADS = 500;
++// On by default, so the stored list is the threads that turned the readout off.
++// v2 is deliberate: the v1 key held the opposite set, and reading it under the new
++// meaning would hide the readout for exactly the people who had enabled it.
++const STORAGE_KEY = "t3code:thread-token-rate:v2";
++const MAX_DISABLED_THREADS = 500;
+ 
+-const EnabledThreadsSchema = Schema.Array(Schema.String);
++const DisabledThreadsSchema = Schema.Array(Schema.String);
+ const NO_THREADS: ReadonlyArray<string> = [];
+ 
+ export function toggleThreadInList(
+-  enabledThreads: ReadonlyArray<string>,
++  threads: ReadonlyArray<string>,
+   threadKey: string,
+-  enabled: boolean,
++  listed: boolean,
+ ): ReadonlyArray<string> {
+-  const rest = enabledThreads.filter((key) => key !== threadKey);
+-  return enabled ? [...rest, threadKey].slice(-MAX_ENABLED_THREADS) : rest;
++  const rest = threads.filter((key) => key !== threadKey);
++  return listed ? [...rest, threadKey].slice(-MAX_DISABLED_THREADS) : rest;
+ }
+ 
+-/** Per-thread opt-in for the tokens/sec readout, persisted on this client. */
++/** The readout is on unless this thread is in the stored off-list. */
++export function isThreadTokenRateEnabled(
++  disabledThreads: ReadonlyArray<string>,
++  threadKey: string | null,
++): boolean {
++  return threadKey !== null && !disabledThreads.includes(threadKey);
++}
++
++/** Per-thread opt-out for the tokens/sec readout, persisted on this client. */
+ export function useThreadTokenRatePreference(threadRef: ScopedThreadRef | null) {
+-  const [enabledThreads, setEnabledThreads] = useLocalStorage(
++  const [disabledThreads, setDisabledThreads] = useLocalStorage(
+     STORAGE_KEY,
+     NO_THREADS,
+-    EnabledThreadsSchema,
+-  );
+-  const threadKey = useMemo(() => (threadRef ? scopedThreadKey(threadRef) : null), [threadRef]);
+-  const enabled = threadKey !== null && enabledThreads.includes(threadKey);
+-  const setEnabled = useCallback(
+-    (next: boolean) => {
+-      if (threadKey === null) return;
+-      setEnabledThreads((current) => toggleThreadInList(current, threadKey, next));
+-    },
+-    [setEnabledThreads, threadKey],
++    DisabledThreadsSchema,
+   );
++  const threadKey = threadRef ? scopedThreadKey(threadRef) : null;
++  const enabled = isThreadTokenRateEnabled(disabledThreads, threadKey);
++  const setEnabled = (next: boolean) => {
++    if (threadKey === null) return;
++    setDisabledThreads((current) => toggleThreadInList(current, threadKey, !next));
++  };
+   return { enabled, setEnabled };
+ }
+-- 
+2.50.1.windows.1
+

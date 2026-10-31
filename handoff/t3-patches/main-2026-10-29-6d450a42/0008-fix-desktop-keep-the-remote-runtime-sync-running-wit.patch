@@ -1,0 +1,407 @@
+From d43ad80f47246b4b30d5e7f4020a205eb87912e0 Mon Sep 17 00:00:00 2001
+From: erranter <erranter@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 03:41:16 -0600
+Subject: [PATCH 8/8] fix(desktop): keep the remote runtime sync running
+ without a console window
+
+Two changes. The SSH runner now asks for the base release version, because fork builds append a release suffix to appVersion while the runtime archives stay under the v0.1.5 tag; the old value made the bootstrap download a tag that does not exist. And the one-off Windows task that pre-seeds those archives is rewritten once to a wscript launcher at a 15 minute cadence, so it keeps syncing without a console window flashing every minute.
+---
+ apps/desktop/src/main.ts                      |  20 +-
+ .../src/remoteRuntimeSyncMigration.test.ts    |  72 ++++++
+ .../desktop/src/remoteRuntimeSyncMigration.ts | 207 ++++++++++++++++++
+ packages/ssh/src/tunnel.test.ts               |  12 +
+ packages/ssh/src/tunnel.ts                    |  12 +
+ 5 files changed, 322 insertions(+), 1 deletion(-)
+ create mode 100644 apps/desktop/src/remoteRuntimeSyncMigration.test.ts
+ create mode 100644 apps/desktop/src/remoteRuntimeSyncMigration.ts
+
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 9a3c327e6b..0c6740d01e 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -20,6 +20,7 @@ import * as Electron from "electron";
+ import * as NetService from "@t3tools/shared/Net";
+ import * as HostProcess from "@t3tools/shared/HostProcess";
+ import type { RemoteT3RunnerOptions } from "@t3tools/ssh/tunnel";
++import { remoteRuntimeReleaseVersion } from "@t3tools/ssh/tunnel";
+ import serverPackageJson from "../../server/package.json" with { type: "json" };
+ 
+ import * as DesktopIpc from "./ipc/DesktopIpc.ts";
+@@ -42,6 +43,7 @@ import * as DesktopClerk from "./app/DesktopClerk.ts";
+ import * as DesktopCliCommand from "./app/DesktopCliCommand.ts";
+ import * as DesktopApplicationMenu from "./window/DesktopApplicationMenu.ts";
+ import * as DesktopAssets from "./app/DesktopAssets.ts";
++import * as RemoteRuntimeSyncMigration from "./remoteRuntimeSyncMigration.ts";
+ import * as DesktopBackendConfiguration from "./backend/DesktopBackendConfiguration.ts";
+ import * as DesktopBackendPool from "./backend/DesktopBackendPool.ts";
+ import * as DesktopLocalEnvironmentAuth from "./backend/DesktopLocalEnvironmentAuth.ts";
+@@ -113,7 +115,7 @@ const resolveDesktopSshCliRunner = (
+       nodeEngineRange: serverPackageJson.engines.node,
+     };
+   }
+-  return { archiveVersion: environment.appVersion };
++  return { archiveVersion: remoteRuntimeReleaseVersion(environment.appVersion) };
+ };
+ 
+ const layerDesktopSshEnvironment = Layer.unwrap(
+@@ -240,4 +242,20 @@ const layerDesktopRuntime = layerDesktopClerk.pipe(
+   Layer.provideMerge(DesktopPreReadyPlatform.layer),
+ );
+ 
++// One-way repair for the support task older fork builds created on Windows. The task
++// itself keeps running; only its launcher changes, so a console window never appears.
++if (process.platform === "win32" && Electron.app.isPackaged) {
++  void Electron.app
++    .whenReady()
++    .then(() => RemoteRuntimeSyncMigration.migrateRemoteRuntimeSyncTask())
++    .then((result) => {
++      if (result.status === "migrated") {
++        console.info(
++          `[remote-runtime-sync] scheduled task now runs hidden via ${result.launcherPath ?? "wscript"}`,
++        );
++      }
++    })
++    .catch(() => undefined);
++}
++
+ DesktopApp.program.pipe(Effect.provide(layerDesktopRuntime), NodeRuntime.runMain);
+diff --git a/apps/desktop/src/remoteRuntimeSyncMigration.test.ts b/apps/desktop/src/remoteRuntimeSyncMigration.test.ts
+new file mode 100644
+index 0000000000..cf61a73941
+--- /dev/null
++++ b/apps/desktop/src/remoteRuntimeSyncMigration.test.ts
+@@ -0,0 +1,72 @@
++import { assert, describe, it } from "@effect/vitest";
++
++import {
++  HIDDEN_LAUNCHER_FILE_NAME,
++  planHiddenLauncher,
++  renderHiddenLauncher,
++  vbsStringLiteral,
++} from "./remoteRuntimeSyncMigration.ts";
++
++describe("planHiddenLauncher", () => {
++  it("wraps the PowerShell task the Framework created", () => {
++    const plan = planHiddenLauncher({
++      execute: "powershell.exe",
++      arguments:
++        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\\Users\\Emil\\apps\\t3code-service\\remote-runtime-sync.ps1",
++    });
++    assert.deepEqual(plan, {
++      scriptPath: "C:\\Users\\Emil\\apps\\t3code-service\\remote-runtime-sync.ps1",
++      commandLine:
++        '"powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\\Users\\Emil\\apps\\t3code-service\\remote-runtime-sync.ps1',
++      launcherPath: `C:\\Users\\Emil\\apps\\t3code-service\\${HIDDEN_LAUNCHER_FILE_NAME}`,
++    });
++  });
++
++  it("wraps the .cmd task the laptop created", () => {
++    const plan = planHiddenLauncher({ execute: "C:\\Users\\emilg\\.t3\\remote-runtime-sync.cmd" });
++    assert.equal(plan?.commandLine, 'cmd.exe /d /s /c ""C:\\Users\\emilg\\.t3\\remote-runtime-sync.cmd""');
++    assert.equal(plan?.launcherPath, `C:\\Users\\emilg\\.t3\\${HIDDEN_LAUNCHER_FILE_NAME}`);
++  });
++
++  it("keeps .cmd arguments when the task carries them", () => {
++    const plan = planHiddenLauncher({
++      execute: "C:\\Users\\emilg\\.t3\\remote-runtime-sync.cmd",
++      arguments: "--once",
++    });
++    assert.equal(plan?.commandLine, 'cmd.exe /d /s /c ""C:\\Users\\emilg\\.t3\\remote-runtime-sync.cmd" --once"');
++  });
++
++  it("recognises a command run through cmd.exe", () => {
++    const plan = planHiddenLauncher({
++      execute: "cmd.exe",
++      arguments: '/d /c "C:\\Users\\emilg\\.t3\\remote-runtime-sync.cmd"',
++    });
++    assert.equal(plan?.scriptPath, "C:\\Users\\emilg\\.t3\\remote-runtime-sync.cmd");
++  });
++
++  it("leaves an already hidden task and unknown shapes alone", () => {
++    assert.equal(planHiddenLauncher({ execute: "wscript.exe", arguments: '//B "x.vbs"' }), null);
++    assert.equal(planHiddenLauncher({ execute: "C:\\tools\\sync.exe" }), null);
++    assert.equal(planHiddenLauncher({ execute: "powershell.exe", arguments: "-NoProfile" }), null);
++    assert.equal(planHiddenLauncher({ execute: "powershell.exe", arguments: "-File relative.ps1" }), null);
++  });
++});
++
++describe("renderHiddenLauncher", () => {
++  it("runs the command hidden and does not wait", () => {
++    const plan = planHiddenLauncher({
++      execute: "powershell.exe",
++      arguments: "-File C:\\sync.ps1",
++    });
++    const text = renderHiddenLauncher(plan!);
++    assert.include(text, 'CreateObject("WScript.Shell")');
++    assert.include(
++      text,
++      `shell.Run ${vbsStringLiteral('"powershell.exe" -File C:\\sync.ps1')}, 0, False`,
++    );
++  });
++
++  it("doubles quotes inside the VBS string literal", () => {
++    assert.equal(vbsStringLiteral('say "hi"'), '"say ""hi"""');
++  });
++});
+diff --git a/apps/desktop/src/remoteRuntimeSyncMigration.ts b/apps/desktop/src/remoteRuntimeSyncMigration.ts
+new file mode 100644
+index 0000000000..19f3a1f108
+--- /dev/null
++++ b/apps/desktop/src/remoteRuntimeSyncMigration.ts
+@@ -0,0 +1,207 @@
++import { spawn } from "node:child_process";
++import { mkdir, writeFile } from "node:fs/promises";
++import { dirname, isAbsolute, join } from "node:path";
++
++/**
++ * Windows Task Scheduler task created as a support workaround for the SSH runtime
++ * bootstrap. Its action ran a console program directly, so a console window flashed
++ * every time the task fired (every minute on the machines that have it).
++ */
++export const REMOTE_RUNTIME_SYNC_TASK_NAME = "T3 Remote Runtime Sync";
++export const HIDDEN_LAUNCHER_FILE_NAME = "remote-runtime-sync-hidden.vbs";
++export const MIGRATED_INTERVAL = "PT15M";
++
++export interface ScheduledTaskAction {
++  readonly execute: string;
++  readonly arguments?: string;
++  readonly workingDirectory?: string;
++}
++
++export interface HiddenLauncherPlan {
++  /** The script the legacy task ran; the hidden launcher stands in for it. */
++  readonly scriptPath: string;
++  /** The exact command line the legacy action ran. */
++  readonly commandLine: string;
++  /** Where the generated launcher belongs. */
++  readonly launcherPath: string;
++}
++
++const CONSOLE_HOSTS = new Set(["cmd.exe", "cmd", "powershell.exe", "powershell", "pwsh.exe", "pwsh"]);
++const HIDDEN_LAUNCHERS = new Set(["wscript.exe", "wscript", "cscript.exe", "cscript"]);
++
++function baseName(value: string): string {
++  const normalized = value.trim().replace(/\//g, "\\");
++  return normalized.slice(normalized.lastIndexOf("\\") + 1).toLowerCase();
++}
++
++function unquote(value: string): string {
++  const trimmed = value.trim();
++  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
++    return trimmed.slice(1, -1);
++  }
++  return trimmed;
++}
++
++/** `-File "<path>"` inside a PowerShell argument string, if that is how the task runs it. */
++function powershellScriptPath(argumentsText: string): string | null {
++  const match = /(?:^|\s)-File\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i.exec(argumentsText);
++  const value = match?.[1] ?? match?.[2] ?? match?.[3];
++  return value === undefined ? null : unquote(value);
++}
++
++/**
++ * Decides how to keep a legacy sync task working without a console window, or returns
++ * `null` when the action is not a shape this migration understands. Unknown shapes are
++ * left alone rather than guessed at.
++ */
++export function planHiddenLauncher(action: ScheduledTaskAction): HiddenLauncherPlan | null {
++  const execute = unquote(action.execute);
++  const argumentsText = (action.arguments ?? "").trim();
++  const host = baseName(execute);
++  if (HIDDEN_LAUNCHERS.has(host)) return null;
++
++  if (host === "cmd.exe" || host === "cmd" || host.endsWith(".cmd") || host.endsWith(".bat")) {
++    const scriptPath = host.endsWith(".cmd") || host.endsWith(".bat")
++      ? execute
++      : unquote(argumentsText.replace(/^(?:\/[a-z]+\s+)*/i, ""));
++    if (!scriptPath || !isAbsolute(scriptPath)) return null;
++    const commandLine = host.endsWith(".cmd") || host.endsWith(".bat")
++      ? `cmd.exe /d /s /c ""${scriptPath}"${argumentsText ? ` ${argumentsText}` : ""}"`
++      : `"${execute}" ${argumentsText}`.trim();
++    return {
++      scriptPath,
++      commandLine,
++      launcherPath: join(dirname(scriptPath), HIDDEN_LAUNCHER_FILE_NAME),
++    };
++  }
++
++  if (host === "powershell.exe" || host === "powershell" || host === "pwsh.exe" || host === "pwsh") {
++    const scriptPath = powershellScriptPath(argumentsText);
++    if (!scriptPath || !isAbsolute(scriptPath)) return null;
++    return {
++      scriptPath,
++      commandLine: argumentsText ? `"${execute}" ${argumentsText}` : `"${execute}"`,
++      launcherPath: join(dirname(scriptPath), HIDDEN_LAUNCHER_FILE_NAME),
++    };
++  }
++
++  return null;
++}
++
++/** Escapes one command line into a VBScript string literal. */
++export function vbsStringLiteral(value: string): string {
++  return `"${value.replace(/"/g, '""')}"`;
++}
++
++/**
++ * The launcher runs the legacy command with window style 0 (hidden) and does not wait,
++ * so the task stays fire-and-forget exactly like before. WScript itself has no console.
++ */
++export function renderHiddenLauncher(plan: HiddenLauncherPlan): string {
++  return [
++    "' Generated by T3 Code. Runs the remote runtime sync without a console window.",
++    "Option Explicit",
++    "Dim shell",
++    'Set shell = CreateObject("WScript.Shell")',
++    `shell.Run ${vbsStringLiteral(plan.commandLine)}, 0, False`,
++    "",
++  ].join("\r\n");
++}
++
++function runPowerShell(script: string): Promise<{ code: number; stdout: string; stderr: string }> {
++  return new Promise((resolvePromise, rejectPromise) => {
++    const encoded = Buffer.from(script, "utf16le").toString("base64");
++    const child = spawn(
++      "powershell.exe",
++      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
++      { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
++    );
++    let stdout = "";
++    let stderr = "";
++    child.stdout.setEncoding("utf8");
++    child.stderr.setEncoding("utf8");
++    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
++    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
++    child.once("error", rejectPromise);
++    child.once("close", (code) => resolvePromise({ code: code ?? -1, stdout, stderr }));
++  });
++}
++
++const QUERY_TASK = `
++$ErrorActionPreference = 'Stop'
++$task = Get-ScheduledTask -TaskName '${REMOTE_RUNTIME_SYNC_TASK_NAME}' -ErrorAction SilentlyContinue
++if ($null -eq $task) { 'null'; exit 0 }
++$action = @($task.Actions)[0]
++[pscustomobject]@{
++  execute = [string]$action.Execute
++  arguments = [string]$action.Arguments
++  workingDirectory = [string]$action.WorkingDirectory
++} | ConvertTo-Json -Compress
++`;
++
++function rewriteTaskScript(launcherPath: string): string {
++  const escapedLauncher = launcherPath.replace(/'/g, "''");
++  return `
++$ErrorActionPreference = 'Stop'
++$task = Get-ScheduledTask -TaskName '${REMOTE_RUNTIME_SYNC_TASK_NAME}'
++$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument '//B //Nologo "${escapedLauncher}"'
++Set-ScheduledTask -TaskName '${REMOTE_RUNTIME_SYNC_TASK_NAME}' -Action $action | Out-Null
++$task = Get-ScheduledTask -TaskName '${REMOTE_RUNTIME_SYNC_TASK_NAME}'
++foreach ($trigger in $task.Triggers) {
++  if ($null -ne $trigger.Repetition) { $trigger.Repetition.Interval = '${MIGRATED_INTERVAL}' }
++}
++Set-ScheduledTask -TaskName '${REMOTE_RUNTIME_SYNC_TASK_NAME}' -Trigger $task.Triggers | Out-Null
++'ok'
++`;
++}
++
++export type RemoteRuntimeSyncMigrationStatus = "migrated" | "absent" | "already" | "unsupported";
++
++export interface RemoteRuntimeSyncMigrationResult {
++  readonly status: RemoteRuntimeSyncMigrationStatus;
++  readonly launcherPath?: string;
++  readonly detail?: string;
++}
++
++/**
++ * Rewrites the support task once. Safe to run at every start: an already migrated task is
++ * recognised by its `wscript.exe` action and left untouched.
++ */
++export async function migrateRemoteRuntimeSyncTask(): Promise<RemoteRuntimeSyncMigrationResult> {
++  if (process.platform !== "win32") return { status: "absent", detail: "not windows" };
++
++  const query = await runPowerShell(QUERY_TASK);
++  if (query.code !== 0) {
++    return { status: "unsupported", detail: query.stderr.trim().slice(0, 300) };
++  }
++  const raw = query.stdout.trim();
++  if (raw === "" || raw === "null") return { status: "absent" };
++
++  let action: ScheduledTaskAction;
++  try {
++    const parsed = JSON.parse(raw) as Partial<ScheduledTaskAction>;
++    action = {
++      execute: typeof parsed.execute === "string" ? parsed.execute : "",
++      arguments: typeof parsed.arguments === "string" ? parsed.arguments : "",
++      workingDirectory: typeof parsed.workingDirectory === "string" ? parsed.workingDirectory : "",
++    };
++  } catch {
++    return { status: "unsupported", detail: "task action is not JSON" };
++  }
++
++  if (baseName(action.execute) === "wscript.exe" || baseName(action.execute) === "wscript") {
++    return { status: "already" };
++  }
++
++  const plan = planHiddenLauncher(action);
++  if (plan === null) return { status: "unsupported", detail: `unrecognised action: ${action.execute}` };
++
++  await mkdir(dirname(plan.launcherPath), { recursive: true });
++  await writeFile(plan.launcherPath, renderHiddenLauncher(plan), "utf8");
++
++  const rewrite = await runPowerShell(rewriteTaskScript(plan.launcherPath));
++  if (rewrite.code !== 0 || rewrite.stdout.trim() !== "ok") {
++    return { status: "unsupported", detail: rewrite.stderr.trim().slice(0, 300) };
++  }
++  return { status: "migrated", launcherPath: plan.launcherPath };
++}
+diff --git a/packages/ssh/src/tunnel.test.ts b/packages/ssh/src/tunnel.test.ts
+index 360009a606..74557e7a30 100644
+--- a/packages/ssh/src/tunnel.test.ts
++++ b/packages/ssh/src/tunnel.test.ts
+@@ -82,6 +82,18 @@ function commandArgs(command: ChildProcess.Command): ReadonlyArray<string> {
+ const ARCHIVE = { archiveVersion: "1.2.3-preview.20260911.4" } as const;
+ 
+ describe("ssh tunnel scripts", () => {
++  it("resolves the release a remote runtime archive is published under", () => {
++    assert.equal(
++      SshTunnel.remoteRuntimeReleaseVersion("0.1.5-v1.1.4.20261031.98beeb3e80fd.connect1"),
++      "0.1.5",
++    );
++    assert.equal(
++      SshTunnel.remoteRuntimeReleaseVersion("0.1.5-nightly.20261029.3877"),
++      "0.1.5-nightly.20261029.3877",
++    );
++    assert.equal(SshTunnel.remoteRuntimeReleaseVersion("0.1.5"), "0.1.5");
++  });
++
+   it("rejects archive versions that are not a single exact version segment", () => {
+     for (const archiveVersion of [
+       "../other",
+diff --git a/packages/ssh/src/tunnel.ts b/packages/ssh/src/tunnel.ts
+index 1a98fa7d21..b5cf4a3940 100644
+--- a/packages/ssh/src/tunnel.ts
++++ b/packages/ssh/src/tunnel.ts
+@@ -68,6 +68,18 @@ export interface RemoteT3RunnerOptions {
+   readonly releaseBaseUrl?: string | null;
+ }
+ 
++/**
++ * The version a remote runtime archive is published under. Fork desktop builds append
++ * their own release suffix (`0.1.5-v1.1.4.20261031.98beeb3e80fd.connect1`), but the
++ * archive and its release tag use the base version (`v0.1.5`). Using the full app
++ * version makes the remote bootstrap download a tag that does not exist.
++ */
++export function remoteRuntimeReleaseVersion(appVersion: string): string {
++  const trimmed = appVersion.trim();
++  const forkRelease = /^(.+?)-v\d+\.\d+\.\d+\.\d{8}\.[0-9a-f]{8,}\.connect\d+$/i.exec(trimmed);
++  return forkRelease?.[1] ?? trimmed;
++}
++
+ export interface SshEnvironmentManagerOptions {
+   readonly resolveCliRunner?: Effect.Effect<RemoteT3RunnerOptions>;
+ }
+-- 
+2.50.1.windows.1
+

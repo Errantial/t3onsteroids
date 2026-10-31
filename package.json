@@ -1,6 +1,6 @@
 {
   "name": "t3onsteroids",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "private": true,
   "description": "T3 Code compatibility bridge for Chat On Steroids",
   "type": "module",

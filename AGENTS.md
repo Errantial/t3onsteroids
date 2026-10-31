@@ -11,12 +11,194 @@
 - When multiple implementation subagents run concurrently, give each one an isolated git branch/worktree rooted at the agreed frozen base or dependency commit. Do not let concurrent agents share one mutable worktree or merge/rebase each other's branches; the integration owner merges completed slice commits in dependency order.
 - Never open pull requests, issues or discussions against the upstream `pingdotgg/t3code` repository. T3 changes ship only as a maintained patch series or fork; local T3 clones keep `origin`'s push URL disabled.
 
-## Release workflow
+## Release pipeline
 
-Every release publishes Windows **and** Linux artifacts together. The Windows installer keeps the
-desktop path; the Linux artifact is the standalone CLI runtime that headless servers run.
+Every release publishes the Windows desktop installer and the Linux CLI runtime together, from the
+same fork commit. Follow the steps in order and record the result in
+`docs/evidence/<release>-release.md`.
 
-### What server-1 runs (reference shape)
+### Branch and commit conventions
+
+- T3 source lives in `Errantial/t3code` (fork). Work on a feature branch off the maintained
+  `fix/remote-runtime-sync` branch: `feat/<slug>` or `fix/<slug>`. `origin` is the upstream
+  `pingdotgg/t3code` and must keep its push URL disabled; push to the fork remote. Never open PRs,
+  issues or discussions against upstream.
+- `t3onsteroids` carries the release notes, patches, scripts and evidence. Cut each release on
+  `release/vX.Y.Z`; keep `main` a fast-forward of it.
+- Commit subjects: `feat(scope): ...`, `fix(scope): ...`, `test(scope): ...`, `docs: ...`,
+  `chore(scope): ...`. No force-push and no history rewrite on either repo.
+
+### Version scheme
+
+Three identifiers, never interchangeable:
+
+| Identifier | Example | Used for |
+| --- | --- | --- |
+| Base T3 version | `0.1.5` | upstream `v0.1.5` tag; SSH bootstrap URL |
+| Full fork version | `0.1.5-v1.1.6.20261101.<sha12>.connect1` | exe name, Linux runtime dir/archive, `latest.yml`, `t3 --version` |
+| GitHub release tag | `v1.1.6` | release page, `gh release`, human links |
+
+`<sha12>` is the first 12 characters of the T3 build commit. Run
+`node scripts/update-release-package-versions.ts <full-version>` before bundling the CLI; without
+it `t3 --version` reports the workspace version instead of the release. The SSH bootstrap strips
+the fork suffix and downloads upstream under the base tag only; passing the full version there is
+the 404 that spawned the old sync workaround.
+
+### 1. Preflight
+
+- T3 worktree clean, on the release branch, build commit pushed to `Errantial/t3code`.
+- `t3onsteroids` clean, on `release/vX.Y.Z`, notes written in `docs/releases/vX.Y.Z.md`.
+- At least 10 GB free on C: and on the Linux build host (48 GB is the comfortable Windows figure).
+- `gh auth status` succeeds and `gh release view vX.Y.Z --repo Errantial/t3onsteroids` says the
+  release does not exist yet. A published tag is never reused.
+
+### 2. Tests and smoke checks (must pass before publishing)
+
+```bash
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm lint
+pnpm test
+node scripts/release-smoke.ts
+```
+
+Run the focused suites for anything touched as well, e.g. `vp test run <files>`. The MCP server
+repo runs its own `pnpm test` (tsc plus node --test) before its tag. No release is published from a
+red tree; if a check is flaky, rerun it and record the result rather than skipping it.
+
+### 3. Build Windows
+
+Build from a clean checkout of the release commit, in an empty `release/` directory:
+
+```powershell
+$env:T3CODE_DESKTOP_VERSION = '0.1.5-v1.1.6.YYYYMMDD.<sha12>.connect1'
+$env:T3CODE_DESKTOP_UPDATE_REPOSITORY = 'Errantial/t3onsteroids'
+$env:T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR = 'true'
+pnpm dist:desktop:win:x64
+```
+
+Outputs: `release/T3-Code-<full>-x64.exe`, `.exe.blockmap`, `latest.yml`. The build fails with
+ENOSPC rather than producing a partial installer; free space and rebuild, never publish a failed
+run. The installer is unsigned unless the signing environment is configured; say which in the
+release notes.
+
+### 4. Build the Linux runtime
+
+server-1 is aarch64 and runs the standalone CLI runtime as a user unit. Follow
+[what server-1 runs](#reference-what-server-1-runs) and
+[how the runtime is built](#reference-how-the-linux-runtime-is-built). Verify the extracted tree
+before packing:
+
+```bash
+t3-<full>-linux-arm64/t3 --version     # must print the full version
+node scripts/smoke-cli-archive.ts \
+  --archive /root/release-cli/t3-<full>-linux-arm64.tar.gz \
+  --expect-version <full-version>
+```
+
+For an x86_64 Linux host use `node apps/server/scripts/cli.ts build-exe` (no injection) and
+`--arch x64`, then ship `t3-<full>-linux-x64.tar.gz`. Do not cross-build the arm64 runtime from
+WSL: `vp pack` has no linux-arm64 target and cross-injected SEA output does not execute.
+
+### 5. Assemble the asset set
+
+Every release has all of these, named with the full version:
+
+- Windows: `T3-Code-<full>-x64.exe`, `T3-Code-<full>-x64.exe.blockmap`, `latest.yml`.
+- Linux: `t3-<full>-linux-<arch>.tar.gz` (arm64 for server-1, x64 for other hosts).
+- `t3onsteroids-<release>-source.zip`, `t3onsteroids-<release>-t3-patches.zip`.
+- `SHA256SUMS.txt` covering every asset above, generated last.
+- `latest-linux.yml` only when a Linux **desktop** build ships; the CLI tarball is not consumed by
+  electron-updater, so do not fake Linux updater metadata.
+
+Check `latest.yml` before upload: its `version` is the full version and its `sha512` and `size`
+match the exe byte for byte.
+
+```powershell
+$files = Get-ChildItem out -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' }
+$lines = $files | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash + '  ' + $_.Name }
+$lines | Set-Content out/SHA256SUMS.txt -Encoding ascii
+```
+
+### 6. Publish
+
+```bash
+gh release create vX.Y.Z --repo Errantial/t3onsteroids \
+  --title "t3onsteroids vX.Y.Z" --notes-file docs/releases/vX.Y.Z.md \
+  out/T3-Code-<full>-x64.exe \
+  out/T3-Code-<full>-x64.exe.blockmap \
+  out/latest.yml \
+  out/t3-<full>-linux-arm64.tar.gz \
+  out/t3onsteroids-X.Y.Z-source.zip \
+  out/t3onsteroids-X.Y.Z-t3-patches.zip
+gh release upload vX.Y.Z --repo Errantial/t3onsteroids out/SHA256SUMS.txt
+```
+
+The tag is the fork tag (`vX.Y.Z`), never the full version. Upload `SHA256SUMS.txt` after the
+assets it covers. `--clobber` is only for repairing a missing or misnamed asset on an already
+published release; replacing an installer silently needs a new patch release and a note.
+
+### 7. Post-publish verification
+
+1. `gh release view vX.Y.Z --repo Errantial/t3onsteroids` lists every expected asset.
+2. HEAD every asset URL and expect 200:
+
+   ```powershell
+   $base = 'https://github.com/Errantial/t3onsteroids/releases/download/vX.Y.Z'
+   (Get-Content out/SHA256SUMS.txt) | ForEach-Object {
+     $name = $_.Split(' ', 2)[1].Trim()
+     $r = Invoke-WebRequest -Uri "$base/$name" -Method Head -UseBasicParsing
+     "$($r.StatusCode) $name $($r.Headers['Content-Length'])"
+   }
+   ```
+
+3. `/releases/latest` is the new tag, not a prerelease or draft; `latest.yml` names the uploaded
+   installer and matches its `sha512`/`size`.
+4. Run `node scripts/fleet-update.mjs --tag vX.Y.Z --targets all --dry-run` and confirm every
+   machine's before-version and the asset it would install.
+5. Record the build, checksums, feed and verification in `docs/evidence/<release>-release.md`.
+
+### 8. Fleet rollout
+
+Dry-run first, then one machine at a time; the script stops on the first failure and keeps the
+previous Linux runtime. Updating restarts T3 and interrupts running threads.
+
+```bash
+node scripts/fleet-update.mjs --tag vX.Y.Z --targets all --dry-run
+node scripts/fleet-update.mjs --tag vX.Y.Z --targets home,server1 --yes
+node scripts/fleet-update.mjs --tag vX.Y.Z --targets framework --allow-framework --yes
+```
+
+Run the Framework last (it restarts this conversation), or leave it to Emil. The Windows path stops
+the WinSW `t3code` service around the NSIS install; server-1 keeps the previous
+`~/.t3-nightly/runtime/versions/<full>` directory. If the release changes the MCP server, update
+`t3code-mcp-v2` after the T3 rollout, restart its scheduled task, and verify the new tools before
+calling it done.
+
+### 9. Rollback
+
+- Windows: stop the `t3code` service, run the previous installer `/S /currentuser` (the old
+  installer is kept in the updater cache or the previous release assets), start the service, and
+  confirm the exe `FileVersion` and `:3773`.
+- Linux: point `ExecStart` back at the previous version directory, then
+  `systemctl --user daemon-reload && systemctl --user restart t3code.service`; verify
+  `t3 --version` and `http://127.0.0.1:3773/`. The old directory is never deleted during an
+  update.
+- Release: never delete the tag or assets. Publish a new patch release with the fix.
+- MCP server: restore the previous tree from `C:\Users\Emil\apps\t3code-mcp-v2.bak-*`, rebuild,
+  restart the `t3code-mcp` task, and re-run its smoke test.
+
+### 10. Disk hygiene
+
+- Check C: free before and after; keep at least 10 GB. Remove `release/`, staging directories and
+  duplicate installers after upload. Keep one previous installer for rollback.
+- WSL: remove `/root/t3build`, `/root/release-cli`, `/root/arm64` and downloaded Node tarballs
+  after the build.
+- server-1: remove `/tmp/t3build`, `/tmp/release-cli`, `/tmp/node26` and test tarballs; keep the
+  previous runtime directory. Build with `nice` in `/tmp` while its T3 keeps serving.
+- `out/` is gitignored; delete published artifacts from it once the evidence is recorded.
+
+### Reference: what server-1 runs
 
 `server-1` runs `t3code.service` as a **user** systemd unit
 (`~/.config/systemd/user/t3code.service`, user `opc`):
@@ -26,29 +208,20 @@ ExecStart=/home/opc/.t3-nightly/runtime/versions/<full-version>/t3 __service-lau
 Environment=T3CODE_HOME=/home/opc/.t3-nightly
 ```
 
-`<full-version>` is a directory unpacked from `t3-<full-version>-linux-<arch>.tar.gz` (layout: `t3`,
-`t3.bin`, `client/`, `lib/`, `node_modules/`, `resource-monitor/<platform>-<arch>/`, `.install-complete`).
-**server-1 is aarch64**, so its artifact is `...-linux-arm64.tar.gz` and its resource monitor lives
-under `resource-monitor/linux-arm64/`. The unit is not rewritten by the app, so a release installs a
-new directory and points the unit at it, keeping the previous one for rollback. No deb/AppImage is
-needed for this host; do not add one unless a Linux desktop install is actually wanted.
+`<full-version>` is a directory unpacked from `t3-<full-version>-linux-<arch>.tar.gz` (layout:
+`t3`, `t3.bin`, `client/`, `lib/`, `node_modules/`, `resource-monitor/<platform>-<arch>/`,
+`.install-complete`). **server-1 is aarch64**, so its artifact is `...-linux-arm64.tar.gz` and its
+resource monitor lives under `resource-monitor/linux-arm64/`. The unit is not rewritten by the app,
+so a release installs a new directory and points the unit at it, keeping the previous one for
+rollback. No deb/AppImage is needed for this host; do not add one unless a Linux desktop install is
+actually wanted.
 
-### Version rule
+### Reference: how the Linux runtime is built
 
-- Artifact names and the runtime directory use the **full** version:
-  `0.1.5-v1.1.6.YYYYMMDD.<sha12>.connect1`.
-- The SSH bootstrap downloads upstream archives under the **base** tag (`v0.1.5`), because only the
-  base version is published upstream. `remoteRuntimeReleaseVersion()` strips the fork suffix before
-  the runner builds that URL; never pass the full version there (that was the 404 that spawned the
-  old sync workaround).
-- GitHub release tags use the fork tag (`v1.1.6`), never the full version.
-
-### Where Linux artifacts are built
-
-server-1 is **aarch64**. Build its runtime natively on an arm64 Linux host (server-1 is the only one
-available) in a scratch directory, with **Node 26.12.1**. Node's SEA output does not execute on this
-host — `--build-sea`, `vp pack` and a postject injection all produced `ENOEXEC` while the stock
-Node binary runs — so the archive ships a launcher + Node + server bundle instead of a SEA:
+Build its runtime natively on an arm64 Linux host (server-1 is the only one available) in a scratch
+directory, with **Node 26.12.1**. Node's SEA output does not execute on this host — `--build-sea`,
+`vp pack` and a postject injection all produced `ENOEXEC` while the stock Node binary runs — so the
+archive ships a launcher + Node + server bundle instead of a SEA:
 
 ```bash
 # on the arm64 host, as the service user, in a scratch clone
@@ -71,9 +244,6 @@ t3-<full>-linux-arm64/t3 --version     # must print the release version
 tar -czf t3-<full>-linux-arm64.tar.gz -C pack t3-<full>-linux-arm64
 ```
 
-`update-release-package-versions.ts` must run before bundling: without it `t3 --version` reports
-the workspace version (0.1.4) instead of the release.
-
 Clean the scratch clone and tarballs afterwards and keep at least 10 GB free. The Framework's WSL is
 only needed for Windows builds; do not cross-build the arm64 runtime there (`vp pack` has no
 linux-arm64 target, and cross-injected SEA output was verified not to execute). Keep server-1's T3
@@ -83,24 +253,6 @@ artifact's `t3 --version` succeeds.
 Why not GitHub Actions yet: the fork's `Release` workflow is scheduled but every run stays
 `pending` with no jobs, so Actions is not usable on the fork as configured. Revisit it once the
 workflow actually runs; it remains the better long-term home for both architectures.
-
-### Assets per release
-
-- Windows: `T3-Code-<full>-x64.exe`, `.exe.blockmap`, `latest.yml`.
-- Linux: `t3-<full>-linux-x64.tar.gz`. `latest-linux.yml` only when a Linux **desktop** build ships;
-  the CLI tarball is not consumed by electron-updater.
-- `t3onsteroids-<release>-source.zip`, `t3onsteroids-<release>-t3-patches.zip`.
-- `SHA256SUMS.txt` covering every asset above.
-
-### Post-publish verification
-
-1. `gh release view <tag>` lists every expected asset.
-2. `HEAD` every asset URL and expect 200; `latest.yml` must name the installer and its
-   `sha512`/`size` must match the uploaded exe.
-3. `/releases/latest` must be the new tag and not a prerelease or draft.
-4. Confirm each machine's update path: Windows T3 shows the update from
-   `Errantial/t3onsteroids` `latest`; server-1 answers on `:3773` after the fleet update.
-5. Record the result in `docs/evidence/<release>-release.md`.
 
 ## Fleet updates
 

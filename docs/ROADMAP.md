@@ -33,6 +33,21 @@ v1.1.7 implementation starts only after v1.1.6 ships.
 6. **Cross-machine support** — instruction distribution and MCP routing across the three machines,
    without retiring the existing MCP services. Cross-machine **thread placement** within one
    logical project is v1.1.7, with the per-environment roots.
+7. **Per-turn context slot** — a single ordered, budgeted contributor registry
+   (`{ key, trust, priority, maxBytes, build(turn) }`) called after
+   `shouldStartProviderTurn()` in `RunExecutionService`. Adapters receive one neutral
+   `turnContext` field and keep their own delivery policy: Codex keyed `additionalContext`,
+   Claude leading text after slash commands and with correct continuation ordering, OpenCode
+   prompt prefix. The per-thread role/context files are the first contributor; the v1.1.7 fleet
+   prompt block and an optional future extension packet register through the same API. Tests:
+   identical provider frames with no contributors, Claude slash-command/continuation ordering,
+   role-file delivery on Codex/Claude/OpenCode, and byte budgets. Generic naming only; no
+   civilization-specific names in the T3 API.
+
+The per-turn context slot adds one server contract and three adapter changes plus tests to v1.1.6.
+Saved threads, the MCP merge, and instruction storage can proceed in parallel, but role-file
+delivery depends on this slot. v1.1.6 remains the next release and is now larger; no date is
+committed.
 
 v1.1.6 is not released and no machine is rolled out until Emil approves.
 
@@ -95,7 +110,8 @@ root/instruction-profile resolution and the fail-closed evidence (`target_worksp
 | P5 | Not scheduled | Optional explicit handoff of the provider session to a target. | Turn-boundary move with recorded context-loss behaviour; native target tools work after resume. |
 
 P1 also lands cross-machine project thread placement and aggregation; P2 enforces its
-per-environment root and instruction selection.
+per-environment root and instruction selection. The P1 active-target prompt block registers through
+the v1.1.6 turn-context contributor API instead of adding a second prompt channel.
 
 **v1.1.7 exit gate:** P0+P1 evidence is mandatory. P2’s evidence is required unless it is formally
 moved to v1.1.8 before the release branch is cut. P3–P5 must not be claimed by the v1.1.7 notes.

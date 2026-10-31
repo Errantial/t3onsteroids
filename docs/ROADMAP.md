@@ -49,7 +49,8 @@ Saved threads, the MCP merge, and instruction storage can proceed in parallel, b
 delivery depends on this slot. v1.1.6 remains the next release and is now larger; no date is
 committed.
 
-v1.1.6 is not released and no machine is rolled out until Emil approves.
+v1.1.6 is not released and no machine is rolled out until Emil approves. Fleet-wide **release
+updates** from the app are not in v1.1.6; they are the separate v1.1.7 operational track below.
 
 ## v1.1.7 — Fleet execution targets
 
@@ -97,6 +98,39 @@ registry.
 
 P1 adds placement, aggregation, and the create/list/search/get MCP fields; P2 adds the
 root/instruction-profile resolution and the fail-closed evidence (`target_workspace_unmapped`).
+
+### Fleet-wide release updates (v1.1.7 operational track)
+
+Settings > About gets an environment selector: every linked environment plus **All environments**.
+The selected scope shows the machine's T3 version, build variant, and update status. Update acts on
+that one machine; All environments runs the same plan as `scripts/fleet-update.mjs`. The update
+logic moves into a shared server-side module used by both the CLI and the UI, so they cannot drift.
+
+This is an **operational release-update track**, not the P0–P5 execution-target work. It does not
+change the P0–P2 exit gates. If v1.1.7 capacity is tight, the shared module and CLI refactor land
+first and the About/MCP surface can move to v1.1.8 without changing the runtime contracts.
+
+Requirements:
+
+- **Confirmation before anything runs:** list each target machine, its current version, and the
+  target version. No auto-update and no background update.
+- **Per-machine progress and results:** stream status per machine; report partial failures per
+  machine and keep the successful machines' results visible. One failure must not hide the others.
+- **Windows:** stop the WinSW `t3code` service, run the NSIS installer silently, restart the
+  service, verify the installed version and `:3773`. **Linux:** unpack the next runtime, update
+  `runtime/service-state.json` and `ExecStart`, restart, verify; keep the previous runtime for
+  rollback. Both paths stop on the first failure unless the user explicitly chose per-machine
+  continuation.
+- **Release variant per machine:** show the variant (standard now; a t3civilization extension
+  variant only when it exists) and update only the matching artifact. Never infer or silently swap
+  variants.
+- **MCP:** `fleet_update_status` (machines, versions, variants, reachability, readiness) and
+  `fleet_update` (targets, tag, `dryRun`, explicit confirmation). Dry-run returns the plan and
+  changes nothing. Do not reuse `peer-exec-v1`; release updates use the installer/service path.
+- The CLI and UI share the same target inventory and update module; `fleet-update` continues to
+  mean release operations, not execution targets.
+
+No real fleet update may be run from this planning work without Emil's go-ahead.
 
 ### Delivery and release fit
 
@@ -197,6 +231,14 @@ environment with remote execution targets. Both features share environment ids, 
 repository identity, and the per-environment root/instruction model, so they must not grow separate
 registries or credential paths. The fleet plan’s “one conversation on a home environment” remains
 true for fleet threads; this request covers ordinary project threads created on another machine.
+
+### (g) Release updates vs execution-target fleet
+
+Release updates are an **operations** path: SSH/WS bootstrap, installer/service management, and
+artifact selection. They must not be routed through `peer-exec-v1` or the execution-target
+registry, and they do not require a thread. The shared server module is the one place that decides
+which machine gets which artifact and how it restarts. “Fleet” in `fleet-update` remains release
+operations; “execution targets” remains the v1.1.7 runtime track.
 
 ### Additional overlap: MCP tool names and routing
 

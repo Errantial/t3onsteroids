@@ -15,6 +15,12 @@ v1.1.7 implementation starts only after v1.1.6 ships.
 2. **Instruction files** — global and project `AGENTS.md` / `CLAUDE.md` (and provider equivalents),
    sync groups that materialize generated copies with revision/hash drift detection, and optional
    per-thread role/context files injected into later messages.
+   - **Per-environment instruction profiles (v1.1.6):** a project chooses one shared set of
+     instruction files for all of its linked environments, or a per-environment selection. The
+     profile is `shared` or `per-environment` (`environmentId -> fileIds`); thread optional
+     files still layer on top. MCP: `get_project_instruction_profile` /
+     `set_project_instruction_profile`, plus optional `environmentId` on sync targets. UI:
+     project settings.
 3. **MCP feature merge** — port every missing `t3code-mcp-v2` capability into the built-in T3 MCP
    with compatible names/argument shapes, full `offset`/`nextOffset` paging instead of hardcoded
    caps, and tests. Existing `t3code-mcp-v2` services stay running side by side.
@@ -39,6 +45,21 @@ Contracts: `thread-fleet-v1`, `peer-exec-v1`, `fleet-tools-v1`, `provider-mcp-se
 Model-facing tools: `t3_targets`, `t3_target_use`, `t3_shell`, `t3_shell_status`,
 `t3_shell_cancel`, `t3_fs_read`, `t3_fs_write`, `t3_fs_list`, `t3_fs_stat`, `t3_git`,
 `t3_fleet_run`, `t3_copy`.
+
+### Per-environment project roots (v1.1.7)
+
+A project may optionally map `environmentId` to a workspace root:
+`Project.environmentRoots: Record<EnvironmentId, string>`. A missing mapping falls back to the
+project default root, but only after the target confirms that path exists and its repository
+identity matches the project; otherwise resolution fails `target_workspace_unmapped`. This is the
+fleet plan’s canonical-path + repository-identity rule, not a home-path fallback.
+
+- P1 adds the mapping, MCP `get_project_environment_roots` / `set_project_environment_root`, and
+  the project settings UI.
+- P2 enforces it during `ThreadFleet` target resolution and records the fail-closed evidence.
+
+Per-environment **instruction** selections are separate: they are configuration distribution and
+ship in v1.1.6 with the instruction manager.
 
 ### Delivery and release fit
 
@@ -99,6 +120,31 @@ The Fleet plan’s “fleet” is the **runtime execution target set**. Keep the
 instruction mirror to `scripts/fleet-config-sync.mjs` (or `instructions-sync.mjs`) so “fleet”
 continues to mean release operations in scripts. Do not add a runtime `fleet-*` script; use
 `targets-*` or `peer-exec-*`.
+
+### (e) Per-environment roots and instruction profiles
+
+The two requests split at the transport boundary. Instruction profiles are **configuration** and
+belong to the v1.1.6 instruction manager: the hub already carries project/file assignments, and
+environment ids are stable, so `shared` vs `per-environment` is a store/UI/MCP change with no
+runtime-execution dependency. Per-environment roots are **execution** metadata: they only matter
+when a thread can act on another environment, so they land in v1.1.7 P1/P2 with `ThreadFleet` and
+the fleet workspace resolver.
+
+Rules:
+
+- A project has a default root (today’s `workspaceRoot`) and an optional
+  `environmentRoots[environmentId]`.
+- Resolution prefers the environment mapping; if absent, it tries the project default. It accepts
+  either only when the path exists on that environment and the repository identity matches;
+  otherwise `target_workspace_unmapped`. This keeps Emil’s fallback without silently using the
+  home path.
+- Instruction profiles: `mode: shared | per-environment`; shared uses one file set for every
+  linked environment, per-environment maps `environmentId -> fileIds`. Thread optional files layer
+  on top in both modes. The store materializes only the assignment for the machine being served.
+- MCP names stay consistent: `get_project_instruction_profile` /
+  `set_project_instruction_profile` for v1.1.6; `get_project_environment_roots` /
+  `set_project_environment_root` for v1.1.7. Both are optional additions and do not change
+  existing tool shapes.
 
 ### Additional overlap: MCP tool names and routing
 

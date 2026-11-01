@@ -1,6 +1,25 @@
 # Release status
 
-**Current release: `1.1.7`** - fleet-wide release updates from Settings → About and MCP, the Labs pin overhaul, and RPM-aware Linux build tooling for T3 Code `0.1.5` (`6d450a42`). It keeps the `1.1.6` saved-threads and managed-instruction work, the `1.1.5` Windows runtime-sync behavior, the `1.1.4` feed/update behavior and the `1.1.1` bridge feature set. The release-qualified support tuple remains `v1.0.0`; `--release-readiness` still reports `t3BaselineQualified:false` and `releaseQualified:false` on the `0.1.5` baseline.
+**Current release: `1.1.8`** - the swarm base feature and the fleet pipeline fix on top of `1.1.7` for T3 Code `0.1.5` (`6d450a42`). Swarm adds `/swarm`, the Start a swarm palette action, the draft-hero entry and `create_swarm`; the pipeline fix keeps dev and SSH-launched T3 servers off the host's loopback `:3773`, makes `fleet-update.mjs` verify the loopback environment id and await each Windows install, and adds `scripts/dev-t3-serve.sh`. It keeps the `1.1.7` fleet release updates, the `1.1.6` saved threads, managed instructions and turn context, the `1.1.5` Windows runtime-sync behavior, the `1.1.4` feed/update behavior and the `1.1.1` bridge feature set. The release-qualified support tuple remains `v1.0.0`; `--release-readiness` still reports `t3BaselineQualified:false` and `releaseQualified:false` on the `0.1.5` baseline.
+
+## `v1.1.8` assets and checks
+
+- Build commit `73f5140c034d`; full version `0.1.5-v1.1.8.20261101.73f5140c034d.connect1`.
+- Windows: `T3-Code-0.1.5-v1.1.8.20261101.73f5140c034d.connect1-x64.exe` (314,437,360 bytes,
+  SHA-256 `FB5D631BDD0957B21492F39B8189626909982C23D1502997A5F939414141F960`), `.blockmap`,
+  `latest.yml`.
+- Linux: `t3-0.1.5-v1.1.8.20261101.73f5140c034d.connect1-linux-arm64.tar.gz` (120,510,894 bytes,
+  SHA-256 `A9CB80E0504BDDF0B3BD7AFE92F5A682352246A6A53E32BFD0AC01629BCE2227`), launcher + Node
+  26.12.1.
+- Swarm: `/swarm` in the composer, Start a swarm in the palette, a draft-hero entry, and the
+  `create_swarm` orchestration tool (1-12 members, each with its own provider/model/options/role/
+  isolation, per-member failures). Members are ordinary child threads.
+- Pipeline fix: `scripts/dev-t3-serve.sh` keeps dev/verification servers off `:3773`;
+  `fleet-update.mjs` stops SSH-launched WSL T3 servers on `:3773`, verifies the loopback
+  environment id after install, and awaits each Windows update so targets do not overlap.
+- Checks: fork typecheck (37 tasks), lint (0 errors), knip and release smoke; swarm focused suites
+  and web production build; bridge `npm run verify` (319 tests, `bridgeVersion 1.1.8`).
+- The `1.1.6` and `1.1.7` tags were not moved. No machine was updated; rollout waits for approval.
 
 ## `v1.1.7` assets and checks
 

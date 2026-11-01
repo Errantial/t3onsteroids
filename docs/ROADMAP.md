@@ -132,14 +132,14 @@ Requirements:
 
 No real fleet update may be run from this planning work without Emil's go-ahead.
 
-### Sidebar: pinned threads fold into Working (v1.1.7)
+### Sidebar: pinned threads fold into Working (on hold)
 
 With the folder-grouping sidebar toggle on, a pinned thread that is actively working folds into the
 Working folder instead of reserving a pinned row. It returns to the pinned section as soon as it
 needs the user: approval, user input, plan ready, error, or work stopped. The fold is presentation
 only; pinning still keeps the thread from settling automatically, and the thread is never shown in
 both places. When pinned threads are not on top (merged into activity order), the existing behavior
-stays. This is a sidebar polish item and does not depend on the fleet work.
+stays. This is on hold. Pinning already works on desktop; revisit only after the mobile behavior is checked and Emil asks for it. It is not part of v1.1.6 or the active v1.1.7 slate.
 
 ### Delivery and release fit
 

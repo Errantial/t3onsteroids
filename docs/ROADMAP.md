@@ -1,13 +1,14 @@
 # Roadmap
 
-Status: planning note, 2026-10-31. It records the current release scope and the next slate; it does
+Status: planning note, 2026-11-01. It records the current release scope and the next slate; it does
 not change a support tuple or claim a capability before its evidence exists.
 
-Source for v1.1.7: `docs/design/fleet-execution-targets.md` (commit `605a17f`), integrated as the
-v1.1.7 slate. The v1.1.6 work is in progress and is not a prerequisite for reading this plan, but
-v1.1.7 implementation starts only after v1.1.6 ships.
+v1.1.6 shipped saved threads, managed instructions, and the turn-context slot. v1.1.7 ships the
+fleet release-update operational track, the Labs pin overhaul, and RPM-aware Linux build tooling.
+The execution-target plan from `docs/design/fleet-execution-targets.md` (commit `605a17f`) remains
+the next major track; it is not part of v1.1.7.
 
-## v1.1.6 (current)
+## v1.1.6 (shipped)
 
 1. **Saved threads** — an independent `savedAt` thread state (not settling), a Saved sidebar filter
    with one-click restore, server-side persistence, and `save_thread` / `unsave_thread` /
@@ -52,18 +53,24 @@ committed.
 v1.1.6 is not released and no machine is rolled out until Emil approves. Fleet-wide **release
 updates** from the app are not in v1.1.6; they are the separate v1.1.7 operational track below.
 
-## v1.1.7 — Fleet execution targets
+## v1.1.7 (current) - Fleet release updates and the pin overhaul
 
-**Goal:** one thread and one provider session on a home environment, with thread-scoped execution
-targets. “Which machine” becomes a persisted target plus a tool argument, not a new thread, a new
-provider session, or a context replay.
+**Shipped in v1.1.7:** fleet-wide release updates from Settings → About with per-machine
+version and variant, confirmation, per-machine results, and `fleet_update` / `fleet_update_status`;
+the Labs pin overhaul; and RPM-aware Linux build tooling. No machine is updated by this release
+until Emil approves a rollout. The first rollout of any machine still uses
+`scripts/fleet-update.mjs`, because older servers do not expose the new RPCs and tools.
+
+**Next execution track (not in v1.1.7):** one thread and one provider session on a home environment,
+with thread-scoped execution targets. "Which machine" becomes a persisted target plus a tool
+argument, not a new thread, a new provider session, or a context replay.
 
 Contracts: `thread-fleet-v1`, `peer-exec-v1`, `fleet-tools-v1`, `provider-mcp-servers-v1`.
 Model-facing tools: `t3_targets`, `t3_target_use`, `t3_shell`, `t3_shell_status`,
 `t3_shell_cancel`, `t3_fs_read`, `t3_fs_write`, `t3_fs_list`, `t3_fs_stat`, `t3_git`,
 `t3_fleet_run`, `t3_copy`.
 
-### Per-environment project roots (v1.1.7)
+### Per-environment project roots (next track)
 
 A project may optionally map `environmentId` to a workspace root:
 `Project.environmentRoots: Record<EnvironmentId, string>`. A missing mapping falls back to the
@@ -78,7 +85,7 @@ fleet plan’s canonical-path + repository-identity rule, not a home-path fallba
 Per-environment **instruction** selections are separate: they are configuration distribution and
 ship in v1.1.6 with the instruction manager.
 
-### Cross-machine project threads (v1.1.7)
+### Cross-machine project threads (next track)
 
 A multi-environment project is one logical project. Its threads may be created on, and run on, any
 of the project’s environments; each thread is pinned to exactly one environment for its lifetime.
@@ -99,7 +106,7 @@ registry.
 P1 adds placement, aggregation, and the create/list/search/get MCP fields; P2 adds the
 root/instruction-profile resolution and the fail-closed evidence (`target_workspace_unmapped`).
 
-### Fleet-wide release updates (v1.1.7 operational track)
+### Fleet-wide release updates (v1.1.7, shipped)
 
 Settings > About gets an environment selector: every linked environment plus **All environments**.
 The selected scope shows the machine's T3 version, build variant, and update status. Update acts on
@@ -132,7 +139,7 @@ Requirements:
 
 No real fleet update may be run from this planning work without Emil's go-ahead.
 
-### Labs pin overhaul (v1.1.7)
+### Labs pin overhaul (v1.1.7, shipped)
 
 Reframe the existing "Pinned threads on top" setting as a Labs pin overhaul. Turning it off does
 both: pinned threads sort with activity instead of a pinned section, and a pinned thread's Settle

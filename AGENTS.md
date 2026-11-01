@@ -257,6 +257,10 @@ linux-arm64 target, and cross-injected SEA output was verified not to execute). 
 running while building: use `nice`, build in `/tmp`, and do not restart the service until the
 artifact's `t3 --version` succeeds.
 
+The archive builder records the bundled `libatomic` provenance with `dpkg-query` on Debian/Ubuntu
+or `rpm` on Oracle Linux/Fedora, so an RPM build host (server-1) needs no shim. Its license header
+names the package and source RPM the runtime actually carries.
+
 Why not GitHub Actions yet: the fork's `Release` workflow is scheduled but every run stays
 `pending` with no jobs, so Actions is not usable on the fork as configured. Revisit it once the
 workflow actually runs; it remains the better long-term home for both architectures.

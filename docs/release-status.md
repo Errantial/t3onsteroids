@@ -1,6 +1,26 @@
 # Release status
 
-**Current release: `1.1.6`** - the saved-threads and managed-instruction release for T3 Code `0.1.5` (`6d450a42`). It adds saved threads, an instruction library with sync groups and per-environment profiles, optional per-thread instruction files with a composer picker, the ordered per-turn context slot, and the merged built-in MCP with server-1 as the single endpoint over the existing peer links. It keeps the `1.1.5` Windows runtime-sync behavior, the `1.1.4` feed/update behavior and the `1.1.1` bridge feature set. The release-qualified support tuple remains `v1.0.0`; `--release-readiness` still reports `t3BaselineQualified:false` and `releaseQualified:false` on the `0.1.5` baseline.
+**Current release: `1.1.7`** - fleet-wide release updates from Settings → About and MCP, the Labs pin overhaul, and RPM-aware Linux build tooling for T3 Code `0.1.5` (`6d450a42`). It keeps the `1.1.6` saved-threads and managed-instruction work, the `1.1.5` Windows runtime-sync behavior, the `1.1.4` feed/update behavior and the `1.1.1` bridge feature set. The release-qualified support tuple remains `v1.0.0`; `--release-readiness` still reports `t3BaselineQualified:false` and `releaseQualified:false` on the `0.1.5` baseline.
+
+## `v1.1.7` assets and checks
+
+- Build commit `9e54f9846f58`; full version `0.1.5-v1.1.7.20261101.9e54f9846f58.connect1`.
+- Windows: `T3-Code-0.1.5-v1.1.7.20261101.9e54f9846f58.connect1-x64.exe` (314,433,235 bytes,
+  SHA-256 `D57D3E7DB400FEAFCE515D14855F3FEC736572D68C83B486E30E7FBA7939FA49`), `.blockmap`,
+  `latest.yml`.
+- Linux: `t3-0.1.5-v1.1.7.20261101.9e54f9846f58.connect1-linux-arm64.tar.gz` (120,508,093 bytes,
+  SHA-256 `31845cc13c3624b2466b9a9836e39bbde64983597ed56035ee04646bc13692bb`), launcher + Node
+  26.12.1.
+- Fleet updates: About lists every connected machine with platform, install variant and version;
+  a real update requires confirmation and reports per-machine results. MCP `fleet_update_status` /
+  `fleet_update` default to a dry run and continue past a per-machine failure only when asked.
+- Labs pin overhaul: with pinned-at-top off, pinned threads sort with activity and their Settle
+  action is hidden until they are unpinned.
+- Linux build tooling reads `rpm` metadata when `dpkg-query` is absent; server-1 needs no shim.
+- Checks: fork typecheck, lint (0 errors), knip and release smoke; full tests with four load-timeout
+  failures that pass on rerun; bridge `npm run verify` (29 files / 319 tests); agent context budget
+  53,396 bytes for the expanded MCP tool list.
+- No machine was updated; rollout waits for explicit approval.
 
 ## `v1.1.6` assets and checks
 

@@ -132,14 +132,15 @@ Requirements:
 
 No real fleet update may be run from this planning work without Emil's go-ahead.
 
-### Sidebar: pinned threads fold into Working (on hold)
+### Labs pin overhaul (v1.1.7)
 
-With the folder-grouping sidebar toggle on, a pinned thread that is actively working folds into the
-Working folder instead of reserving a pinned row. It returns to the pinned section as soon as it
-needs the user: approval, user input, plan ready, error, or work stopped. The fold is presentation
-only; pinning still keeps the thread from settling automatically, and the thread is never shown in
-both places. When pinned threads are not on top (merged into activity order), the existing behavior
-stays. This is on hold. Pinning already works on desktop; revisit only after the mobile behavior is checked and Emil asks for it. It is not part of v1.1.6 or the active v1.1.7 slate.
+Reframe the existing "Pinned threads on top" setting as a Labs pin overhaul. Turning it off does
+both: pinned threads sort with activity instead of a pinned section, and a pinned thread's Settle
+action is hidden until the thread is unpinned. Turning it on keeps the current behavior. One toggle,
+not a second setting. Pinning still prevents automatic settling. Hiding Settle is presentation only;
+MCP's explicit settle stays available for automation. The earlier fold-into-Working idea is on hold;
+pinning already works on desktop, and it returns only after the mobile behavior is checked and Emil
+asks for it. Not part of v1.1.6.
 
 ### Delivery and release fit
 

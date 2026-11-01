@@ -229,7 +229,7 @@ function Assert-OwnEnvironment([int]$seconds) {
     Start-Sleep -Seconds 1
   }
   $got = if ($seen) { "$($seen.environmentId) os=$($seen.os)" } else { 'no answer' }
-  throw "127.0.0.1:$port answers environment $got, not this machine's $own (listeners: $(Get-LoopbackOwners)). A WSL/SSH-launched T3 is probably holding loopback via WSL localhost forwarding; T3 Connect would route the phone to it. Stop it (scripts/wsl-stray-t3.sh --stop) and rerun."
+  throw "127.0.0.1:$port answers environment $got, not this machine's $own (listeners: $(Get-LoopbackOwners)). A WSL/SSH-launched T3 is probably holding loopback via WSL localhost forwarding; T3 Connect would route the phone to it. Stop that server (the pid is in ~/.t3/ssh-launch/*/pid inside that WSL) and rerun."
 }
 
 function Get-AppProcesses {

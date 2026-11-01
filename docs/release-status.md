@@ -1,6 +1,24 @@
 # Release status
 
-**Current release: `1.1.5`** - a maintenance release on the `1.1.x` line for T3 Code `0.1.5` (`6d450a42`). It fixes the Windows remote-runtime sync (the SSH bootstrap now uses the base release version, and the legacy scheduled task is rewritten to a hidden launcher at a 15 minute cadence), turns the tokens/sec readout on by default, and publishes a fresh T3 Code 0.1.5 Windows installer with the T3 Connect build and the `latest` auto-update feed. It keeps the `1.1.1` bridge feature set and the `1.1.4` feed/update behavior. The release-qualified support tuple remains `v1.0.0`; `--release-readiness` still reports `t3BaselineQualified:false` and `releaseQualified:false` on the `0.1.5` baseline.
+**Current release: `1.1.6`** - the saved-threads and managed-instruction release for T3 Code `0.1.5` (`6d450a42`). It adds saved threads, an instruction library with sync groups and per-environment profiles, optional per-thread instruction files with a composer picker, the ordered per-turn context slot, and the merged built-in MCP with server-1 as the single endpoint over the existing peer links. It keeps the `1.1.5` Windows runtime-sync behavior, the `1.1.4` feed/update behavior and the `1.1.1` bridge feature set. The release-qualified support tuple remains `v1.0.0`; `--release-readiness` still reports `t3BaselineQualified:false` and `releaseQualified:false` on the `0.1.5` baseline.
+
+## `v1.1.6` assets and checks
+
+- Build commit `72a78e666ea1`; full version `0.1.5-v1.1.6.20261101.72a78e666ea1.connect1`.
+- Windows: `T3-Code-0.1.5-v1.1.6.20261101.72a78e666ea1.connect1-x64.exe` (314,432,370 bytes,
+  SHA-256 `D01F741DD9A0E021BAA74C84A1A8E86F7D200EA00EE7D32B82378A7BAC675561`), `.blockmap`,
+  `latest.yml`.
+- Linux: `t3-0.1.5-v1.1.6.20261101.72a78e666ea1.connect1-linux-arm64.tar.gz` (120,507,825 bytes,
+  SHA-256 `17F1F7B36E1FFED7AAF916DB88A0D9B50DC9F614167A7B20DF124CCF293C95CC`), launcher + Node
+  26.12.1 layout.
+- MCP standalone: `Errantial/t3code-mcp-v2` `v0.5.1` (`ae12ac5`).
+- Bridge verify on this branch: `npm run verify` (typecheck, ESLint, build, 29 test files /
+  319 tests, package smoke).
+- Fork checks: `pnpm typecheck` (37 tasks), `pnpm lint` (0 errors), `knip`, `release:smoke`; web
+  unit 4,358; mobile 2,995; desktop 828; focused server Git driver 149.
+- The Linux runtime is built natively on server-1 (Oracle Linux 9); its bundled libatomic comes
+  from `libatomic-11.5.0-11.0.2.el9.aarch64` and the license header says so.
+- Windows-only quarantine of POSIX fixtures: `Errantial/t3onsteroids#1`. Installer is unsigned.
 
 ## 1.1.4 boundary (same as `1.1.1`)
 

@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import packageMetadata from "../package.json" with { type: "json" };
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { main } from "../src/cli/index.js";
@@ -44,7 +45,7 @@ describe("Phase 7 release readiness", () => {
   it("keeps the supported release lane explicitly pinned and two-turn bounded", () => {
     const readiness = releaseReadiness();
     expect(readiness).toMatchObject({
-      bridgeVersion: "1.1.4",
+      bridgeVersion: packageMetadata.version,
       supportedConcurrency: 2,
       platform: "win32-x64",
       t3Pinned: true,

@@ -12,7 +12,9 @@ import { MemoryStateStore } from "../src/state/index.js";
 describe("release version consistency", () => {
   it("derives ACP, compatibility, release readiness and built CLI metadata from package.json", () => {
     const packageJson = JSON.parse(readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { version: string };
-    expect(packageJson.version).toBe("1.1.4");
+    // The release version moves with every release; the point of this test is that every
+    // consumer derives it from package.json instead of pinning its own copy.
+    expect(packageJson.version).toMatch(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
     const runtime = new AcpBridgeRuntime({
       store: new MemoryStateStore<SessionState>(),
       controller: {

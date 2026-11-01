@@ -22,7 +22,6 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -133,10 +132,6 @@ async function loadChecksums(sumsAsset) {
     if (match) map.set(match[2].trim(), match[1].toLowerCase());
   }
   return map;
-}
-
-function sha256File(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
 function powershell(encoded, options = {}) {
@@ -350,7 +345,9 @@ function runLocalWindowsInstall(script) {
   while (!existsSync(donePath) && Date.now() < deadline) sleepSync(3000);
   try {
     run("schtasks.exe", ["/delete", "/tn", task, "/f"]);
-  } catch {}
+  } catch {
+    // The one-shot task may already have removed itself; cleanup is best-effort.
+  }
   const output = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
   process.stdout.write(output);
   if (!existsSync(donePath)) throw new Error(`the scheduled update did not finish; read ${logPath}`);

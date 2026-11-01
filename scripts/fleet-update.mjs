@@ -553,7 +553,7 @@ async function main() {
     if (!target) throw new Error(`unknown target ${name}`);
     console.log(`\n== ${name} (${target.kind}) ==`);
     if (target.kind === "linux-ssh") updateLinux(name, target, release, checksums, options);
-    else updateWindows(name, target, release, checksums, options);
+    else await updateWindows(name, target, release, checksums, options);
   }
 
   if (options.dryRun) console.log("\ndry run complete; nothing was changed");

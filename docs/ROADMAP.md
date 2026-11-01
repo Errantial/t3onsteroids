@@ -139,7 +139,32 @@ Requirements:
 
 No real fleet update may be run from this planning work without Emil's go-ahead.
 
+### Fork fix: SSH-bootstrapped servers must not take the host's loopback :3773 (v1.1.7)
+
+On 2026-10-31 a T3 SSH environment for the home laptop bootstrapped
+`t3 serve --host 127.0.0.1 --port 3773` inside its WSL (`packages/ssh/src/tunnel.ts`:
+`DEFAULT_REMOTE_PORT = 3773`, the `nohup ... serve` launch in the remote launch script). WSL localhost
+forwarding put that server on the Windows host's 127.0.0.1:3773, and the T3 Connect tunnel, whose
+origin is always `http://127.0.0.1:<port>` (`startupAccess.ts` `loopbackUrlHostForAddress`),
+served the WSL environment to the phone. The relay's health and mint requests then failed their
+environment audience checks (`CloudLink.ts` `answerHealthRequest`/`mintCredential`), and the phone
+could not connect to the laptop.
+
+- SSH bootstrap: do not default the remote port to 3773. Pick from a separate range such as 3790+,
+  or detect WSL (`/proc/sys/fs/binfmt_misc/WSLInterop` or `WSL_DISTRO_NAME`) and skip any port the
+  Windows host already serves on loopback.
+- Connect origin identity: `startManagedTunnelIfOriginConfirmed` and `ConnectReachability` should
+  check that the loopback origin's `/.well-known/t3/environment` returns this server's
+  `environmentId`. A 200 is not enough; on a mismatch, report `origin_unreachable` with the other
+  environment id rather than "reachable".
+- Optional: bind the Connect origin to the server's own listening socket address (or a dedicated
+  loopback-only listener) instead of assuming `127.0.0.1:<port>`.
+
+Pipeline guard already in t3onsteroids (`scripts/dev-t3-serve.sh` and the `fleet-update.mjs` identity
+check and WSL sweep). This item is the app-side fix.
+
 ### Labs pin overhaul (v1.1.7, shipped)
+
 
 Reframe the existing "Pinned threads on top" setting as a Labs pin overhaul. Turning it off does
 both: pinned threads sort with activity instead of a pinned section, and a pinned thread's Settle

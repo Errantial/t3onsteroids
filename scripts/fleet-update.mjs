@@ -52,18 +52,19 @@ const TARGETS = {
 function usage(message) {
   if (message) console.error(`fleet-update: ${message}`);
   console.error(
-    "usage: node scripts/fleet-update.mjs [--tag latest|vX.Y.Z] [--targets all|home,framework,server1] [--dry-run] [--yes] [--allow-framework]",
+    "usage: node scripts/fleet-update.mjs [--tag latest|vX.Y.Z] [--targets all|home,framework,server1] [--dry-run] [--yes] [--allow-framework] [--keep-wsl-t3]",
   );
   process.exit(2);
 }
 
 function parseArgs(argv) {
-  const options = { tag: "latest", targets: "all", dryRun: false, yes: false, allowFramework: false };
+  const options = { tag: "latest", targets: "all", dryRun: false, yes: false, allowFramework: false, keepWslT3: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--dry-run") options.dryRun = true;
     else if (arg === "--yes" || arg === "-y") options.yes = true;
     else if (arg === "--allow-framework") options.allowFramework = true;
+    else if (arg === "--keep-wsl-t3") options.keepWslT3 = true;
     else if (arg === "--tag") options.tag = argv[++index] ?? usage("--tag needs a value");
     else if (arg.startsWith("--tag=")) options.tag = arg.slice(6);
     else if (arg === "--targets") options.targets = argv[++index] ?? usage("--targets needs a value");
@@ -195,6 +196,42 @@ function Wait-Listener([int]$seconds) {
   return $false
 }
 
+function Get-T3Home { if ($env:T3CODE_HOME) { return $env:T3CODE_HOME } return (Join-Path $env:USERPROFILE '.t3') }
+function Get-OwnEnvironmentId {
+  $path = Join-Path (Get-T3Home) 'userdata\environment-id'
+  if (-not (Test-Path -LiteralPath $path)) { return '' }
+  return (Get-Content -LiteralPath $path -Raw).Trim()
+}
+# A listener on :3773 is not proof that this machine's T3 answers it: WSL localhost forwarding
+# (wslrelay.exe) can hold 127.0.0.1:3773 for a T3 server inside WSL, and T3 Connect's tunnel
+# targets 127.0.0.1, so the phone would reach the wrong environment.
+function Get-LoopbackEnvironment {
+  try {
+    $d = Invoke-RestMethod -Uri ('http://127.0.0.1:' + $port + '/.well-known/t3/environment') -TimeoutSec 5 -UseBasicParsing
+    return [pscustomobject]@{ environmentId = [string]$d.environmentId; os = [string]$d.platform.os }
+  } catch { return $null }
+}
+function Get-LoopbackOwners {
+  $names = @()
+  foreach ($c in (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) {
+    $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+    $names += ('{0}:{1}({2})' -f $c.LocalAddress, $c.OwningProcess, $(if ($p) { $p.ProcessName } else { '?' }))
+  }
+  return ($names -join ',')
+}
+function Assert-OwnEnvironment([int]$seconds) {
+  $own = Get-OwnEnvironmentId
+  if (-not $own) { Out-Line 'loopback_identity=skipped (no environment-id file)'; return }
+  $seen = $null
+  for ($i = 0; $i -lt $seconds; $i++) {
+    $seen = Get-LoopbackEnvironment
+    if ($seen -and $seen.environmentId -eq $own) { Out-Line "loopback_identity=ok $own"; return }
+    Start-Sleep -Seconds 1
+  }
+  $got = if ($seen) { "$($seen.environmentId) os=$($seen.os)" } else { 'no answer' }
+  throw "127.0.0.1:$port answers environment $got, not this machine's $own (listeners: $(Get-LoopbackOwners)). A WSL/SSH-launched T3 is probably holding loopback via WSL localhost forwarding; T3 Connect would route the phone to it. Stop it (scripts/wsl-stray-t3.sh --stop) and rerun."
+}
+
 function Get-AppProcesses {
   $found = @()
   foreach ($p in (Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
@@ -297,6 +334,8 @@ if ($hadService) {
 $listener = Get-Listener
 $listenerPid = if ($listener) { $listener.OwningProcess } else { '' }
 $serviceState = if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) { (Get-Service -Name $serviceName).Status } else { 'none' }
+
+if ($http -eq 'listen') { Assert-OwnEnvironment 60 }
 
 Out-Line "installer_exit=$installerExit"
 Out-Line "after=$after"
@@ -404,6 +443,37 @@ echo "http=$code"
 `;
 }
 
+// Lists (and with stop=true, stops) T3 servers that T3's SSH bootstrap launched inside this WSL
+// distro on the host's default port. Mirrors T3's own REMOTE_STOP_SCRIPT: SIGTERM, wait 2 s,
+// then drop pid/port/managed so the stale pid is not adopted. "external" servers are left alone.
+function wslStrayT3Script(stop) {
+  return `
+set -u
+port=3773
+found=0
+for dir in "$HOME"/.t3/ssh-launch/*/; do
+  [ -f "$dir/pid" ] || continue
+  pid=$(cat "$dir/pid" 2>/dev/null || true)
+  p=$(cat "$dir/port" 2>/dev/null || true)
+  kind=$(cat "$dir/managed" 2>/dev/null || echo managed)
+  [ "$p" = "$port" ] || continue
+  [ "$kind" = "external" ] && continue
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || continue
+  found=1
+  echo "stray_wsl_t3=pid:$pid port:$p dir:$dir"
+  if [ "${stop ? "1" : "0"}" = "1" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    n=0; while kill -0 "$pid" 2>/dev/null && [ $n -lt 20 ]; do n=$((n+1)); sleep 0.1; done
+    if kill -0 "$pid" 2>/dev/null; then echo "stray_wsl_t3_stop=failed pid:$pid"; exit 1; fi
+    rm -f "$dir/pid" "$dir/port" "$dir/managed"
+    echo "stray_wsl_t3_stop=ok pid:$pid"
+  fi
+done
+[ $found -eq 0 ] && echo "stray_wsl_t3=none"
+exit 0
+`;
+}
+
 function ssh(target, script, options = {}) {
   return run("ssh", [...target.sshArgs, target.host, script], options);
 }
@@ -426,6 +496,12 @@ async function updateWindows(name, target, release, checksums, options) {
   planLine("stop the t3code service (when present) and the T3 app, verify the downloaded hash");
   planLine("install silently with /S /currentuser, then start the service or relaunch the app");
   planLine("verify the installed FileVersion and wait for :3773");
+  planLine("verify 127.0.0.1:3773 answers this machine's own environment id (not a WSL/SSH-launched T3)");
+  if (target.kind === "windows-ssh") {
+    planLine(`${options.keepWslT3 ? "report" : "stop"} SSH-launched T3 servers on :3773 inside ${target.host}'s WSL first`);
+    const stray = ssh(target, wslStrayT3Script(!options.dryRun && !options.keepWslT3)).trim();
+    for (const line of stray.split("\n")) console.log(`[${name}] ${line}`);
+  }
 
   if (options.dryRun) return;
 
@@ -483,7 +559,7 @@ async function main() {
   if (options.dryRun) console.log("\ndry run complete; nothing was changed");
 }
 
-export { windowsInstallScript, linuxInstallScript };
+export { windowsInstallScript, linuxInstallScript, wslStrayT3Script };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {

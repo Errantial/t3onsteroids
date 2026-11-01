@@ -188,7 +188,29 @@ calling it done.
 - MCP server: restore the previous tree from `C:\Users\Emil\apps\t3code-mcp-v2.bak-*`, rebuild,
   restart the `t3code-mcp` task, and re-run its smoke test.
 
-### 10. Disk hygiene
+### 10. Dev and verification T3 servers (never on :3773)
+
+Port 3773 on 127.0.0.1 belongs to each machine's own T3. Inside WSL, 127.0.0.1 is forwarded to the
+Windows host (`wslrelay.exe`), so a T3 started in WSL on :3773 shadows the host's T3 for every
+loopback client. That includes the T3 Connect tunnel, which then routes the phone to the wrong
+environment. This happened on the home laptop on 2026-10-31: a T3 SSH environment launched
+`t3 serve --host 127.0.0.1 --port 3773 --base-dir ~/.t3` inside its WSL.
+
+- Start throwaway servers only through `scripts/dev-t3-serve.sh -- <command>`. It uses port 3777
+  or the next free port (never 3773), a scratch base dir (`~/.t3-dev` by default, never `~/.t3` or
+  `~/.t3-nightly`), and stops the server when the command ends or fails.
+- Do not add a T3 SSH environment that targets a WSL distro on a machine that runs its own
+  Windows T3. `ssh laptop-5amudrke` and `ssh desktop-kc5chj8` land in WSL, so an SSH
+  environment for them bootstraps a second T3 there. Connect to the Windows T3 at
+  `http://<host>:3773` instead.
+- `scripts/fleet-update.mjs` stops SSH-launched (`managed`) T3 servers on :3773 inside a
+  `windows-ssh` target's WSL before installing (`--keep-wsl-t3` only reports them). After install,
+  it fails unless `127.0.0.1:3773/.well-known/t3/environment` returns the machine's own
+  `userdata/environment-id`. A bare listener check is not enough.
+- To check a machine by hand, compare `Invoke-RestMethod http://127.0.0.1:3773/.well-known/t3/environment`
+  `.environmentId` with `%USERPROFILE%\.t3\userdata\environment-id`.
+
+### 11. Disk hygiene
 
 - Check C: free before and after; keep at least 10 GB. Remove `release/`, staging directories and
   duplicate installers after upload. Keep one previous installer for rollback.

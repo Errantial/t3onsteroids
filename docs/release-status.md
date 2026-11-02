@@ -1,6 +1,26 @@
 # Release status
 
-**Current release: `1.1.8`** - the swarm base feature and the fleet pipeline fix on top of `1.1.7` for T3 Code `0.1.5` (`6d450a42`). Swarm adds `/swarm`, the Start a swarm palette action, the draft-hero entry and `create_swarm`; the pipeline fix keeps dev and SSH-launched T3 servers off the host's loopback `:3773`, makes `fleet-update.mjs` verify the loopback environment id and await each Windows install, and adds `scripts/dev-t3-serve.sh`. It keeps the `1.1.7` fleet release updates, the `1.1.6` saved threads, managed instructions and turn context, the `1.1.5` Windows runtime-sync behavior, the `1.1.4` feed/update behavior and the `1.1.1` bridge feature set. The release-qualified support tuple remains `v1.0.0`; `--release-readiness` still reports `t3BaselineQualified:false` and `releaseQualified:false` on the `0.1.5` baseline.
+**Current release: `1.1.9`** - the MCP effort level, the ChatGPT Browser packaged-runtime fix and the SSH/Connect origin identity fix on top of `1.1.8` for T3 Code `0.1.5` (`6d450a42`). Agents set one provider-neutral `effort` on `delegate_task`, `create_swarm` members, `create_threads`, `t3_thread_launch` and `t3_thread_send`, validated against the model's effort option; service-hosted servers find the bundled ChatGPT Browser runtime; SSH launches stay off `:3773` and the Connect tunnel checks the origin's environment id. It keeps the `1.1.8` swarm and fleet pipeline fix, the `1.1.7` fleet release updates, the `1.1.6` saved threads, managed instructions and turn context, the `1.1.5` Windows runtime-sync behavior, the `1.1.4` feed/update behavior and the `1.1.1` bridge feature set. The release-qualified support tuple remains `v1.0.0`; `--release-readiness` still reports `t3BaselineQualified:false` and `releaseQualified:false` on the `0.1.5` baseline.
+
+## `v1.1.9` assets and checks
+
+- Build commit `c0e94465bd41`; full version `0.1.5-v1.1.9.20261102.c0e94465bd41.connect1`.
+- Windows: `T3-Code-0.1.5-v1.1.9.20261102.c0e94465bd41.connect1-x64.exe` (314,432,403 bytes,
+  SHA-256 `EDCF41D9D8C593DBD1C6797ABACE6BE89247FCDC7235E02386AE9D5EDBD2E630`), `.blockmap`,
+  `latest.yml`.
+- Linux: `t3-0.1.5-v1.1.9.20261102.c0e94465bd41.connect1-linux-arm64.tar.gz` (120,962,777 bytes,
+  SHA-256 `4C18B65BA3F84037CB90601996642C1E7D179C961B21CD4A9AAD1FC278FB09A3`), launcher + Node
+  26.12.1.
+- MCP effort level: `effort` on `delegate_task`, `create_swarm` members, `create_threads`,
+  `t3_thread_launch` and `t3_thread_send`, written to `effort` (Claude) or `reasoningEffort` (Codex)
+  and refused when the model does not offer it; `orchestrator_capabilities` lists each model's
+  levels.
+- Fixes: the ChatGPT Browser packaged-runtime lookup for service-hosted servers, SSH launches on
+  3790-3989, and the Connect origin identity check.
+- Checks: fork server and contracts typecheck, lint (0 errors), knip and release smoke; effort
+  focused suites (14 files / 111 tests) and web production build; bridge `npm run verify` (319
+  tests, `bridgeVersion 1.1.9`).
+- The `1.1.0`-`1.1.8` tags were not moved. No machine was updated; rollout waits for approval.
 
 ## `v1.1.8` assets and checks
 

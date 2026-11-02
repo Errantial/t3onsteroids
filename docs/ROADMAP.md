@@ -53,7 +53,7 @@ committed.
 v1.1.6 is not released and no machine is rolled out until Emil approves. Fleet-wide **release
 updates** from the app are not in v1.1.6; they are the separate v1.1.7 operational track below.
 
-## v1.1.7 (current) - Fleet release updates and the pin overhaul
+## v1.1.7 (shipped) - Fleet release updates and the pin overhaul
 
 **Shipped in v1.1.7:** fleet-wide release updates from Settings → About with per-machine
 version and variant, confirmation, per-machine results, and `fleet_update` / `fleet_update_status`;
@@ -199,6 +199,26 @@ distributed filesystem or atomic cross-machine transactions, no implicit **works
 synchronization between execution targets, no model-managed links/credentials/URLs/approvals, and
 no silent privilege expansion through a peer link. Instruction/configuration distribution is a
 separate, explicit, opt-in feature and is not this non-goal.
+
+## v1.1.9 (next) — Working section placement
+
+v1.1.8 shipped the swarm base feature and the fleet pipeline fix. The next client-only item is an
+option to put the Working section at the top of the thread list instead of just above Snoozed and
+Settled.
+
+### Working section at top (v1.1.9)
+
+- **Setting:** `sidebarWorkingSectionOnTop` (default `false`), shown under
+  Settings → General → Sidebar next to **Working section**. Off keeps the current order and the
+  bottom `mt-auto` spacer.
+- **On:** the Working header and rows render first, above Pinned and Active; Snoozed and Settled stay
+  at the bottom and take over the bottom spacer. The default is unchanged.
+- **Scope:** client-only; no server, MCP, or runtime contract change. Hidden or inert when the
+  Working section is off, and no effect in the boring sidebar, which has no Working section.
+- **Tests:** pure ordering helper (Working top/bottom, empty Working, Pinned on/off, Snoozed/Settled
+  presence), settings default/reset, a sidebar DOM check, and a drag/drop regression for the moved
+  first header.
+- **Plan:** `docs/design/working-shelf-position.md`.
 
 ## Overlaps and decisions
 

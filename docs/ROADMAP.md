@@ -163,6 +163,15 @@ could not connect to the laptop.
 Pipeline guard already in t3onsteroids (`scripts/dev-t3-serve.sh` and the `fleet-update.mjs` identity
 check and WSL sweep). This item is the app-side fix.
 
+**Implemented** on `fix/chatgpt-browser-tunnel` at `d9bcfab8c0` (fast-forwarded into
+`feat/fleet-updates-pin-labs`): SSH launches use ports 3790-3989 and never reuse a remembered port
+outside that range; `startManagedTunnelIfOriginConfirmed` refuses to publish an origin that answers
+as another environment, and `ConnectReachability` reports `origin_unreachable` with that environment
+id. The same branch fixes the ChatGPT Browser packaged-runtime lookup for service-hosted servers
+(`34ee347948`): the service has no `T3CODE_CHATGPT_BROWSER_RESOURCES_DIR`, so resolution also checks
+`<install>/resources/chatgpt-browser`. Both are queued for the next release; they are not in the
+published v1.1.8 assets.
+
 ### Labs pin overhaul (v1.1.7, shipped)
 
 
@@ -219,6 +228,12 @@ Settled.
   presence), settings default/reset, a sidebar DOM check, and a drag/drop regression for the moved
   first header.
 - **Plan:** `docs/design/working-shelf-position.md`.
+
+**Also queued for v1.1.9:** the ChatGPT Browser packaged-runtime fix (`34ee347948`) and the
+SSH/Connect origin identity fix (`d9bcfab8c0`), both on `feat/fleet-updates-pin-labs`. They are
+independent of the Working-section placement and should ship in the same build. The tunnel fix
+should be exercised on the next rollout by launching a ChatGPT Browser thread from the
+service-hosted Windows server and by opening a T3 Connect link from the laptop.
 
 ## Overlaps and decisions
 

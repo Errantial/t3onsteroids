@@ -1,14 +1,13 @@
-import { writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderInstanceId } from "@t3tools/contracts";
 import { McpProviderSessions } from "@t3tools/provider-core/server/McpProviderSessions";
-import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient } from "effect/http";
-import { McpSchema, McpServer } from "effect/ai";
+import { McpServer } from "effect/ai";
 
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import { ServerSelfUpdate } from "../cloud/selfUpdate.ts";
@@ -17,7 +16,6 @@ import { DeviceService } from "../device/DeviceService.ts";
 import { ServerEnvironment } from "../environment/ServerEnvironment.ts";
 import { GitWorkflowService } from "../git/GitWorkflowService.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
-import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { PreviewAutomationBroker } from "../mcp/PreviewAutomationBroker.ts";
 import {
   CLAUDE_PROVIDER,
@@ -43,7 +41,6 @@ import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts"
 import { SecretRequests } from "../secrets/SecretRequests.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
-import { SwarmService } from "../swarm/SwarmService.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { VcsStatusBroadcaster } from "../vcs/VcsStatusBroadcaster.ts";
 import { buildCodexAdditionalContext } from "./CodexDeveloperInstructions.ts";
@@ -81,7 +78,6 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(ServerSecretStore)({}),
   Layer.mock(ServerSettingsService)({}),
   Layer.mock(SourceControlRepositoryService)({}),
-  Layer.mock(SwarmService)({}),
   Layer.mock(ThreadLaunchService)({}),
   Layer.mock(ThreadManagementService)({}),
   Layer.mock(ThreadSearch)({}),
@@ -89,35 +85,6 @@ const toolHandlerServices = Layer.mergeAll(
 ).pipe(Layer.provideMerge(NodeServices.layer), Layer.provideMerge(FetchHttpClient.layer));
 
 const utf8Bytes = (text: string) => Buffer.byteLength(text, "utf8");
-
-// A client sees only the tools whose EnabledWhen passes for its request scope.
-const budgetScope = {
-  environmentId: EnvironmentId.make("environment:budget"),
-  capabilities: new Set(),
-  issuedAt: 0,
-  requestNamespace: "budget",
-  thread: undefined,
-  client: undefined,
-} satisfies McpInvocationContext.McpInvocationScope;
-
-const listedToolJsonBytes = (scope: McpInvocationContext.McpInvocationScope) =>
-  Effect.gen(function* () {
-    const mcp = yield* McpServer.McpServer;
-    const listed = mcp.tools.filter(({ annotations }) => {
-      const enabledWhen = Context.getOrUndefined(annotations, McpSchema.EnabledWhen);
-      return enabledWhen === undefined || enabledWhen({ protocolVersion: "", capabilities: {} });
-    });
-    // The model sees these fields. outputSchema and annotations are protocol metadata.
-    return utf8Bytes(
-      JSON.stringify(
-        listed.map(({ tool }) => ({
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.inputSchema,
-        })),
-      ),
-    );
-  }).pipe(Effect.provideService(McpInvocationContext.McpInvocationContext, scope));
 
 const claudeSystemAppend = () => {
   const { systemPrompt } = makeClaudeQueryOptions({
@@ -144,26 +111,22 @@ const codexAdditionalContext = () =>
     .join("");
 
 
-it.effect("measure flag-off tool list", () =>
+// Prints nothing; writes JSON to $MEASURE_OUT (default ./measure-tool-list.json).
+it.effect("measure the listed MCP tools", () =>
   Effect.gen(function* () {
     const mcp = yield* McpServer.McpServer;
-    const listed = mcp.tools.filter(({ annotations }) => {
-      const enabledWhen = Context.getOrUndefined(annotations, McpSchema.EnabledWhen);
-      return enabledWhen === undefined || enabledWhen({ protocolVersion: "", capabilities: {} });
-    });
+    const listed = mcp.tools;
     const json = JSON.stringify(
       listed.map(({ tool }) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })),
     );
     const names = listed.map(({ tool }) => tool.name).sort();
-    writeFileSync("C:/tmp/measure-branch.json", JSON.stringify({
+    writeFileSync(process.env.MEASURE_OUT ?? "measure-tool-list.json", JSON.stringify({
       tools: listed.length,
       bytes: Buffer.byteLength(json, "utf8"),
       sha256: createHash("sha256").update(json).digest("hex"),
       namesSha256: createHash("sha256").update(names.join(",")).digest("hex"),
     }));
   }).pipe(
-    Effect.provideService(McpInvocationContext.McpInvocationContext, budgetScope),
-
     Effect.provide(
       McpHttpServer.layerTools.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),

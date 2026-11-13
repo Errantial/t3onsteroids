@@ -8,6 +8,7 @@ Each directory holds a `git am`-able series for one T3 base commit:
 | --- | --- | --- |
 | `pinned-ffb4af8d/` | `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8` (the release-qualified v1.0.0 support tuple) | applies clean; web typecheck, focused tests, fmt and lint pass; sandboxed browser verification with a mock ACP agent passes |
 | `main-2026-10-29-6d450a42/` | `6d450a4284852af137b2f3407fddd89eb76e7644` = **`v0.1.5` stable** (also `v0.1.5-nightly.20261029.3877`) | applies clean; full `vp` typecheck 36/36 packages, web production build, and focused web/ACP tests pass (2026-10-29); `0007`-`0008` added for the `v1.1.5` build (2026-10-31) |
+| `main-2026-11-13-0517d15c/` | `0517d15c41e95c9d84d8014ae14394ce97bc83f6` = **`v0.1.10-nightly.20261113.4656`** (newest live nightly, 2026-11-13) | applies clean on the nightly plus the ChatGPT Browser fork base (`c8cd959156`); all 8 patches ported 2026-11-13, see the port notes below |
 
 ## Apply
 
@@ -17,6 +18,34 @@ git am --3way handoff/t3-patches/<directory>/*.patch
 ```
 
 If a hunk conflicts on a newer base, port it by hand: the series keeps its footprint in `ChatView.tsx`/`ChatComposer.tsx` to a few lines and puts everything else in new files.
+
+## Port notes for `main-2026-11-13-0517d15c` (2026-11-13)
+
+The series was ported from `main-2026-10-29-6d450a42` onto `v0.1.10-nightly.20261113.4656`
+(`0517d15c41e95c9d84d8014ae14394ce97bc83f6`). The whole series applies with
+`git am --3way` and zero conflicts on a clean checkout of the nightly plus the ChatGPT
+Browser fork files at `c8cd959156` (the same fork base `0003`/`0005` were authored against);
+all 47 touched TS/TSX files parse clean. Port adjustments:
+
+- `0001`: upstream removed the composer context-window meter (`521ac7c218`), so the
+  tokens/sec badge and its toggle moved from the meter popover to the thread details
+  context section (`ThreadDetailsContext` in `ThreadDetailsUsage.tsx`, wired through
+  `ThreadDetailsPanel.tsx` and `ChatView.tsx`). The pure logic (`tokenThroughput.ts`,
+  `threadTokenRatePreference.ts`, `ThreadTokenRate.tsx`) is unchanged.
+- `0002`: upstream added flavor-gated per-turn usage (`reportsPerTurnPromptUsage`,
+  `acpPerTurnPromptUsage` with terminal-status and Gemini handling). The port keeps that
+  path for declaring flavors and maps the prompt-response usage for all other ACP agents
+  via `acpTurnTokenUsage` as before.
+- `0003`: upstream added `forceStopThread` in the same registration spots; the port keeps
+  both `forceStopThread` and `controlBrowserTab`. Upstream also restructured the
+  `turnItem` client query into `liveTurnItem`/`settledTurnItem` plus a selector, so the
+  port adds only the `controlBrowserTab` command there.
+- `0008`: upstream added a remote-Node version test and a desktop import in the same
+  spots; both are kept.
+
+Not re-run on the new base: the full `vp` typecheck, web production build, focused
+web/ACP suites and live browser verification. Those remain the follow-up before the
+v1.2.2 fork build is published.
 
 ## Series
 

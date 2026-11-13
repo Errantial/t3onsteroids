@@ -4,7 +4,7 @@ Windows-first bridge for using Chat On Steroids (CoS) as a Local ACP provider in
 
 ## Status
 
-**`1.1.4`** is the latest release: a feed/bootstrap release on the `1.1.1` feature line. It targets **T3 Code `0.1.5`** (`6d450a4284852af137b2f3407fddd89eb76e7644`, also published as nightly `0.1.5-nightly.20261029.3877`) and keeps the post-v1 capability set on top of the release-qualified `1.0.0` bridge:
+**`1.1.4`** is the latest release: a feed/bootstrap release on the `1.1.1` feature line. It targets **T3 Code `0.1.10`** (`0517d15c41e95c9d84d8014ae14394ce97bc83f6`, published as nightly `v0.1.10-nightly.20261113.4656`) and keeps the post-v1 capability set on top of the release-qualified `1.0.0` bridge:
 
 - two simultaneously active bridged turns per stable CoS controller/profile, with a durable FIFO queue and exact cancellation/release;
 - workspace and T3 worktree binding through the versioned `provider-session-workspace-v1` contract;
@@ -12,9 +12,9 @@ Windows-first bridge for using Chat On Steroids (CoS) as a Local ACP provider in
 - prompt images (PNG/JPEG converted to WebP, bounded by the controller contract) and other attachment hardening;
 - native CoS background-work projection with a pending-work fence and report-after-drain follow-ups;
 - the same durable recovery, drain-aware termination, bounded streaming, diagnostics and privacy guarantees as v1;
-- a maintained T3 patch series for optional per-thread tokens/sec, ACP per-turn token usage, per-thread ChatGPT tab show/reload controls (with the window-reveal fix), the pinned-threads-on-top sidebar setting and fork-tagged update links, ported to T3 `0.1.5`.
+- a maintained T3 patch series for optional per-thread tokens/sec, ACP per-turn token usage, per-thread ChatGPT tab show/reload controls (with the window-reveal fix), the pinned-threads-on-top sidebar setting and fork-tagged update links, ported to T3 `0.1.10`.
 
-The complete pinned v1 support tuple from `1.0.0` (T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d…`, CoS `2.1.39` / `87ae9d63…`, provider build `495e3e96…`) remains the **release-qualified** tuple recorded in `src/release-manifest.ts`. Qualification is tuple-specific: on the `0.1.5` development/release baseline, `--release-readiness` reports `t3BaselineQualified:false` and `releaseQualified:false` until the full V1 matrix is rerun on that exact tuple. Post-v1 evidence (two-chat matrix, T3-HEAD acceptance, attachment and recovery lanes) is recorded in `docs/release-status.md` and `docs/evidence/`.
+The complete pinned v1 support tuple from `1.0.0` (T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d…`, CoS `2.1.39` / `87ae9d63…`, provider build `495e3e96…`) remains the **release-qualified** tuple recorded in `src/release-manifest.ts`. Qualification is tuple-specific: on the `0.1.10` development/release baseline, `--release-readiness` reports `t3BaselineQualified:false` and `releaseQualified:false` until the full V1 matrix is rerun on that exact tuple. Post-v1 evidence (two-chat matrix, T3-HEAD acceptance, attachment and recovery lanes) is recorded in `docs/release-status.md` and `docs/evidence/`.
 
 See [`PLAN.md`](PLAN.md) for the gate sequence and [`docs/release-status.md`](docs/release-status.md) for the current release boundary.
 
@@ -43,14 +43,14 @@ The installer is the T3 Code application; the t3onsteroids bridge remains the Lo
 
 ## Supported tuple for `1.1.4`
 
-- T3 Code `0.1.5` / `6d450a4284852af137b2f3407fddd89eb76e7644`
-  (also published as `0.1.5-nightly.20261029.3877`; T3-HEAD acceptance additionally exercised `dd14848…`);
+- T3 Code `0.1.10` / `0517d15c41e95c9d84d8014ae14394ce97bc83f6`
+  (published as `v0.1.10-nightly.20261113.4656`; the previous `0.1.5` / `6d450a42` baseline is recorded in `docs/evidence/t3-nightly-0.1.5.md`);
 - CoS `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`, controller protocol 1;
 - CoS provider-extension build `2a6a1f8…` with the v1 feature set plus workspace, model-catalog, prompt-image, multiplexed-stream and background-work contracts; the exact build and feature versions are in `src/compatibility.ts`;
 - ACP SDK `1.9.0`;
 - Node 24 on Windows x64 (`sharp` is used for PNG/JPEG → WebP prompt images).
 
-The maintained T3 patch series lives in `handoff/t3-patches/` and is verified against both the pinned `ffb4af8d` release tuple and the `0.1.5` baseline. It is never sent upstream; do not open PRs, issues or discussions against `pingdotgg/t3code`.
+The maintained T3 patch series lives in `handoff/t3-patches/` and is verified against the pinned `ffb4af8d` release tuple, the `0.1.5` baseline (`main-2026-10-29-6d450a42/`) and the `0.1.10` nightly baseline (`main-2026-11-13-0517d15c/`). It is never sent upstream; do not open PRs, issues or discussions against `pingdotgg/t3code`.
 
 ## Setup and launch
 

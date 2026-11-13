@@ -28,7 +28,7 @@ import type { BridgeMetrics } from "../metrics.js";
 import { scaledPollMs } from "../state/poll.js";
 import { BRIDGE_VERSION } from "../version.js";
 
-export const PINNED_T3_SHA = "6d450a4284852af137b2f3407fddd89eb76e7644";
+export const PINNED_T3_SHA = "0517d15c41e95c9d84d8014ae14394ce97bc83f6";
 export const MAX_COS_INPUT_CHARS = 64_000;
 
 export type BridgeErrorCode =

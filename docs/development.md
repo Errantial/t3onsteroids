@@ -6,7 +6,7 @@ The bridge is Windows-first, uses Node directly, and this release is versioned a
 
 The first v1 support tuple is:
 
-- T3 `0.1.5-nightly.20261029.3877` / `6d450a4284852af137b2f3407fddd89eb76e7644` (development baseline; release tuple remains `ffb4af8d…`);
+- T3 `v0.1.10-nightly.20261113.4656` / `0517d15c41e95c9d84d8014ae14394ce97bc83f6` (development baseline; release tuple remains `ffb4af8d…`);
 - CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`;
 - CoS provider-extension build `495e3e96504d9b865c18478f7b42915280712f84`;
 - controller protocol 1 with `provider-project-resolve-v1`, `provider-assistant-content-v1`, `provider-session-policy-v1`, `provider-turn-drain-v1`, and `provider-turn-recovery-v1` all at version 1;
@@ -17,9 +17,9 @@ Treat current upstream T3 HEAD as a **separate drift lane**. The V1 release drif
 
 ## Pinned development baseline
 
-`src/compatibility.ts` tracks the **development baseline** and now targets T3 `0.1.5-nightly.20261029.3877` / `6d450a4284852af137b2f3407fddd89eb76e7644`. That baseline is ahead of the last live-qualified tuple. Qualification is tuple-specific: `v1ReleaseGateManifest.qualifiedT3Sha` records the T3 commit the release gates were recorded against, and `releaseReadiness()` reports `t3BaselineQualified:false` / `releaseQualified:false` whenever the two differ. Promote `qualifiedT3Sha` only together with fresh live-acceptance evidence for the new baseline.
+`src/compatibility.ts` tracks the **development baseline** and now targets T3 `v0.1.10-nightly.20261113.4656` / `0517d15c41e95c9d84d8014ae14394ce97bc83f6`. That baseline is ahead of the last live-qualified tuple. Qualification is tuple-specific: `v1ReleaseGateManifest.qualifiedT3Sha` records the T3 commit the release gates were recorded against, and `releaseReadiness()` reports `t3BaselineQualified:false` / `releaseQualified:false` whenever the two differ. Promote `qualifiedT3Sha` only together with fresh live-acceptance evidence for the new baseline.
 
-The maintained T3 patch series lives in `handoff/t3-patches/`; the directory for this baseline is `main-2026-10-29-6d450a42` (same commit as nightly `.3877`). On the new baseline the series applies cleanly, the full `vp` typecheck passes (36/36 packages), the web production build succeeds, and the focused web/ACP test suites pass.
+The maintained T3 patch series lives in `handoff/t3-patches/`; the directory for this baseline is `main-2026-11-13-0517d15c` (same commit as nightly `.4656`). On the new baseline the series applies cleanly with `git am --3way` (zero conflicts) on the nightly plus the ChatGPT Browser fork base; the full typecheck/build/test pass on the new base is recorded as follow-up in `docs/evidence/t3-nightly-0.1.10.md`. The previous `0.1.5` baseline directory is `main-2026-10-29-6d450a42`.
 
 ## Install and verify
 

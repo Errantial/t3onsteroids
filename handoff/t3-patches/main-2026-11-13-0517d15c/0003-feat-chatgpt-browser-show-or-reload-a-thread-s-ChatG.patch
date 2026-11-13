@@ -1,0 +1,985 @@
+From f7432fbb99aac22ef3d6f931869bc1515fe82347 Mon Sep 17 00:00:00 2001
+From: erranter <erranter@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 13:39:26 -0600
+Subject: [PATCH 3/8] feat(chatgpt-browser): show or reload a thread's ChatGPT
+ tab
+
+The thread action menu now offers Show ChatGPT tab and Reload ChatGPT tab for ChatGPT Browser threads. The server resolves the thread's active provider session, the host resolves the conversation from that session's live operation, and the extension either focuses the tab (reveal, existing path) or force-reloads it with bypassCache. A session with no open tab fails explicitly instead of opening an unrelated conversation.
+---
+ apps/server/src/auth/RpcAuthorization.ts      |  1 +
+ .../src/observability/RpcInstrumentation.ts   |  1 +
+ .../ThreadManagementService.ts                | 72 +++++++++++++++++
+ .../src/provider/ChatGptBrowserHostLive.ts    |  4 +
+ .../src/relay/AgentAwarenessRelay.test.ts     |  1 +
+ apps/server/src/ws.ts                         |  2 +
+ .../components/threadActionMenu.logic.test.ts | 11 +++
+ .../src/components/threadActionMenu.logic.ts  | 19 +++++
+ apps/web/src/hooks/useThreadActionMenu.ts     | 28 ++++++-
+ .../client-runtime/src/state/orchestration.ts |  4 +
+ .../contracts/src/clientRpcPermissions.ts     |  1 +
+ packages/contracts/src/orchestrationV2.ts     | 43 ++++++++++
+ packages/contracts/src/rpc.ts                 | 11 +++
+ .../assets/extension/background.js            | 24 ++++++
+ .../src/server/adapter.test.ts                | 50 +++++++-----
+ .../src/server/adapter.ts                     | 20 ++++-
+ .../src/server/driver.test.ts                 |  2 +-
+ .../src/server/host.ts                        | 18 +++++
+ .../src/server/managedHost.test.ts            |  3 +
+ .../src/server/managedHost.ts                 | 10 ++-
+ .../src/server/nativeBrowser.test.ts          | 81 +++++++++++++++++++
+ .../src/server/nativeBrowser.ts               | 58 +++++++++++++
+ .../src/server/ProviderAdapter.ts             |  7 ++
+ 23 files changed, 448 insertions(+), 23 deletions(-)
+
+diff --git a/apps/server/src/auth/RpcAuthorization.ts b/apps/server/src/auth/RpcAuthorization.ts
+index 7823c3a146..389242d071 100644
+--- a/apps/server/src/auth/RpcAuthorization.ts
++++ b/apps/server/src/auth/RpcAuthorization.ts
+@@ -44,6 +44,7 @@ export const RPC_REQUIRED_SCOPES = {
+   [ORCHESTRATION_V2_WS_METHODS.getNativeChildWork]: AuthOrchestrationReadScope,
+   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: AuthOrchestrationOperateScope,
+   [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: AuthOrchestrationOperateScope,
++  [ORCHESTRATION_V2_WS_METHODS.controlBrowserTab]: AuthOrchestrationOperateScope,
+   [ORCHESTRATION_V2_WS_METHODS.getTurnDiff]: AuthOrchestrationReadScope,
+   [ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff]: AuthOrchestrationReadScope,
+   [ORCHESTRATION_V2_WS_METHODS.searchThreads]: AuthOrchestrationReadScope,
+diff --git a/apps/server/src/observability/RpcInstrumentation.ts b/apps/server/src/observability/RpcInstrumentation.ts
+index 3f120a39f1..29ab7cdbc9 100644
+--- a/apps/server/src/observability/RpcInstrumentation.ts
++++ b/apps/server/src/observability/RpcInstrumentation.ts
+@@ -16,6 +16,7 @@ const RPC_AGGREGATES = {
+   [ORCHESTRATION_V2_WS_METHODS.getNativeChildWork]: "orchestration",
+   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: "orchestration",
+   [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: "orchestration",
++  [ORCHESTRATION_V2_WS_METHODS.controlBrowserTab]: "orchestration",
+   [ORCHESTRATION_V2_WS_METHODS.getTurnItem]: "orchestration",
+   [ORCHESTRATION_V2_WS_METHODS.getTurnDiff]: "orchestration",
+   [ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff]: "orchestration",
+diff --git a/apps/server/src/orchestration-v2/ThreadManagementService.ts b/apps/server/src/orchestration-v2/ThreadManagementService.ts
+index 7788baca06..bc4297e25b 100644
+--- a/apps/server/src/orchestration-v2/ThreadManagementService.ts
++++ b/apps/server/src/orchestration-v2/ThreadManagementService.ts
+@@ -18,6 +18,9 @@ import {
+   OrchestrationV2ForceStopThreadError,
+   type OrchestrationV2ForceStopThreadInput,
+   type OrchestrationV2ForceStopThreadResult,
++  OrchestrationV2ControlBrowserTabError,
++  type OrchestrationV2ControlBrowserTabInput,
++  type OrchestrationV2ControlBrowserTabResult,
+   type ModelSelection,
+   type OrchestrationV2Actor,
+   type OrchestrationV2Command,
+@@ -404,6 +407,9 @@ export interface ThreadManagementServiceShape {
+     readonly threadId: ThreadId;
+     readonly itemId: TurnItemId;
+   }) => Effect.Effect<OrchestrationV2GetTurnItemResult, Orchestrator.OrchestratorV2Error>;
++  readonly controlBrowserTab: (
++    input: OrchestrationV2ControlBrowserTabInput,
++  ) => Effect.Effect<OrchestrationV2ControlBrowserTabResult, OrchestrationV2ControlBrowserTabError>;
+   readonly getThreadRecords: Orchestrator.OrchestratorV2["Service"]["getThreadRecords"];
+   readonly getThreadProjection: (
+     threadId: ThreadId,
+@@ -693,6 +699,71 @@ const make = Effect.gen(function* () {
+       Effect.andThen(orchestrator.getThreadProjection(threadId)),
+     );
+ 
++  /**
++   * Manual control of the ChatGPT tab that belongs to a thread. Only the provider that owns a
++   * browser exposes it; the live operation of the newest provider session resolves the tab.
++   */
++  const controlBrowserTab: ThreadManagementServiceShape["controlBrowserTab"] = Effect.fn(
++    "ThreadManagementService.controlBrowserTab",
++  )(function* (input) {
++    const projection = yield* getThreadProjection(input.threadId).pipe(
++      Effect.mapError(
++        (cause) =>
++          new OrchestrationV2ControlBrowserTabError({
++            threadId: input.threadId,
++            reason: "unavailable",
++            cause,
++          }),
++      ),
++    );
++    // The thread's active provider thread names its session exactly; an older session left
++    // behind by a provider switch cannot answer for the tab the user is looking at.
++    const activeThreadId = projection.thread.activeProviderThreadId;
++    const activeThread =
++      activeThreadId === null
++        ? undefined
++        : projection.providerThreads.find((candidate) => candidate.id === activeThreadId);
++    const session =
++      (activeThread === undefined
++        ? undefined
++        : projection.providerSessions.find(
++            (candidate) => candidate.id === activeThread.providerSessionId,
++          )) ??
++      projection.providerSessions
++        .filter((candidate) => candidate.driver === "chatgptBrowser")
++        .at(-1);
++    if (!session || session.driver !== "chatgptBrowser") {
++      return yield* new OrchestrationV2ControlBrowserTabError({
++        threadId: input.threadId,
++        reason: "unsupported",
++      });
++    }
++    const runtime = Option.flatten(yield* sessions.get(session.id).pipe(Effect.option));
++    if (Option.isNone(runtime)) {
++      return yield* new OrchestrationV2ControlBrowserTabError({
++        threadId: input.threadId,
++        reason: "unavailable",
++      });
++    }
++    const control = runtime.value.controlBrowserTab;
++    if (!control) {
++      return yield* new OrchestrationV2ControlBrowserTabError({
++        threadId: input.threadId,
++        reason: "unsupported",
++      });
++    }
++    return yield* control({ action: input.action }).pipe(
++      Effect.mapError(
++        (cause) =>
++          new OrchestrationV2ControlBrowserTabError({
++            threadId: input.threadId,
++            reason: "failed",
++            cause,
++          }),
++      ),
++    );
++  });
++
+   const getCheckpointContext: ThreadManagementServiceShape["getCheckpointContext"] = (threadId) =>
+     ensureProjectionTranscript(threadId).pipe(
+       Effect.andThen(orchestrator.getCheckpointContext(threadId)),
+@@ -1722,6 +1793,7 @@ const make = Effect.gen(function* () {
+       },
+     ),
+     getThreadProjection,
++    controlBrowserTab,
+     getCheckpointContext,
+     getThreadSnapshot,
+     getThreadTranscript,
+diff --git a/apps/server/src/provider/ChatGptBrowserHostLive.ts b/apps/server/src/provider/ChatGptBrowserHostLive.ts
+index efcd63c828..0d0d0abb48 100644
+--- a/apps/server/src/provider/ChatGptBrowserHostLive.ts
++++ b/apps/server/src/provider/ChatGptBrowserHostLive.ts
+@@ -48,6 +48,10 @@ export const layer = Layer.effect(
+       readiness: managed.pipe(Effect.flatMap((host) => host.readiness)),
+       status: managed.pipe(Effect.flatMap((host) => host.status)),
+       authenticate: managed.pipe(Effect.flatMap((host) => host.authenticate)),
++      controlTab: Effect.fn("ChatGptBrowserHost.controlTab")(function* (input) {
++        const host = yield* managed;
++        return yield* host.controlTab(input);
++      }),
+       open: managed.pipe(Effect.flatMap((host) => host.open)),
+     });
+   }),
+diff --git a/apps/server/src/relay/AgentAwarenessRelay.test.ts b/apps/server/src/relay/AgentAwarenessRelay.test.ts
+index 68e2289524..9f61ec5a6a 100644
+--- a/apps/server/src/relay/AgentAwarenessRelay.test.ts
++++ b/apps/server/src/relay/AgentAwarenessRelay.test.ts
+@@ -258,6 +258,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
+     interruptThread: unused,
+     stopWorkflow: () => Effect.die("unused stopWorkflow"),
+     forceStopThread: () => Effect.die("unused forceStopThread"),
++    controlBrowserTab: () => Effect.die("unused controlBrowserTab"),
+     awaitBackgroundTasks: unused,
+     stopDelegatedTasks: unused,
+     getThreadEventSequence: unused,
+diff --git a/apps/server/src/ws.ts b/apps/server/src/ws.ts
+index 4d9a0f9bd4..d04f1e7701 100644
+--- a/apps/server/src/ws.ts
++++ b/apps/server/src/ws.ts
+@@ -1999,6 +1999,8 @@ export const layerWsRpc = (
+         [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: (input) => threadManagement.stopWorkflow(input),
+         [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: (input) =>
+           threadManagement.forceStopThread(input),
++        [ORCHESTRATION_V2_WS_METHODS.controlBrowserTab]: (input) =>
++          threadManagement.controlBrowserTab(input),
+         [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: (input) =>
+           readWorkflowScript({ scriptPath: input.scriptPath }),
+         [ORCHESTRATION_V2_WS_METHODS.getNativeChildWork]: (input) =>
+diff --git a/apps/web/src/components/threadActionMenu.logic.test.ts b/apps/web/src/components/threadActionMenu.logic.test.ts
+index bd9dfdcdcc..7c59561310 100644
+--- a/apps/web/src/components/threadActionMenu.logic.test.ts
++++ b/apps/web/src/components/threadActionMenu.logic.test.ts
+@@ -74,4 +74,15 @@ describe("buildThreadActionMenuItems", () => {
+     expect(items.find((item) => item.id === "archive")?.disabled).toBe(true);
+     expect(items.find((item) => item.id === "turn-into-project")?.disabled).toBe(true);
+   });
++
++  it("offers the ChatGPT tab controls only for a provider that owns one", () => {
++    expect(
++      buildThreadActionMenuItems(baseState).filter((item) => item.id.includes("chatgpt-tab")),
++    ).toEqual([]);
++    const items = buildThreadActionMenuItems({ ...baseState, canControlChatGptTab: true });
++    expect(items.find((item) => item.id === "show-chatgpt-tab")?.label).toBe("Show ChatGPT tab");
++    expect(items.find((item) => item.id === "reload-chatgpt-tab")?.label).toBe(
++      "Reload ChatGPT tab",
++    );
++  });
+ });
+diff --git a/apps/web/src/components/threadActionMenu.logic.ts b/apps/web/src/components/threadActionMenu.logic.ts
+index 1e3eddd0b9..ae85d6b06c 100644
+--- a/apps/web/src/components/threadActionMenu.logic.ts
++++ b/apps/web/src/components/threadActionMenu.logic.ts
+@@ -20,6 +20,8 @@ export type ThreadActionMenuId =
+   | "rename"
+   | "regenerate-title"
+   | "mark-unread"
++  | "show-chatgpt-tab"
++  | "reload-chatgpt-tab"
+   | "share-guest"
+   | "copy"
+   | "copy-path"
+@@ -95,6 +97,8 @@ export interface ThreadActionMenuState {
+   readonly canShareWithGuest?: boolean;
+   /** A No project thread with its own folder, on a server that can promote it. */
+   readonly canTurnIntoProject?: boolean;
++  /** The thread's provider owns a ChatGPT browser tab the user can show or reload. */
++  readonly canControlChatGptTab?: boolean;
+ }
+ 
+ /** Local navigation, read markers, and copying remain available to read-only clients. */
+@@ -179,6 +183,21 @@ export function buildThreadActionMenuItems(
+         ]
+       : []),
+     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
++    ...(state.canControlChatGptTab
++      ? [
++          {
++            id: "show-chatgpt-tab" as const,
++            label: "Show ChatGPT tab",
++            icon: "external-link",
++            separatorBefore: true,
++          },
++          {
++            id: "reload-chatgpt-tab" as const,
++            label: "Reload ChatGPT tab",
++            icon: "refresh-cw",
++          },
++        ]
++      : []),
+     ...(state.canShareWithGuest
+       ? [{ id: "share-guest" as const, label: "Share with guest", icon: "user-plus" }]
+       : []),
+diff --git a/apps/web/src/hooks/useThreadActionMenu.ts b/apps/web/src/hooks/useThreadActionMenu.ts
+index bf22bd066b..b5337c3562 100644
+--- a/apps/web/src/hooks/useThreadActionMenu.ts
++++ b/apps/web/src/hooks/useThreadActionMenu.ts
+@@ -27,6 +27,8 @@ import { copyThreadReference } from "../lib/copyThreadReference";
+ import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
+ import { threadEnvironment } from "../state/threads";
+ import { useOrchestrationCommand } from "../state/use-orchestration-command";
++import { orchestrationEnvironment } from "../state/orchestration";
++import { useAtomCommand } from "../state/use-atom-command";
+ import { readEnvironmentScope } from "../state/session";
+ import {
+   readEnvironmentServerConfigLoaded,
+@@ -34,7 +36,7 @@ import {
+   readThreadShell,
+   useProjects,
+ } from "../state/entities";
+-import { usePrimaryEnvironmentId } from "../state/environments";
++import { usePrimaryEnvironmentId, useEnvironmentProviders } from "../state/environments";
+ import { readLocalApi } from "../localApi";
+ import { configuredHostedAppUrl } from "../hostedPairing";
+ import {
+@@ -95,6 +97,8 @@ export function useThreadActionMenu(input: {
+   const handleNewThread = useNewThreadHandler();
+   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
+   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
++  const providersByEnvironment = useEnvironmentProviders();
++  const controlBrowserTab = useAtomCommand(orchestrationEnvironment.controlBrowserTab);
+   const timestampFormat = useClientSettings((s) => s.timestampFormat);
+   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
+     onCopy: ({ path }) => {
+@@ -137,6 +141,11 @@ export function useThreadActionMenu(input: {
+       };
+       const isRegeneratingTitle = thread.titleRegeneration != null;
+       const snoozePresets = resolveSnoozePresets(now, timestampFormat, threadRef.environmentId);
++      // Only the ChatGPT Browser provider owns a tab T3 can show or reload for a thread.
++      const canControlChatGptTab = (providersByEnvironment.get(threadRef.environmentId) ?? []).some(
++        (provider) =>
++          provider.instanceId === thread.providerInstanceId && provider.driver === "chatgptBrowser",
++      );
+       const items = buildThreadActionMenuItems({
+         canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
+         canFind: onFind !== undefined,
+@@ -153,6 +162,7 @@ export function useThreadActionMenu(input: {
+         snoozePresets,
+         canShareWithGuest,
+         canTurnIntoProject: canTurnThreadIntoProject(threadRef),
++        canControlChatGptTab,
+       });
+       const clicked = await settlePromise(() => api.contextMenu.show(items, position));
+       if (clicked._tag === "Failure" || clicked.value === null) return;
+@@ -265,6 +275,22 @@ export function useThreadActionMenu(input: {
+         case "mark-unread":
+           markThreadUnread(threadRef);
+           return;
++        case "show-chatgpt-tab":
++          await reportFailure("Could not show the ChatGPT tab", () =>
++            controlBrowserTab({
++              environmentId: threadRef.environmentId,
++              input: { threadId: threadRef.threadId, action: "reveal" },
++            }),
++          );
++          return;
++        case "reload-chatgpt-tab":
++          await reportFailure("Could not reload the ChatGPT tab", () =>
++            controlBrowserTab({
++              environmentId: threadRef.environmentId,
++              input: { threadId: threadRef.threadId, action: "reload" },
++            }),
++          );
++          return;
+         case "share-guest":
+           openGuestShareDialog(threadRef);
+           return;
+diff --git a/packages/client-runtime/src/state/orchestration.ts b/packages/client-runtime/src/state/orchestration.ts
+index 657a9cd62d..7d2527ac35 100644
+--- a/packages/client-runtime/src/state/orchestration.ts
++++ b/packages/client-runtime/src/state/orchestration.ts
+@@ -206,6 +206,10 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
+       label: "environment-data:orchestration:force-stop-thread",
+       tag: ORCHESTRATION_V2_WS_METHODS.forceStopThread,
+     }),
++    controlBrowserTab: createEnvironmentRpcCommand(runtime, {
++      label: "environment-data:orchestration:control-browser-tab",
++      tag: ORCHESTRATION_V2_WS_METHODS.controlBrowserTab,
++    }),
+     turnItem: (target: {
+       readonly environmentId: EnvironmentId;
+       readonly input: OrchestrationV2GetTurnItemInput;
+diff --git a/packages/contracts/src/clientRpcPermissions.ts b/packages/contracts/src/clientRpcPermissions.ts
+index 8681c1ea8a..24823e6892 100644
+--- a/packages/contracts/src/clientRpcPermissions.ts
++++ b/packages/contracts/src/clientRpcPermissions.ts
+@@ -72,6 +72,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
+   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: AuthOrchestrationOperateScope,
+   // Force stop kills agent processes, as Stop on a terminal does.
+   [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: AuthOrchestrationOperateScope,
++  [ORCHESTRATION_V2_WS_METHODS.controlBrowserTab]: AuthOrchestrationOperateScope,
+   // A guest link hands thread access to someone outside, like a pairing link.
+   [WS_METHODS.guestShareCreate]: AuthAccessWriteScope,
+   [WS_METHODS.peerLinksLink]: AuthAccessWriteScope,
+diff --git a/packages/contracts/src/orchestrationV2.ts b/packages/contracts/src/orchestrationV2.ts
+index 69338865e5..2ea10851e3 100644
+--- a/packages/contracts/src/orchestrationV2.ts
++++ b/packages/contracts/src/orchestrationV2.ts
+@@ -3788,6 +3788,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
+   stopWorkflow: "orchestration.stopWorkflow",
+   forceStopThread: "orchestration.forceStopThread",
+   getTurnItem: "orchestration.getTurnItem",
++  controlBrowserTab: "orchestration.controlBrowserTab",
+   launchThread: "orchestration.launchThread",
+   subscribeShell: "orchestration.subscribeShell",
+   subscribeThread: "orchestration.subscribeThread",
+@@ -4243,6 +4244,44 @@ export class OrchestrationV2ForceStopThreadError extends Schema.TaggedError<Orch
+   }
+ }
+ 
++/** The manual browser-tab controls a provider thread can offer. */
++export const OrchestrationV2BrowserTabAction = Schema.Literals(["reveal", "reload"]);
++export type OrchestrationV2BrowserTabAction = typeof OrchestrationV2BrowserTabAction.Type;
++
++export const OrchestrationV2ControlBrowserTabInput = Schema.Struct({
++  threadId: ThreadId,
++  action: OrchestrationV2BrowserTabAction,
++});
++export type OrchestrationV2ControlBrowserTabInput =
++  typeof OrchestrationV2ControlBrowserTabInput.Type;
++
++export const OrchestrationV2ControlBrowserTabResult = Schema.Struct({
++  /** The exact ChatGPT conversation whose tab was shown or reloaded. */
++  conversationId: TrimmedNonEmptyString,
++});
++export type OrchestrationV2ControlBrowserTabResult =
++  typeof OrchestrationV2ControlBrowserTabResult.Type;
++
++export class OrchestrationV2ControlBrowserTabError extends Schema.TaggedError<OrchestrationV2ControlBrowserTabError>()(
++  "OrchestrationV2ControlBrowserTabError",
++  {
++    threadId: ThreadId,
++    reason: Schema.Literals(["unsupported", "unavailable", "failed"]),
++    cause: Schema.optional(Schema.Defect()),
++  },
++) {
++  override get message(): string {
++    switch (this.reason) {
++      case "unsupported":
++        return "This provider does not own a browser tab for the thread.";
++      case "unavailable":
++        return "The thread's browser tab is not open.";
++      case "failed":
++        return "The browser tab could not be controlled.";
++    }
++  }
++}
++
+ export const OrchestrationV2GetWorkflowScriptInput = Schema.Struct({
+   threadId: ThreadId,
+   scriptPath: TrimmedNonEmptyString,
+@@ -4500,6 +4539,10 @@ export const OrchestrationV2RpcSchemas = {
+     input: OrchestrationV2GetTurnItemInput,
+     output: OrchestrationV2GetTurnItemResult,
+   },
++  controlBrowserTab: {
++    input: OrchestrationV2ControlBrowserTabInput,
++    output: OrchestrationV2ControlBrowserTabResult,
++  },
+   launchThread: {
+     input: OrchestrationV2ThreadLaunchInput,
+     output: OrchestrationV2ThreadLaunchResult,
+diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
+index adba6dbaca..860a43651a 100644
+--- a/packages/contracts/src/rpc.ts
++++ b/packages/contracts/src/rpc.ts
+@@ -232,6 +232,7 @@ import {
+   OrchestrationV2DispatchCommandError,
+   OrchestrationV2GetShellSnapshotError,
+   OrchestrationV2CommandOutputError,
++  OrchestrationV2ControlBrowserTabError,
+   OrchestrationV2GetThreadProjectionError,
+   OrchestrationV2RpcSchemas,
+   OrchestrationV2ThreadLaunchError,
+@@ -1936,6 +1937,15 @@ const WsOrchestrationV2GetTurnItemRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.get
+   error: Schema.Union([OrchestrationV2GetThreadProjectionError, EnvironmentAuthorizationError]),
+ });
+ 
++const WsOrchestrationV2ControlBrowserTabRpc = Rpc.make(
++  ORCHESTRATION_V2_WS_METHODS.controlBrowserTab,
++  {
++    payload: OrchestrationV2RpcSchemas.controlBrowserTab.input,
++    success: OrchestrationV2RpcSchemas.controlBrowserTab.output,
++    error: Schema.Union([OrchestrationV2ControlBrowserTabError, EnvironmentAuthorizationError]),
++  },
++);
++
+ const WsOrchestrationV2LaunchThreadRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.launchThread, {
+   payload: OrchestrationV2RpcSchemas.launchThread.input,
+   success: OrchestrationV2RpcSchemas.launchThread.output,
+@@ -2306,6 +2316,7 @@ export const WsRpcGroup = RpcGroup.make(
+   WsOrchestrationV2StopWorkflowRpc,
+   WsOrchestrationV2ForceStopThreadRpc,
+   WsOrchestrationV2GetTurnItemRpc,
++  WsOrchestrationV2ControlBrowserTabRpc,
+   WsOrchestrationV2GetTurnDiffRpc,
+   WsOrchestrationV2GetFullThreadDiffRpc,
+   WsOrchestrationV2SearchThreadsRpc,
+diff --git a/packages/provider-chatgpt-browser/assets/extension/background.js b/packages/provider-chatgpt-browser/assets/extension/background.js
+index 6dee43e6e9..7c2eb65062 100644
+--- a/packages/provider-chatgpt-browser/assets/extension/background.js
++++ b/packages/provider-chatgpt-browser/assets/extension/background.js
+@@ -4886,6 +4886,29 @@ async function revealChats(ids) {
+   }
+ }
+ 
++/**
++ * Force-reloads the exact tab of each conversation the host named. This is the manual recovery
++ * path for a page that stopped answering: it bypasses the cache and never opens a tab that does
++ * not exist, so a stuck page is replaced without inventing a second one for the same chat.
++ */
++async function reloadChats(ids) {
++  if (!Array.isArray(ids)) return;
++  for (const raw of ids.slice(0, 5)) {
++    const conversationId = cleanConversationId(raw);
++    if (!conversationId) continue;
++    const tabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
++    const [tab] = tabs
++      .filter((candidate) => conversationForTab(candidate) === conversationId)
++      .sort((a, b) => a.id - b.id);
++    if (!tab || !Number.isInteger(tab.id)) continue;
++    try {
++      await chrome.tabs.reload(tab.id, { bypassCache: true });
++    } catch {
++      // A tab the user closed in the meantime is already the state the caller wanted.
++    }
++  }
++}
++
+ /**
+  * The chat selected in the app becomes the selected tab of the app's Background chats window
+  * (#1249). Selecting a tab never focuses its window, and nothing is opened or moved: a chat
+@@ -5078,6 +5101,7 @@ async function maintainOnce() {
+   );
+   void followApp(reply.data).catch(() => undefined);
+   void revealChats(reply.data.reveals).catch(() => undefined);
++  void reloadChats(reply.data.reloads).catch(() => undefined);
+   void followChat(reply.data.follow).catch(() => undefined);
+   void runImageExports(reply.data.imageExports).catch(() => undefined);
+   const renderingWanted = (tab) => {
+diff --git a/packages/provider-chatgpt-browser/src/server/adapter.test.ts b/packages/provider-chatgpt-browser/src/server/adapter.test.ts
+index 104bac930f..12527ebe90 100644
+--- a/packages/provider-chatgpt-browser/src/server/adapter.test.ts
++++ b/packages/provider-chatgpt-browser/src/server/adapter.test.ts
+@@ -13,7 +13,6 @@ import {
+   ChatGptBrowserProviderV1EventSequence,
+   ChatGptBrowserHostError,
+   chatGptBrowserProviderOperationIdForAttempt,
+-  type ChatGptBrowserHostPort,
+   type ChatGptBrowserProviderV1CoreEvent,
+   type ChatGptBrowserProviderV1Error,
+ } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
+@@ -27,7 +26,7 @@ import * as Logger from "effect/Logger";
+ import * as Stream from "effect/Stream";
+ 
+ import { makeFakeChatGptBrowserProviderV1Transport } from "../testing.ts";
+-import { makeChatGptBrowserAdapterV2 } from "./adapter.ts";
++import { makeChatGptBrowserAdapterV2, type ChatGptBrowserAdapterV2Options } from "./adapter.ts";
+ import {
+   ChatGptBrowserOperationStore,
+   checkpointChatGptBrowserProviderEvent,
+@@ -41,24 +40,35 @@ const threadId = ThreadId.make("thread-chatgpt-browser-test");
+ 
+ const host = (
+   transport: ReturnType<typeof makeFakeChatGptBrowserProviderV1Transport>["transport"],
+-): ChatGptBrowserHostPort => ({
+-  readiness: Effect.succeed({
+-    target: "windows-x64",
++): ChatGptBrowserAdapterV2Options["host"] => {
++  const identity = {
++    target: "windows-x64" as const,
+     browserRevision: "browser-test",
+     providerReleaseVersion: "provider-test",
+     extensionVersion: "extension-test",
+-  }),
+-  open: Effect.succeed({
+-    identity: {
+-      target: "linux-x64",
+-      browserRevision: "test-browser",
+-      providerReleaseVersion: "test-provider",
+-      extensionVersion: "test-extension",
+-    },
+-    transport,
+-    close: Effect.void,
+-  }),
+-});
++  };
++  return {
++    readiness: Effect.succeed(identity),
++    status: Effect.succeed({ identity, authentication: "authenticated", availability: "ready" }),
++    authenticate: Effect.succeed({
++      identity,
++      authentication: "authenticated",
++      availability: "ready",
++    }),
++    controlTab: ({ providerSessionId: sessionId }) =>
++      Effect.succeed({ conversationId: `conversation-${String(sessionId)}` }),
++    open: Effect.succeed({
++      identity: {
++        target: "linux-x64",
++        browserRevision: "test-browser",
++        providerReleaseVersion: "test-provider",
++        extensionVersion: "test-extension",
++      },
++      transport,
++      close: Effect.void,
++    }),
++  };
++};
+ 
+ const seq = ChatGptBrowserProviderV1EventSequence.make;
+ 
+@@ -128,7 +138,7 @@ function memoryOperationStore() {
+ }
+ 
+ function openRuntime(input: {
+-  readonly host: ChatGptBrowserHostPort;
++  readonly host: ChatGptBrowserAdapterV2Options["host"];
+   readonly operationStore?: ChatGptBrowserOperationStoreShape;
+ }) {
+   return Effect.gen(function* () {
+@@ -1460,6 +1470,10 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
+           defaultCwd: "/workspace",
+           host: {
+             readiness: Effect.fail(new ChatGptBrowserHostError({ operation: "readiness" })),
++            status: Effect.fail(new ChatGptBrowserHostError({ operation: "status" })),
++            authenticate: Effect.fail(new ChatGptBrowserHostError({ operation: "authenticate" })),
++            controlTab: () =>
++              Effect.fail(new ChatGptBrowserHostError({ operation: "controlling-tab" })),
+             open: Effect.fail(new ChatGptBrowserHostError({ operation: "open" })),
+           },
+         }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, layerMemoryOperationStore)));
+diff --git a/packages/provider-chatgpt-browser/src/server/adapter.ts b/packages/provider-chatgpt-browser/src/server/adapter.ts
+index a50a897856..702906f8f2 100644
+--- a/packages/provider-chatgpt-browser/src/server/adapter.ts
++++ b/packages/provider-chatgpt-browser/src/server/adapter.ts
+@@ -16,7 +16,6 @@ import {
+   ChatGptBrowserProviderV1Error,
+   ChatGptBrowserProviderV1EventSequence,
+   chatGptBrowserProviderOperationIdForAttempt,
+-  type ChatGptBrowserHostPort,
+   type ChatGptBrowserProviderOperationId,
+   type ChatGptBrowserProviderV1CoreEvent,
+   type ChatGptBrowserProviderV1TerminalStatus,
+@@ -38,6 +37,7 @@ import * as Metric from "effect/Metric";
+ import * as Queue from "effect/Queue";
+ import * as Schema from "effect/Schema";
+ import * as Semaphore from "effect/Semaphore";
++import type { ChatGptBrowserHostService } from "./host.ts";
+ import * as Stream from "effect/Stream";
+ 
+ import {
+@@ -166,7 +166,7 @@ export const ChatGptBrowserProviderCapabilitiesV2 = {
+ export interface ChatGptBrowserAdapterV2Options {
+   readonly instanceId: ProviderAdapter.ProviderAdapterV2["Service"]["instanceId"];
+   readonly defaultCwd: string;
+-  readonly host: ChatGptBrowserHostPort;
++  readonly host: ChatGptBrowserHostService;
+   readonly resolveAttachmentPath?: (
+     attachment: ProviderAdapter.ProviderAdapterV2TurnMessage["attachments"][number],
+   ) => string | null;
+@@ -1673,6 +1673,22 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
+             );
+           },
+         ),
++        // The user asked to see or reload this thread's own tab. Resolution stays inside the
++        // provider: the tab belongs to the conversation the session's live operation owns.
++        controlBrowserTab: Effect.fn("ChatGptBrowserAdapterV2.controlBrowserTab")(function* (args) {
++          return yield* options.host
++            .controlTab({ providerSessionId: input.providerSessionId, action: args.action })
++            .pipe(
++              Effect.mapError(
++                (cause) =>
++                  new ProviderAdapter.ProviderAdapterProtocolError({
++                    driver: CHATGPT_BROWSER_DRIVER_KIND,
++                    detail: "The ChatGPT Browser tab could not be controlled",
++                    cause,
++                  }),
++              ),
++            );
++        }),
+         readThreadSnapshot: (args) =>
+           Effect.fail(
+             new ProviderAdapter.ProviderAdapterReadThreadSnapshotError({
+diff --git a/packages/provider-chatgpt-browser/src/server/driver.test.ts b/packages/provider-chatgpt-browser/src/server/driver.test.ts
+index c73f4f37e8..4fb4ad10eb 100644
+--- a/packages/provider-chatgpt-browser/src/server/driver.test.ts
++++ b/packages/provider-chatgpt-browser/src/server/driver.test.ts
+@@ -2,7 +2,6 @@ import { describe, expect, it } from "@effect/vitest";
+ import { ProviderInstanceId } from "@t3tools/contracts";
+ import {
+   CHATGPT_BROWSER_PROVIDER_OPERATION_CONCURRENCY,
+-  type ChatGptBrowserHostPort,
+ } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
+ import { ChatGptBrowserHostError } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
+ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+@@ -71,6 +70,7 @@ const layerForStatus = (
+       status,
+       authenticate,
+       open: Effect.die("provider status must not open the durable browser session"),
++      controlTab: () => Effect.die("provider status must not control a browser tab"),
+     }),
+   );
+ 
+diff --git a/packages/provider-chatgpt-browser/src/server/host.ts b/packages/provider-chatgpt-browser/src/server/host.ts
+index 8a4a358cdc..6dd99cb036 100644
+--- a/packages/provider-chatgpt-browser/src/server/host.ts
++++ b/packages/provider-chatgpt-browser/src/server/host.ts
+@@ -9,6 +9,14 @@ import * as Layer from "effect/Layer";
+ 
+ export type ChatGptBrowserAuthenticationStatus = "authenticated" | "unauthenticated" | "unknown";
+ 
++/** A manual control the user can ask of the tab that belongs to one provider thread. */
++export type ChatGptBrowserTabAction = "reveal" | "reload";
++
++export interface ChatGptBrowserTabControlResult {
++  /** The exact ChatGPT conversation the tab was found by. */
++  readonly conversationId: string;
++}
++
+ export interface ChatGptBrowserHostStatus {
+   readonly identity: ChatGptBrowserHostIdentity;
+   readonly authentication: ChatGptBrowserAuthenticationStatus;
+@@ -20,6 +28,15 @@ export interface ChatGptBrowserHostService extends ChatGptBrowserHostPort {
+   readonly status: Effect.Effect<ChatGptBrowserHostStatus, ChatGptBrowserHostError>;
+   /** Opens that same managed profile visibly and resolves only after ChatGPT confirms sign-in. */
+   readonly authenticate: Effect.Effect<ChatGptBrowserHostStatus, ChatGptBrowserHostError>;
++  /**
++   * Brings the tab that belongs to one provider session to the foreground, or force-reloads it.
++   * The thread's conversation is resolved from the live operation the session owns, so a session
++   * with no open tab fails instead of opening an unrelated one.
++   */
++  readonly controlTab: (input: {
++    readonly providerSessionId: string;
++    readonly action: ChatGptBrowserTabAction;
++  }) => Effect.Effect<ChatGptBrowserTabControlResult, ChatGptBrowserHostError>;
+ }
+ 
+ /** Effect DI identity for the T3-owned managed ChatGPT browser lifecycle. */
+@@ -33,6 +50,7 @@ export const unavailableChatGptBrowserHost: ChatGptBrowserHostService = {
+   status: Effect.fail(new ChatGptBrowserHostError({ operation: "status" })),
+   authenticate: Effect.fail(new ChatGptBrowserHostError({ operation: "authenticate" })),
+   open: Effect.fail(new ChatGptBrowserHostError({ operation: "open" })),
++  controlTab: () => Effect.fail(new ChatGptBrowserHostError({ operation: "controlling-tab" })),
+ };
+ 
+ export const layerUnavailableChatGptBrowserHost = Layer.succeed(
+diff --git a/packages/provider-chatgpt-browser/src/server/managedHost.test.ts b/packages/provider-chatgpt-browser/src/server/managedHost.test.ts
+index a90876a2c4..8e75c49803 100644
+--- a/packages/provider-chatgpt-browser/src/server/managedHost.test.ts
++++ b/packages/provider-chatgpt-browser/src/server/managedHost.test.ts
+@@ -30,6 +30,7 @@ describe("shared managed ChatGPT browser host", () => {
+         };
+         const physical: ChatGptBrowserHostService = {
+           readiness: Effect.succeed(identity),
++        controlTab: () => Effect.succeed({ conversationId: "test-conversation" }),
+           status: Effect.succeed({
+             identity,
+             authentication: "authenticated",
+@@ -88,6 +89,7 @@ describe("shared managed ChatGPT browser host", () => {
+       let opens = 0;
+       const physical: ChatGptBrowserHostService = {
+         readiness: Effect.succeed(identity),
++        controlTab: () => Effect.succeed({ conversationId: "test-conversation" }),
+         status: Effect.gen(function* () {
+           probeOpen = true;
+           yield* Deferred.succeed(statusEntered, undefined);
+@@ -179,6 +181,7 @@ describe("shared managed ChatGPT browser host", () => {
+       });
+       const physical: ChatGptBrowserHostService = {
+         readiness: Effect.succeed(identity),
++        controlTab: () => Effect.succeed({ conversationId: "test-conversation" }),
+         status: Effect.succeed({
+           identity,
+           authentication: "authenticated",
+diff --git a/packages/provider-chatgpt-browser/src/server/managedHost.ts b/packages/provider-chatgpt-browser/src/server/managedHost.ts
+index edbbed7b89..edf5b6ab18 100644
+--- a/packages/provider-chatgpt-browser/src/server/managedHost.ts
++++ b/packages/provider-chatgpt-browser/src/server/managedHost.ts
+@@ -14,7 +14,6 @@ import {
+ } from "@t3tools/provider-core/server/chatgptBrowserPlatform";
+ import {
+   ChatGptBrowserHostError,
+-  type ChatGptBrowserHostPort,
+   type ChatGptBrowserHostSession,
+   type ChatGptBrowserPlatformPort,
+ } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
+@@ -111,6 +110,7 @@ export function shareChatGptBrowserHost(
+     readiness: lock.withPermit(host.readiness),
+     status: lock.withPermit(host.status),
+     authenticate: lock.withPermit(host.authenticate),
++    controlTab: (input) => host.controlTab(input),
+     open: lock.withPermit(
+       Effect.gen(function* () {
+         if (current === null) current = { session: yield* host.open, refs: 0 };
+@@ -374,6 +374,14 @@ export const makeNativeManagedChatGptBrowserHost = Effect.fn(
+     authenticate: reusableAuthentication.authenticate,
+     open: reusableAuthentication.open,
+     shutdown: reusableAuthentication.shutdown,
++    controlTab: (input) => {
++      const broker = activeBroker;
++      if (!broker) return Effect.fail(hostError("controlling-tab"));
++      return Effect.tryPromise({
++        try: () => broker.controlTab(input),
++        catch: (cause) => hostError("controlling-tab", cause),
++      });
++    },
+   } satisfies ChatGptBrowserManagedHost &
+     ChatGptBrowserHostService & { readonly shutdown: Effect.Effect<void> };
+ });
+diff --git a/packages/provider-chatgpt-browser/src/server/nativeBrowser.test.ts b/packages/provider-chatgpt-browser/src/server/nativeBrowser.test.ts
+index 75823efe09..dbcf258ea9 100644
+--- a/packages/provider-chatgpt-browser/src/server/nativeBrowser.test.ts
++++ b/packages/provider-chatgpt-browser/src/server/nativeBrowser.test.ts
+@@ -117,6 +117,87 @@ describe("native ChatGPT browser broker", () => {
+     }
+   });
+ 
++  it("delivers a manual reveal once and refuses a session with no tab", async () => {
++    const { broker, headers, session } = await startReadyBroker();
++    try {
++      const providerOperationId = chatGptBrowserProviderOperationIdForAttempt(
++        RunAttemptId.make("attempt-native-tab-control"),
++      );
++      const providerSessionId = ProviderSessionId.make("provider-session-tab-control");
++      const controller = new AbortController();
++      await session.sendExact(
++        {
++          type: "operation.send",
++          providerOperationId,
++          providerSessionId,
++          text: "show me",
++        },
++        controller.signal,
++      );
++      const pending = await requestJson<{ inputs: Array<{ id: string }> }>({
++        port: broker.port,
++        path: "/provider-v1/browser/status",
++        headers,
++        body: { operations: [], after: 0, wait: false },
++      });
++      const id = pending.body.inputs[0]!.id;
++      const conversationId = "55555555-5555-4555-8555-555555555555";
++      const owner = "1:tab-control:0";
++      await requestJson({
++        port: broker.port,
++        path: "/provider-v1/browser/input",
++        headers,
++        body: { providerOperationId, id, owner, conversationId },
++      });
++      await requestJson({
++        port: broker.port,
++        path: "/provider-v1/browser/input",
++        headers,
++        body: { providerOperationId, id, owner, conversationId, authorize: true },
++      });
++      await requestJson({
++        port: broker.port,
++        path: "/provider-v1/browser/input",
++        headers,
++        body: {
++          providerOperationId,
++          id,
++          owner,
++          conversationId,
++          messageId: "user-tab-control",
++          ack: true,
++        },
++      });
++
++      await expect(broker.controlTab({ providerSessionId, action: "reveal" })).resolves.toEqual({
++        conversationId,
++      });
++      const status = await requestJson<{ reveals: string[]; reloads: string[] }>({
++        port: broker.port,
++        path: "/provider-v1/browser/status",
++        headers,
++        body: { operations: [], after: 0, wait: false },
++      });
++      expect(status.body.reveals).toEqual([conversationId]);
++      expect(status.body.reloads).toEqual([]);
++
++      // A control is delivered once: the extension already did it, so a later poll is empty.
++      const again = await requestJson<{ reveals: string[] }>({
++        port: broker.port,
++        path: "/provider-v1/browser/status",
++        headers,
++        body: { operations: [], after: 0, wait: false },
++      });
++      expect(again.body.reveals).toEqual([]);
++
++      await expect(
++        broker.controlTab({ providerSessionId: "provider-session-no-tab", action: "reload" }),
++      ).rejects.toThrow("provider_tab_not_open");
++    } finally {
++      await broker.close();
++    }
++  });
++
+   it("tracks the managed ChatGPT sign-in and wakes authentication waiters", async () => {
+     const { broker, headers } = await startReadyBroker();
+     try {
+diff --git a/packages/provider-chatgpt-browser/src/server/nativeBrowser.ts b/packages/provider-chatgpt-browser/src/server/nativeBrowser.ts
+index ab57754350..8ed8739c46 100644
+--- a/packages/provider-chatgpt-browser/src/server/nativeBrowser.ts
++++ b/packages/provider-chatgpt-browser/src/server/nativeBrowser.ts
+@@ -136,6 +136,14 @@ export interface NativeChatGptBrowserBroker {
+     signal?: AbortSignal,
+   ) => Promise<NativeChatGptBrowserAuthenticationStatus>;
+   readonly waitForAuthentication: (signal?: AbortSignal) => Promise<void>;
++  /**
++   * Queues a manual tab control for the extension's next status poll. Resolves with the exact
++   * conversation whose tab will be shown or reloaded.
++   */
++  readonly controlTab: (input: {
++    readonly providerSessionId: string;
++    readonly action: "reveal" | "reload";
++  }) => Promise<{ readonly conversationId: string }>;
+   readonly close: () => Promise<void>;
+ }
+ 
+@@ -816,6 +824,46 @@ export async function startNativeChatGptBrowserBroker(
+     },
+   });
+ 
++  /** A provider session owns the ChatGPT conversation of its newest live operation. */
++  function conversationForProviderSession(providerSessionId: string): string | null {
++    for (const record of operations.values()) {
++      if (record.providerSessionId === providerSessionId && record.nativeIdentity.conversationId) {
++        return record.nativeIdentity.conversationId;
++      }
++    }
++    return null;
++  }
++
++  interface TabControlRequest {
++    readonly conversationId: string;
++    readonly action: "reveal" | "reload";
++    readonly requestedAt: number;
++  }
++  const TAB_CONTROL_TTL_MS = 30_000;
++  const tabControls: TabControlRequest[] = [];
++
++  function queueTabControl(conversationId: string, action: "reveal" | "reload"): void {
++    tabControls.push({ conversationId, action, requestedAt: Date.now() });
++    if (tabControls.length > 20) tabControls.splice(0, tabControls.length - 20);
++    // The extension long-polls /status; wake it so a manual control is not waiting behind the 25 s
++    // idle bound.
++    wake();
++  }
++
++  /** Takes each queued control once, for the next status reply. Unclaimed controls expire. */
++  function takeTabControls(action: "reveal" | "reload"): string[] {
++    const now = Date.now();
++    for (let index = tabControls.length - 1; index >= 0; index -= 1) {
++      if (now - tabControls[index]!.requestedAt > TAB_CONTROL_TTL_MS) tabControls.splice(index, 1);
++    }
++    const taken = tabControls.filter((request) => request.action === action);
++    for (const request of taken) {
++      const index = tabControls.indexOf(request);
++      if (index >= 0) tabControls.splice(index, 1);
++    }
++    return [...new Set(taken.map((request) => request.conversationId))];
++  }
++
+   const handleStatus = async (body: Record<string, unknown>, onReconciled?: () => void) => {
+     const after =
+       Number.isSafeInteger(body.after) && Number(body.after) >= 0 ? Number(body.after) : -1;
+@@ -884,6 +932,10 @@ export async function startNativeChatGptBrowserBroker(
+       generation: brokerGeneration,
+       inputs,
+       stopTurns,
++      // Manual thread-tab controls. The extension already reveals a chat on this key; `reloads`
++      // is the force-reload half. Both are consumed on delivery and expire unclaimed.
++      reveals: takeTabControls("reveal"),
++      reloads: takeTabControls("reload"),
+       operations: [...operations.values()].map(extensionSummary),
+     };
+   };
+@@ -1549,6 +1601,12 @@ export async function startNativeChatGptBrowserBroker(
+     sessionAvailability,
+     waitForAuthenticationStatus,
+     waitForAuthentication,
++    controlTab: async ({ providerSessionId, action }) => {
++      const conversationId = conversationForProviderSession(providerSessionId);
++      if (!conversationId) throw new Error("provider_tab_not_open");
++      queueTabControl(conversationId, action);
++      return { conversationId };
++    },
+     close: closeServer,
+   };
+ }
+diff --git a/packages/provider-core/src/server/ProviderAdapter.ts b/packages/provider-core/src/server/ProviderAdapter.ts
+index 77e13b2ce0..e4ec14b740 100644
+--- a/packages/provider-core/src/server/ProviderAdapter.ts
++++ b/packages/provider-core/src/server/ProviderAdapter.ts
+@@ -748,6 +748,13 @@ export interface ProviderAdapterV2SessionRuntime {
+   readonly respondToRuntimeRequest: (
+     input: ProviderAdapterV2RuntimeRequestResponseInput,
+   ) => Effect.Effect<void, ProviderAdapterV2Error>;
++  /**
++   * Brings the provider-owned browser tab for this session to the foreground, or force-reloads
++   * it. Absent means the provider has no browser tab the user can act on.
++   */
++  readonly controlBrowserTab?: (input: {
++    readonly action: "reveal" | "reload";
++  }) => Effect.Effect<{ readonly conversationId: string }, ProviderAdapterV2Error>;
+   readonly readThreadSnapshot: (
+     input: ProviderAdapterV2ReadThreadSnapshotInput,
+   ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;
+-- 
+2.50.1.windows.1
+

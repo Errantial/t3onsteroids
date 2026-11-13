@@ -1,5 +1,7 @@
 # Release status
 
+**In preparation: `1.2.2`** - moves the pinned development baseline to the newest live nightly T3 `v0.1.10-nightly.20261113.4656` (`0517d15c41e95c9d84d8014ae14394ce97bc83f6`) and ports the maintained 8-patch series to it (`handoff/t3-patches/main-2026-11-13-0517d15c/`, applies clean with `git am --3way` on the nightly plus the ChatGPT Browser fork base). No fork build or installer is published yet; see `docs/evidence/t3-nightly-0.1.10.md`.
+
 **Current release: `1.2.1`** - Pinned Labs: the pin overhaul setting moves to Settings -> Labs and pinned threads fold into Working under it (web and mobile), on top of `1.2.0` for T3 Code `0.1.5` (`6d450a42`). No server, MCP tool or database change (migration head 75; 92 tools, 57,907 bytes, same hash as `1.2.0`). Swarm v2 was deferred and is not included. Framework remains on `1.1.9`; no v1.2.1 rollout was performed.
 
 ## `v1.2.1` assets and checks
@@ -164,7 +166,7 @@ Live operation still requires CoS Local control API and **Allow actions** for br
 
 V1 intentionally supports one active bridged turn per stable CoS controller identity. **2–4 concurrent chats are a desired post-v1 feature** and have their own measured qualification gates in `PLAN.md`; they do not block the first release.
 
-The pinned release tuple remains T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`, CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`, provider-extension build `495e3e96504d9b865c18478f7b42915280712f84` with all five required provider features at version 1, ACP SDK `1.9.0`, Node 24 and Windows x64. The development baseline (`0.1.5-nightly.20261029.3877` / `6d450a42`) and the current-T3-HEAD drift result are recorded separately and do not silently widen this tuple.
+The pinned release tuple remains T3 `0.0.46-nightly.20261013.3040` / `ffb4af8d5d4fcfc5e9322295ff846a6d1e7ffbf8`, CoS base `2.1.39` / `87ae9d631f82d8da2f462d910410031ad8f97ac5`, provider-extension build `495e3e96504d9b865c18478f7b42915280712f84` with all five required provider features at version 1, ACP SDK `1.9.0`, Node 24 and Windows x64. The development baseline (`v0.1.10-nightly.20261113.4656` / `0517d15c`; previously `0.1.5-nightly.20261029.3877` / `6d450a42`) and the current-T3-HEAD drift result are recorded separately and do not silently widen this tuple.
 
 For live qualification, the preferred lane while the active CoS installation remains in use is a side-by-side candidate launched from the exact clean extension build with its own isolated user-data/profile directory and isolated bridge state root. The active installation/profile must remain untouched, and candidate/active executable identities plus the extension build id are recorded as provenance before mutating cases.
 

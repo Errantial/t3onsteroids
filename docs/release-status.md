@@ -8,6 +8,7 @@
 - Windows: `T3-Code-0.1.5-v1.2.1.20261113.51ce1bf99345.connect1-x64.exe` (314,422,993 bytes, SHA-256 `653ef27e00df995968d37c7d9d5e9dad3b10aec8fba56a4155091bb39954fc9a`), `.blockmap`, `latest.yml`.
 - Linux: `t3-0.1.5-v1.2.1.20261113.51ce1bf99345.connect1-linux-arm64.tar.gz` (120,951,717 bytes, SHA-256 `4b58cf8614fbf9c9dc2c11b1b04bbbead2e3c4eff12bc42c452d5a1183fe5902`).
 - Source and 5-patch archives: `t3onsteroids-1.2.1-source.zip`, `t3onsteroids-1.2.1-t3-patches.zip`; `SHA256SUMS.txt` covers every asset.
+- Published 2026-11-13T03:41:48Z; `/releases/latest` is `v1.2.1`.
 
 **Previous release: `1.2.0`** - thread visibility across linked environments, the effort validation pass, and per-environment project roots with repository-key placement for T3 Code `0.1.5` (`6d450a42`), on top of `1.1.9`. W3/W4 (fleet execution and thread fleet) are not in this release. Framework remains on `1.1.9`; no v1.2.0 rollout was performed.
 

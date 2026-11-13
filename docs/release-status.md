@@ -1,6 +1,15 @@
 # Release status
 
-**Current release: `1.2.0`** - thread visibility across linked environments, the effort validation pass, and per-environment project roots with repository-key placement for T3 Code `0.1.5` (`6d450a42`), on top of `1.1.9`. W3/W4 (fleet execution and thread fleet) are not in this release. Framework remains on `1.1.9`; no v1.2.0 rollout was performed.
+**Current release: `1.2.1`** - Pinned Labs: the pin overhaul setting moves to Settings -> Labs and pinned threads fold into Working under it (web and mobile), on top of `1.2.0` for T3 Code `0.1.5` (`6d450a42`). No server, MCP tool or database change (migration head 75; 92 tools, 57,907 bytes, same hash as `1.2.0`). Swarm v2 was deferred and is not included. Framework remains on `1.1.9`; no v1.2.1 rollout was performed.
+
+## `v1.2.1` assets and checks
+
+- Build commit `51ce1bf993452ab431f84846cd527c8465cc8561` (fork `release/v1.2.1`); full version `0.1.5-v1.2.1.20261113.51ce1bf99345.connect1`.
+- Windows: `T3-Code-0.1.5-v1.2.1.20261113.51ce1bf99345.connect1-x64.exe` (314,422,993 bytes, SHA-256 `653ef27e00df995968d37c7d9d5e9dad3b10aec8fba56a4155091bb39954fc9a`), `.blockmap`, `latest.yml`.
+- Linux: `t3-0.1.5-v1.2.1.20261113.51ce1bf99345.connect1-linux-arm64.tar.gz` (120,951,717 bytes, SHA-256 `4b58cf8614fbf9c9dc2c11b1b04bbbead2e3c4eff12bc42c452d5a1183fe5902`).
+- Source and 5-patch archives: `t3onsteroids-1.2.1-source.zip`, `t3onsteroids-1.2.1-t3-patches.zip`; `SHA256SUMS.txt` covers every asset.
+
+**Previous release: `1.2.0`** - thread visibility across linked environments, the effort validation pass, and per-environment project roots with repository-key placement for T3 Code `0.1.5` (`6d450a42`), on top of `1.1.9`. W3/W4 (fleet execution and thread fleet) are not in this release. Framework remains on `1.1.9`; no v1.2.0 rollout was performed.
 
 ## `v1.2.0` assets and checks
 
@@ -10,7 +19,7 @@
 - Source and 17-patch archives: `t3onsteroids-1.2.0-source.zip`, `t3onsteroids-1.2.0-t3-patches.zip`; `SHA256SUMS.txt` covers every asset.
 - Published 2026-11-04T18:05:51Z; `/releases/latest` is `v1.2.0`.
 
-**Previous release: `1.1.9`** - the MCP effort level, the ChatGPT Browser packaged-runtime fix and the SSH/Connect origin identity fix on top of `1.1.8` for T3 Code `0.1.5` (`6d450a42`). Agents set one provider-neutral `effort` on `delegate_task`, `create_swarm` members, `create_threads`, `t3_thread_launch` and `t3_thread_send`, validated against the model's effort option; service-hosted servers find the bundled ChatGPT Browser runtime; SSH launches stay off `:3773` and the Connect tunnel checks the origin's environment id. It keeps the `1.1.8` swarm and fleet pipeline fix, the `1.1.7` fleet release updates, the `1.1.6` saved threads, managed instructions and turn context, the `1.1.5` Windows runtime-sync behavior, the `1.1.4` feed/update behavior and the `1.1.1` bridge feature set. The release-qualified support tuple remains `v1.0.0`; `--release-readiness` still reports `t3BaselineQualified:false` and `releaseQualified:false` on the `0.1.5` baseline.
+**Earlier release: `1.1.9`** - the MCP effort level, the ChatGPT Browser packaged-runtime fix and the SSH/Connect origin identity fix on top of `1.1.8` for T3 Code `0.1.5` (`6d450a42`). Agents set one provider-neutral `effort` on `delegate_task`, `create_swarm` members, `create_threads`, `t3_thread_launch` and `t3_thread_send`, validated against the model's effort option; service-hosted servers find the bundled ChatGPT Browser runtime; SSH launches stay off `:3773` and the Connect tunnel checks the origin's environment id. It keeps the `1.1.8` swarm and fleet pipeline fix, the `1.1.7` fleet release updates, the `1.1.6` saved threads, managed instructions and turn context, the `1.1.5` Windows runtime-sync behavior, the `1.1.4` feed/update behavior and the `1.1.1` bridge feature set. The release-qualified support tuple remains `v1.0.0`; `--release-readiness` still reports `t3BaselineQualified:false` and `releaseQualified:false` on the `0.1.5` baseline.
 
 ## `v1.1.9` assets and checks
 

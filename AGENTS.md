@@ -259,15 +259,19 @@ pnpm install
 node scripts/update-release-package-versions.ts 0.1.5-v1.1.6.YYYYMMDD.<sha12>.connect1
 vp run --filter @t3tools/web build
 node apps/server/scripts/cli.ts build
-(cd apps/server && T3CODE_PACK_EXE=1 vp pack)     # dist-exe/bin.mjs
 cargo build --release --manifest-path native/resource-monitor/Cargo.toml
+node apps/server/scripts/cli.ts build-exe        # dist-exe/bin.mjs (bootstrap); its SEA dist-exe/t3 does not run here
+(cd apps/server && T3CODE_PACK_EXE=bundle T3CODE_CLI_ASSET_DIR=<dir> vp pack)   # <dir>/binMain.mjs, the full CLI
+node scripts/build-cli-archive.ts --platform linux --arch arm64 --version <full> \
+  --output-dir <out> --resource-monitor-dir <dir laid out as linux-arm64/t3-resource-monitor>
 
 # assemble t3-<full>-linux-arm64/
 #   t3         launcher: LD_LIBRARY_PATH="$DIR/lib" exec "$DIR/node" "$DIR/t3.mjs" "$@"
 #   node       official Node 26.12.1 arm64 binary
-#   t3.mjs     apps/server/dist-exe/bin.mjs
+#   t3.mjs     dist-exe/bin.mjs with import("./binMain.ts") changed to import("./binMain.mjs")
+#   binMain.mjs  <dir>/binMain.mjs
 #   client/    apps/server/dist/client
-#   node_modules/, lib/, resource-monitor/linux-arm64/, .install-complete
+#   node_modules/, lib/, resource-monitor/linux-arm64/, .install-complete (the full version string)
 # then verify and pack:
 t3-<full>-linux-arm64/t3 --version     # must print the release version
 tar -czf t3-<full>-linux-arm64.tar.gz -C pack t3-<full>-linux-arm64
